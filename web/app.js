@@ -854,9 +854,15 @@ function stopTicker() {
   rafId = 0;
 }
 
+function tracksFingerprint(list) {
+  return (list || []).map((t) => `${t.id}:${t.whisper_aligned ? 1 : 0}`).join("|");
+}
+
 function updateLibraryMeta(data) {
   const previousId = selectedTrack()?.id;
-  tracks = data.tracks || [];
+  const nextTracks = data.tracks || [];
+  const tracksChanged = tracksFingerprint(tracks) !== tracksFingerprint(nextTracks);
+  tracks = nextTracks;
   rootInput.value = data.root || "";
   const pending = data.pending || 0;
   const hidden = data.hidden || 0;
@@ -880,7 +886,10 @@ function updateLibraryMeta(data) {
     libraryMeta.textContent = `${tracks.length} cançons a punt · tria’n una per cantar`;
   }
 
-  const keepPlaying = Boolean(previousId);
+  // Polling only updates the status text unless the playable list changed.
+  // Rebuilding coverflow/grid every 2s made the menu look like it was restarting.
+  if (!tracksChanged) return;
+
   renderSongs(searchEl.value, { play: false });
   if (previousId) {
     const idx = filteredTracks.findIndex((t) => t.id === previousId);
@@ -890,7 +899,7 @@ function updateLibraryMeta(data) {
       layoutGridSelection();
       updateCoverMeta();
     }
-  } else if (!keepPlaying && filteredTracks.length && !viewMenu.classList.contains("hidden")) {
+  } else if (filteredTracks.length && !viewMenu.classList.contains("hidden")) {
     playPreviewForSelection();
   }
 }

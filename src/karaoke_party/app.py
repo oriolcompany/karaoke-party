@@ -52,6 +52,9 @@ _probe_state: dict = {
     "total": 0,
     "found": 0,
 }
+# Track ids already probed this session. Prevents restart loops when LRCLIB
+# errors leave the on-disk cache empty (status still "unknown").
+_probe_attempted: set[str] = set()
 
 
 class SetRootBody(BaseModel):
@@ -68,6 +71,8 @@ def _reload_library(root: Path) -> list[TrackInfo]:
     _music_root = root
     tracks = scan_library(root)
     _tracks = {track.id: track for track in tracks}
+    with _probe_lock:
+        _probe_attempted.clear()
     return tracks
 
 
@@ -213,9 +218,14 @@ def _library_snapshot() -> dict:
             playable.append(item)
         elif status is False:
             hidden += 1
+        elif track.id in _probe_attempted:
+            # Soft-fail this session (network/API error): do not keep it pending.
+            hidden += 1
         else:
             pending += 1
 
+    with _probe_lock:
+        probe = dict(_probe_state)
     return {
         "root": str(_music_root),
         "tracks": playable,
@@ -223,14 +233,13 @@ def _library_snapshot() -> dict:
         "with_lyrics": len(playable),
         "pending": pending,
         "hidden": hidden,
-        "probe": dict(_probe_state),
+        "probe": probe,
     }
 
 
 def _run_lyrics_probe(track_ids: list[str]) -> None:
+    """Probe unknown tracks. Caller must set running/done/total under lock first."""
     lyrics_path = cache_dir(Path.cwd())
-    with _probe_lock:
-        _probe_state.update({"running": True, "done": 0, "total": len(track_ids), "found": 0})
 
     async def _probe_one(track: TrackInfo) -> bool:
         payload = await fetch_lyrics(
@@ -246,12 +255,14 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
         semaphore = asyncio.Semaphore(6)
 
         async def worker(track: TrackInfo) -> None:
-            async with semaphore:
-                try:
+            found = False
+            try:
+                async with semaphore:
                     found = await _probe_one(track)
-                except Exception:  # noqa: BLE001
-                    found = False
+            except Exception:  # noqa: BLE001
+                found = False
             with _probe_lock:
+                _probe_attempted.add(track.id)
                 _probe_state["done"] += 1
                 if found:
                     _probe_state["found"] += 1
@@ -273,23 +284,27 @@ def _ensure_lyrics_probe() -> None:
 
     lyrics_path = cache_dir(Path.cwd())
     aligned_path = aligned_cache_dir(Path.cwd())
-    unknown = [
-        track.id
-        for track in _tracks.values()
-        if lyrics_status_cached(
-            track.artist,
-            track.title,
-            track.duration,
-            lyrics_cache=lyrics_path,
-            aligned_cache=aligned_path,
-        )
-        is None
-    ]
-    if not unknown:
-        return
     with _probe_lock:
         if _probe_state["running"]:
             return
+        unknown = [
+            track.id
+            for track in _tracks.values()
+            if track.id not in _probe_attempted
+            and lyrics_status_cached(
+                track.artist,
+                track.title,
+                track.duration,
+                lyrics_cache=lyrics_path,
+                aligned_cache=aligned_path,
+            )
+            is None
+        ]
+        if not unknown:
+            return
+        # Claim the run under the same lock to avoid duplicate probe threads
+        # resetting progress (done → 0) on every /api/library poll.
+        _probe_state.update({"running": True, "done": 0, "total": len(unknown), "found": 0})
     thread = threading.Thread(target=_run_lyrics_probe, args=(unknown,), daemon=True)
     thread.start()
 
