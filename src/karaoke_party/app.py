@@ -302,8 +302,7 @@ def _ensure_lyrics_probe() -> None:
         ]
         if not unknown:
             return
-        # Claim the run under the same lock to avoid duplicate probe threads
-        # resetting progress (done → 0) on every /api/library poll.
+        # Claim the run under the same lock to avoid duplicate probe threads.
         _probe_state.update({"running": True, "done": 0, "total": len(unknown), "found": 0})
     thread = threading.Thread(target=_run_lyrics_probe, args=(unknown,), daemon=True)
     thread.start()

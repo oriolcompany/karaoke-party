@@ -65,7 +65,6 @@ let lineSwapTimer = null;
 let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
-let libraryPollTimer = 0;
 let stageOutroTimer = 0;
 
 /** @type {string[]} */
@@ -854,25 +853,16 @@ function stopTicker() {
   rafId = 0;
 }
 
-function tracksFingerprint(list) {
-  return (list || []).map((t) => `${t.id}:${t.whisper_aligned ? 1 : 0}`).join("|");
-}
-
 function updateLibraryMeta(data) {
   const previousId = selectedTrack()?.id;
-  const nextTracks = data.tracks || [];
-  const tracksChanged = tracksFingerprint(tracks) !== tracksFingerprint(nextTracks);
-  tracks = nextTracks;
+  tracks = data.tracks || [];
   rootInput.value = data.root || "";
   const pending = data.pending || 0;
   const hidden = data.hidden || 0;
   const total = data.total || 0;
-  const probe = data.probe || {};
 
   if (!data.root) {
     libraryMeta.textContent = "Carrega una carpeta de MP3s etiquetats per començar la nit";
-  } else if (probe.running) {
-    libraryMeta.textContent = `Buscant lletres… ${probe.done || 0}/${probe.total || pending} · ${tracks.length} a punt`;
   } else if (!tracks.length && pending) {
     libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
   } else if (!tracks.length) {
@@ -885,10 +875,6 @@ function updateLibraryMeta(data) {
   } else {
     libraryMeta.textContent = `${tracks.length} cançons a punt · tria’n una per cantar`;
   }
-
-  // Polling only updates the status text unless the playable list changed.
-  // Rebuilding coverflow/grid every 2s made the menu look like it was restarting.
-  if (!tracksChanged) return;
 
   renderSongs(searchEl.value, { play: false });
   if (previousId) {
@@ -904,34 +890,10 @@ function updateLibraryMeta(data) {
   }
 }
 
-function stopLibraryPoll() {
-  if (libraryPollTimer) {
-    clearInterval(libraryPollTimer);
-    libraryPollTimer = 0;
-  }
-}
-
-function startLibraryPoll() {
-  stopLibraryPoll();
-  libraryPollTimer = setInterval(() => {
-    api("/api/library")
-      .then((data) => {
-        updateLibraryMeta(data);
-        const pending = data.pending || 0;
-        const running = data.probe && data.probe.running;
-        if (!pending && !running) stopLibraryPoll();
-      })
-      .catch(() => {});
-  }, 2000);
-}
-
 async function loadLibrary() {
   libraryMeta.textContent = "Carregant la biblioteca…";
   const data = await api("/api/library");
   updateLibraryMeta(data);
-  if ((data.pending || 0) > 0 || (data.probe && data.probe.running)) {
-    startLibraryPoll();
-  }
 }
 
 async function setRoot() {
