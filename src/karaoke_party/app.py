@@ -22,7 +22,9 @@ from .covers import covers_cache_dir, resolve_cover
 from .library import TrackInfo, scan_library
 from .lyrics import (
     PROBE_ERROR_SOURCE,
+    PROBE_TIMEOUT,
     LyricsPayload,
+    LyricsUnavailable,
     cache_key,
     clear_probe_errors,
     fetch_lyrics,
@@ -55,6 +57,7 @@ _probe_state: dict = {
     "done": 0,
     "total": 0,
     "found": 0,
+    "offline": False,
 }
 # Track ids already probed this session. Prevents restart loops when LRCLIB
 # errors leave the on-disk cache empty (status still "unknown").
@@ -65,6 +68,8 @@ _probe_pass_complete: bool = False
 _probe_generation: int = 0
 _probe_thread: threading.Thread | None = None
 PROBE_CONCURRENCY = 3
+# Consecutive network failures after which the pass stops calling LRCLIB.
+OFFLINE_FAILURE_STREAK = 5
 
 
 class SetRootBody(BaseModel):
@@ -82,7 +87,9 @@ def _reset_probe_state() -> None:
         _probe_generation += 1
         _probe_attempted.clear()
         _probe_pass_complete = False
-        _probe_state.update({"running": False, "done": 0, "total": 0, "found": 0})
+        _probe_state.update(
+            {"running": False, "done": 0, "total": 0, "found": 0, "offline": False}
+        )
 
 
 def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[TrackInfo]:
@@ -288,6 +295,8 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
     """Probe unknown tracks. Caller must set running/done/total under lock first."""
     global _probe_pass_complete
     lyrics_path = cache_dir()
+    offline = threading.Event()
+    consecutive_failures = 0
 
     async def _probe_one(track: TrackInfo) -> bool:
         payload = await fetch_lyrics(
@@ -296,24 +305,36 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
             album=track.album,
             duration=track.duration,
             cache_dir=lyrics_path,
+            timeout=PROBE_TIMEOUT,
         )
         return bool(payload.lines)
 
     async def _probe_all() -> None:
+        nonlocal consecutive_failures
         # Keep LRCLIB happy: too many parallel requests get throttled, and a
         # throttled response used to be stored as "this song has no lyrics".
         semaphore = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def worker(track: TrackInfo) -> None:
+            nonlocal consecutive_failures
             found = False
             try:
                 async with semaphore:
                     with _probe_lock:
                         if generation != _probe_generation:
                             return
+                    # LRCLIB is clearly unreachable: stop waiting on every
+                    # remaining song and let the user retry later instead.
+                    if offline.is_set():
+                        raise LyricsUnavailable("LRCLIB unreachable")
                     found = await _probe_one(track)
-            except Exception:  # noqa: BLE001
+                consecutive_failures = 0
+            except Exception as exc:  # noqa: BLE001
                 found = False
+                if isinstance(exc, LyricsUnavailable):
+                    consecutive_failures += 1
+                    if consecutive_failures >= OFFLINE_FAILURE_STREAK:
+                        offline.set()
                 try:
                     _cache_probe_miss(track, lyrics_path)
                 except Exception:  # noqa: BLE001
@@ -322,6 +343,7 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
                 if generation != _probe_generation:
                     return
                 _probe_state["done"] += 1
+                _probe_state["offline"] = offline.is_set()
                 if found:
                     _probe_state["found"] += 1
 
@@ -373,7 +395,15 @@ def _ensure_lyrics_probe() -> None:
         # Claim ids immediately so /api/library cannot start a second pass.
         _probe_attempted.update(unknown)
         generation = _probe_generation
-        _probe_state.update({"running": True, "done": 0, "total": len(unknown), "found": 0})
+        _probe_state.update(
+            {
+                "running": True,
+                "done": 0,
+                "total": len(unknown),
+                "found": 0,
+                "offline": False,
+            }
+        )
         thread = threading.Thread(
             target=_run_lyrics_probe,
             args=(list(unknown), generation),

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from karaoke_party.library import TrackInfo
 from karaoke_party import app as party_app
-from karaoke_party.lyrics import cache_key, load_cached
+from karaoke_party.lyrics import LyricsUnavailable, cache_key, load_cached
 
 
 def _track(track_id: str, title: str = "Song") -> TrackInfo:
@@ -124,6 +124,38 @@ def test_rescan_without_root_change_keeps_probe_progress(tmp_path: Path, monkeyp
 
     party_app._ensure_lyrics_probe()
     assert party_app._probe_state["running"] is False
+
+
+def test_offline_streak_finishes_pass_without_hammering_lrclib(tmp_path: Path, monkeypatch) -> None:
+    lyrics = tmp_path / "lyrics"
+    aligned = tmp_path / "aligned"
+    lyrics.mkdir()
+    aligned.mkdir()
+    monkeypatch.setattr(party_app, "cache_dir", lambda _root=None: lyrics)
+    monkeypatch.setattr(party_app, "aligned_cache_dir", lambda _root=None: aligned)
+    monkeypatch.setattr(party_app, "OFFLINE_FAILURE_STREAK", 2)
+    monkeypatch.setattr(party_app, "PROBE_CONCURRENCY", 1)
+
+    party_app._tracks = {f"t{i}": _track(f"t{i}", f"Song {i}") for i in range(10)}
+    calls = {"n": 0}
+
+    async def always_down(**_kwargs):
+        calls["n"] += 1
+        raise LyricsUnavailable("down")
+
+    track_ids = list(party_app._tracks)
+    party_app._probe_state.update({"running": True, "done": 0, "total": len(track_ids), "found": 0})
+    with patch("karaoke_party.app.fetch_lyrics", new=AsyncMock(side_effect=always_down)):
+        party_app._run_lyrics_probe(track_ids, party_app._probe_generation)
+
+    assert party_app._probe_state["done"] == len(track_ids)
+    assert party_app._probe_state["offline"] is True
+    # Stops calling out after the streak instead of timing out on every song.
+    assert calls["n"] == 2
+
+    snap = party_app._library_snapshot()
+    assert snap["pending"] == 0
+    assert snap["errors"] == len(track_ids)
 
 
 def test_stale_generation_does_not_inflate_done(tmp_path: Path, monkeypatch) -> None:

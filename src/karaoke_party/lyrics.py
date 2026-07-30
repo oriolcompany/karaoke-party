@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -12,10 +13,13 @@ import httpx
 
 LRC_LINE_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\](.*)")
 ENHANCED_WORD_RE = re.compile(r"<(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?>([^<]*)")
-LRCLIB_GET = "https://lrclib.net/api/get"
-LRCLIB_SEARCH = "https://lrclib.net/api/search"
+LRCLIB_BASE = os.environ.get("KARAOKE_LRCLIB_BASE", "https://lrclib.net").rstrip("/")
+LRCLIB_GET = f"{LRCLIB_BASE}/api/get"
+LRCLIB_SEARCH = f"{LRCLIB_BASE}/api/search"
 RETRY_BASE_DELAY = 1.0
 MAX_RETRY_DELAY = 8.0
+DEFAULT_TIMEOUT = 20.0
+PROBE_TIMEOUT = 8.0
 PROBE_ERROR_SOURCE = "probe-error"
 
 
@@ -262,6 +266,9 @@ async def fetch_lyrics(
     album: str = "",
     duration: float | None = None,
     cache_dir: Path | None = None,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    attempts: int = 3,
 ) -> LyricsPayload:
     key = cache_key(artist, title, duration)
     if cache_dir:
@@ -279,8 +286,8 @@ async def fetch_lyrics(
     if duration:
         params["duration"] = int(round(duration))
 
-    async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
-        response = await _get_with_retry(client, LRCLIB_GET, params)
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        response = await _get_with_retry(client, LRCLIB_GET, params, attempts=attempts)
         payload: LyricsPayload | None = None
         if response.status_code == 200:
             payload = _from_lrclib_record(response.json(), "lrclib")
@@ -289,6 +296,7 @@ async def fetch_lyrics(
                 client,
                 LRCLIB_SEARCH,
                 {"q": f"{artist} {title}"},
+                attempts=attempts,
             )
             if search.status_code == 200:
                 results = search.json() or []
