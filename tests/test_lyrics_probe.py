@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -28,6 +29,7 @@ def setup_function() -> None:
         "a": _track("a", "One"),
         "b": _track("b", "Two"),
     }
+    party_app._probe_thread = None
     party_app._reset_probe_state()
 
 
@@ -44,14 +46,15 @@ def test_probe_marks_failed_tracks_so_library_stops_restarting(tmp_path: Path, m
         new=AsyncMock(side_effect=RuntimeError("lrclib down")),
     ):
         party_app._probe_state.update({"running": True, "done": 0, "total": 2, "found": 0})
-        party_app._run_lyrics_probe(["a", "b"])
+        gen = party_app._probe_generation
+        party_app._probe_attempted.update({"a", "b"})
+        party_app._run_lyrics_probe(["a", "b"], gen)
 
     assert party_app._probe_state["running"] is False
     assert party_app._probe_pass_complete is True
     assert party_app._probe_attempted == {"a", "b"}
 
-    # Failures are cached so pending cannot come back after a process restart either.
-    for tid, title in (("a", "One"), ("b", "Two")):
+    for title in ("One", "Two"):
         key = cache_key("Artist", title, 180.0)
         cached = load_cached(lyrics, key)
         assert cached is not None
@@ -62,10 +65,9 @@ def test_probe_marks_failed_tracks_so_library_stops_restarting(tmp_path: Path, m
     assert snap["pending"] == 0
     assert snap["hidden"] == 2
 
-    # Second ensure must be a no-op (pass already complete).
     party_app._ensure_lyrics_probe()
     assert party_app._probe_state["running"] is False
-    assert party_app._probe_state["total"] == 2  # unchanged from the finished pass
+    assert party_app._probe_state["total"] == 2
 
 
 def test_ensure_claims_running_under_lock(tmp_path: Path, monkeypatch) -> None:
@@ -77,12 +79,17 @@ def test_ensure_claims_running_under_lock(tmp_path: Path, monkeypatch) -> None:
     started = []
 
     class FakeThread:
-        def __init__(self, target, args=(), daemon=None):
+        def __init__(self, target, args=(), daemon=None, name=None):
             self.target = target
             self.args = args
+            self._alive = False
 
         def start(self):
+            self._alive = True
             started.append(self.args[0])
+
+        def is_alive(self):
+            return self._alive
 
     monkeypatch.setattr(party_app.threading, "Thread", FakeThread)
 
@@ -91,8 +98,9 @@ def test_ensure_claims_running_under_lock(tmp_path: Path, monkeypatch) -> None:
     assert party_app._probe_state["total"] == 2
     assert len(started) == 1
     assert set(started[0]) == {"a", "b"}
+    # Claimed up-front so pending cannot retrigger another pass.
+    assert party_app._probe_attempted == {"a", "b"}
 
-    # Concurrent ensure while "running" must not spawn another probe.
     party_app._ensure_lyrics_probe()
     assert len(started) == 1
 
@@ -109,7 +117,6 @@ def test_rescan_without_root_change_keeps_probe_progress(tmp_path: Path, monkeyp
         party_app._probe_pass_complete = True
         party_app._probe_state.update({"running": False, "done": 2, "total": 2, "found": 0})
 
-    # Cover/audio miss path: rescan must not wipe probe state.
     party_app._reload_library(root, reset_probe=False)
     assert party_app._probe_pass_complete is True
     assert party_app._probe_attempted == {"a", "b"}
@@ -117,3 +124,26 @@ def test_rescan_without_root_change_keeps_probe_progress(tmp_path: Path, monkeyp
 
     party_app._ensure_lyrics_probe()
     assert party_app._probe_state["running"] is False
+
+
+def test_stale_generation_does_not_inflate_done(tmp_path: Path, monkeypatch) -> None:
+    lyrics = tmp_path / "lyrics"
+    aligned = tmp_path / "aligned"
+    lyrics.mkdir()
+    aligned.mkdir()
+    monkeypatch.setattr(party_app, "cache_dir", lambda _root=None: lyrics)
+    monkeypatch.setattr(party_app, "aligned_cache_dir", lambda _root=None: aligned)
+
+    async def slow_fetch(**_kwargs):
+        time.sleep(0.05)
+        raise RuntimeError("boom")
+
+    party_app._probe_state.update({"running": True, "done": 0, "total": 2, "found": 0})
+    stale_gen = party_app._probe_generation
+    party_app._reset_probe_state()  # invalidates stale_gen
+
+    with patch("karaoke_party.app.fetch_lyrics", new=AsyncMock(side_effect=slow_fetch)):
+        party_app._run_lyrics_probe(["a", "b"], stale_gen)
+
+    assert party_app._probe_state["done"] == 0
+    assert party_app._probe_pass_complete is False

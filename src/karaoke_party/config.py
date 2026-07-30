@@ -11,12 +11,16 @@ def default_music_root() -> Path | None:
     env = os.environ.get("KARAOKE_MUSIC_ROOT", "").strip()
     if env:
         return Path(env)
-    candidate = Path(
-        r"C:\Users\orico\Documents\GitHub\local-youtube-downloader"
-        r"\dist\LocalYoutubeDownloader\downloads"
-    )
-    if candidate.is_dir():
-        return candidate
+    candidates = [
+        Path(r"C:\Users\orico\Documents\Songs"),
+        Path(r"C:\Users\orico\Documents\GitHub\local-youtube-downloader")
+        / "dist"
+        / "LocalYoutubeDownloader"
+        / "downloads",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
     return None
 
 

@@ -899,8 +899,8 @@ async function loadLibrary() {
   let data = await api("/api/library");
   // Wait for the single in-flight probe pass (no perpetual 2s refresh after it ends).
   while (data.probe && data.probe.running) {
-    const done = data.probe.done || 0;
     const total = data.probe.total || data.pending || 0;
+    const done = Math.min(data.probe.done || 0, total || 0);
     libraryMeta.textContent = `Buscant lletres… ${done}/${total} · ${(data.tracks || []).length} a punt`;
     await sleep(500);
     data = await api("/api/library");

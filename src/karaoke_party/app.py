@@ -58,6 +58,9 @@ _probe_state: dict = {
 _probe_attempted: set[str] = set()
 # After one full probe pass for the current root, do not auto-restart.
 _probe_pass_complete: bool = False
+# Bumped to invalidate in-flight workers when the probe is reset/replaced.
+_probe_generation: int = 0
+_probe_thread: threading.Thread | None = None
 
 
 class SetRootBody(BaseModel):
@@ -70,8 +73,9 @@ class AlignBody(BaseModel):
 
 
 def _reset_probe_state() -> None:
-    global _probe_pass_complete
+    global _probe_pass_complete, _probe_generation
     with _probe_lock:
+        _probe_generation += 1
         _probe_attempted.clear()
         _probe_pass_complete = False
         _probe_state.update({"running": False, "done": 0, "total": 0, "found": 0})
@@ -263,7 +267,7 @@ def _cache_probe_miss(track: TrackInfo, lyrics_path: Path) -> None:
     )
 
 
-def _run_lyrics_probe(track_ids: list[str]) -> None:
+def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
     """Probe unknown tracks. Caller must set running/done/total under lock first."""
     global _probe_pass_complete
     lyrics_path = cache_dir(Path.cwd())
@@ -285,6 +289,9 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
             found = False
             try:
                 async with semaphore:
+                    with _probe_lock:
+                        if generation != _probe_generation:
+                            return
                     found = await _probe_one(track)
             except Exception:  # noqa: BLE001
                 found = False
@@ -293,7 +300,8 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             with _probe_lock:
-                _probe_attempted.add(track.id)
+                if generation != _probe_generation:
+                    return
                 _probe_state["done"] += 1
                 if found:
                     _probe_state["found"] += 1
@@ -304,12 +312,13 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
         asyncio.run(_probe_all())
     finally:
         with _probe_lock:
-            _probe_state["running"] = False
-            _probe_pass_complete = True
+            if generation == _probe_generation:
+                _probe_state["running"] = False
+                _probe_pass_complete = True
 
 
 def _ensure_lyrics_probe() -> None:
-    global _probe_pass_complete
+    global _probe_pass_complete, _probe_thread
     if _music_root is None:
         return
     if not _tracks:
@@ -319,6 +328,9 @@ def _ensure_lyrics_probe() -> None:
     aligned_path = aligned_cache_dir(Path.cwd())
     with _probe_lock:
         if _probe_state["running"]:
+            return
+        # A previous generation may still be winding down after invalidation.
+        if _probe_thread is not None and _probe_thread.is_alive():
             return
         # One pass per root: finishing must not restart from 0/N.
         if _probe_pass_complete:
@@ -339,9 +351,17 @@ def _ensure_lyrics_probe() -> None:
         if not unknown:
             _probe_pass_complete = True
             return
-        # Claim the run under the same lock to avoid duplicate probe threads.
+        # Claim ids immediately so /api/library cannot start a second pass.
+        _probe_attempted.update(unknown)
+        generation = _probe_generation
         _probe_state.update({"running": True, "done": 0, "total": len(unknown), "found": 0})
-    thread = threading.Thread(target=_run_lyrics_probe, args=(unknown,), daemon=True)
+        thread = threading.Thread(
+            target=_run_lyrics_probe,
+            args=(list(unknown), generation),
+            daemon=True,
+            name="lyrics-probe",
+        )
+        _probe_thread = thread
     thread.start()
 
 
@@ -367,7 +387,9 @@ def set_root(body: SetRootBody) -> dict:
     root = Path(body.path)
     if not root.is_dir():
         raise HTTPException(status_code=400, detail="La carpeta no existeix")
-    tracks = _reload_library(root, reset_probe=True)
+    # Only reset the probe when the folder actually changes (same path must not
+    # kill an in-flight pass and start another from 0/N).
+    tracks = _reload_library(root)
     _ensure_lyrics_probe()
     return {"root": str(root), "tracks": len(tracks)}
 
