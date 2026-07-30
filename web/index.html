@@ -30,34 +30,51 @@
       <div class="menu-toolbar">
         <div class="toolbar-row">
           <input id="search" type="search" placeholder="Cerca cançons, artistes…" />
-          <div class="view-toggle" role="group" aria-label="Mode de vista">
+          <div class="toolbar-toggles">
             <button
-              id="modeCover"
-              class="mode-btn is-active"
+              id="syncStatusBtn"
+              class="mode-btn sync-status-btn"
               type="button"
-              aria-label="Vista carrusel"
-              title="Carrusel"
+              aria-pressed="false"
+              aria-label="Mostrar estat d’alineació Whisper"
+              title="Mostrar sincronització Whisper"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="8" y="5" width="8" height="14" rx="1.5" fill="currentColor" />
-                <rect x="2" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
-                <rect x="17" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
+                <path
+                  fill="currentColor"
+                  d="M4 14h2v4H4zm3.5-4h2v8h-2zm3.5-5h2v13h-2zm3.5 3h2v10h-2zm3.5 2h2v8h-2z"
+                />
               </svg>
             </button>
-            <button
-              id="modeGrid"
-              class="mode-btn"
-              type="button"
-              aria-label="Vista graella"
-              title="Graella"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
-                <rect x="14" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
-                <rect x="3" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
-                <rect x="14" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
-              </svg>
-            </button>
+            <div class="view-toggle" role="group" aria-label="Mode de vista">
+              <button
+                id="modeCover"
+                class="mode-btn is-active"
+                type="button"
+                aria-label="Vista carrusel"
+                title="Carrusel"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="8" y="5" width="8" height="14" rx="1.5" fill="currentColor" />
+                  <rect x="2" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
+                  <rect x="17" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
+                </svg>
+              </button>
+              <button
+                id="modeGrid"
+                class="mode-btn"
+                type="button"
+                aria-label="Vista graella"
+                title="Graella"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
+                  <rect x="14" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
+                  <rect x="3" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
+                  <rect x="14" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div class="root-bar">
@@ -86,6 +103,7 @@
         </div>
         <div class="cover-actions">
           <button id="singBtn" class="sing-btn" type="button">Cantar</button>
+          <p id="syncQueueMeta" class="sync-queue-meta" hidden></p>
         </div>
       </div>
     </section>

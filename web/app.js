@@ -26,16 +26,29 @@ const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
 const modeCoverBtn = document.getElementById("modeCover");
 const modeGridBtn = document.getElementById("modeGrid");
+const syncStatusBtn = document.getElementById("syncStatusBtn");
+const syncQueueMeta = document.getElementById("syncQueueMeta");
 
 const GENERIC_COVER = "/album-generic.png";
 const COVER_VISIBLE = 4;
 const VIEW_MODE_KEY = "karaoke-browse-mode";
+const SHOW_ALIGN_KEY = "karaoke-show-align";
+
+const ICON_SYNCED =
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 5.4 12.8l1.4-1.4 2.4 2.4 7-7 1.4 1.4z"/></svg>`;
+const ICON_CLOCK =
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16zm0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12zm-.8 2.5h1.6v4.2l3.2 1.9-.8 1.3-4-2.4V8.5z"/></svg>`;
+const ICON_QUEUE =
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 6h16v2H4zm0 5h16v2H4zm0 5h10v2H4z"/></svg>`;
+const ICON_RUNNING =
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 14h2v4H4zm3.5-4h2v8h-2zm3.5-5h2v13h-2zm3.5 3h2v10h-2zm3.5 2h2v8h-2z"/></svg>`;
 
 let tracks = [];
 let filteredTracks = [];
 let selectedIndex = 0;
 let previewToken = 0;
 let browseMode = localStorage.getItem(VIEW_MODE_KEY) === "grid" ? "grid" : "cover";
+let showAlignStatus = localStorage.getItem(SHOW_ALIGN_KEY) === "1";
 let currentId = null;
 let lyricLines = [];
 let activeLineIndex = -1;
@@ -45,6 +58,13 @@ let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
 let libraryPollTimer = 0;
+
+/** @type {string[]} */
+const syncQueue = [];
+const syncQueuedIds = new Set();
+let syncActiveId = null;
+let syncRunning = false;
+let syncLastError = "";
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -116,13 +136,13 @@ function updateCoverMeta() {
     coverArtist.textContent = "";
     coverTitle.textContent = "";
     coverIndex.textContent = "";
-    singBtn.disabled = true;
+    updatePrimaryAction();
     return;
   }
   coverArtist.textContent = track.artist || "Artista desconegut";
   coverTitle.textContent = track.title || track.relpath;
   coverIndex.textContent = `${selectedIndex + 1}/${filteredTracks.length}`;
-  singBtn.disabled = false;
+  updatePrimaryAction();
 }
 
 function applyBrowseMode() {
@@ -133,6 +153,7 @@ function applyBrowseMode() {
   modeGridBtn.classList.toggle("is-active", browseMode === "grid");
   coverPrev.hidden = browseMode !== "cover";
   coverNext.hidden = browseMode !== "cover";
+  applyAlignStatusMode();
 }
 
 function setBrowseMode(mode, { rerender = true } = {}) {
@@ -153,6 +174,225 @@ function coverImageFor(track) {
     img.src = GENERIC_COVER;
   };
   return img;
+}
+
+function alignBadgeFor(track) {
+  const badge = document.createElement("span");
+  badge.dataset.trackId = track.id;
+  paintAlignBadge(badge, track);
+  return badge;
+}
+
+function coverMediaFor(track) {
+  const media = document.createElement("span");
+  media.className = "cover-media";
+  media.append(coverImageFor(track), alignBadgeFor(track));
+  return media;
+}
+
+function syncStateFor(track) {
+  if (!track) return "unsynced";
+  if (track.whisper_aligned) return "synced";
+  if (syncActiveId === track.id) return "running";
+  if (syncQueuedIds.has(track.id)) return "queued";
+  return "unsynced";
+}
+
+function paintAlignBadge(badge, track) {
+  const state = syncStateFor(track);
+  badge.className = `align-badge is-${state}`;
+  if (state === "synced") {
+    badge.title = "Lletra alineada amb Whisper";
+    badge.innerHTML = ICON_SYNCED;
+  } else if (state === "running") {
+    badge.title = "Sincronitzant ara…";
+    badge.innerHTML = ICON_RUNNING;
+  } else if (state === "queued") {
+    badge.title = "A la cua de sincronització";
+    badge.innerHTML = ICON_QUEUE;
+  } else {
+    badge.title = "Sense alineació Whisper";
+    badge.innerHTML = ICON_CLOCK;
+  }
+  badge.setAttribute("aria-label", badge.title);
+}
+
+function refreshAlignBadges() {
+  document.querySelectorAll(".align-badge[data-track-id]").forEach((badge) => {
+    const track = tracks.find((t) => t.id === badge.dataset.trackId);
+    if (track) paintAlignBadge(badge, track);
+  });
+}
+
+function markTrackAligned(trackId) {
+  const track = tracks.find((t) => t.id === trackId);
+  if (track) track.whisper_aligned = true;
+  refreshAlignBadges();
+  updatePrimaryAction();
+}
+
+function trackLabel(track) {
+  if (!track) return "";
+  return `${track.artist || "Artista"} — ${track.title || track.relpath}`;
+}
+
+function updateSyncQueueMeta() {
+  if (!showAlignStatus) {
+    syncQueueMeta.hidden = true;
+    syncQueueMeta.textContent = "";
+    return;
+  }
+  const pending = syncQueue.length + (syncActiveId ? 1 : 0);
+  if (!pending && !syncLastError) {
+    syncQueueMeta.hidden = true;
+    syncQueueMeta.textContent = "";
+    return;
+  }
+  syncQueueMeta.hidden = false;
+  if (syncActiveId) {
+    const active = tracks.find((t) => t.id === syncActiveId);
+    const rest = syncQueue.length;
+    syncQueueMeta.textContent = rest
+      ? `Sincronitzant: ${trackLabel(active)} · ${rest} més a la cua`
+      : `Sincronitzant: ${trackLabel(active)}`;
+    return;
+  }
+  if (syncLastError) {
+    syncQueueMeta.textContent = syncLastError;
+  }
+}
+
+function updatePrimaryAction() {
+  const track = selectedTrack();
+  singBtn.classList.toggle("is-sync-mode", showAlignStatus);
+  if (!track) {
+    singBtn.disabled = true;
+    singBtn.textContent = showAlignStatus ? "Sincronitzar" : "Cantar";
+    updateSyncQueueMeta();
+    return;
+  }
+  if (!showAlignStatus) {
+    singBtn.disabled = false;
+    singBtn.textContent = "Cantar";
+    updateSyncQueueMeta();
+    return;
+  }
+  const state = syncStateFor(track);
+  if (state === "synced") {
+    singBtn.disabled = true;
+    singBtn.textContent = "Ja sincronitzada";
+  } else if (state === "running") {
+    singBtn.disabled = true;
+    singBtn.textContent = "Sincronitzant…";
+  } else if (state === "queued") {
+    singBtn.disabled = true;
+    singBtn.textContent = "A la cua";
+  } else {
+    singBtn.disabled = false;
+    singBtn.textContent = "Sincronitzar";
+  }
+  updateSyncQueueMeta();
+}
+
+function applyAlignStatusMode() {
+  browsePanel.dataset.showAlign = showAlignStatus ? "1" : "0";
+  syncStatusBtn.classList.toggle("is-active", showAlignStatus);
+  syncStatusBtn.setAttribute("aria-pressed", showAlignStatus ? "true" : "false");
+  syncStatusBtn.title = showAlignStatus
+    ? "Amagar sincronització Whisper"
+    : "Mostrar sincronització Whisper";
+  updatePrimaryAction();
+}
+
+function setShowAlignStatus(enabled) {
+  showAlignStatus = Boolean(enabled);
+  localStorage.setItem(SHOW_ALIGN_KEY, showAlignStatus ? "1" : "0");
+  applyAlignStatusMode();
+}
+
+function activateSelectedTrack() {
+  const track = selectedTrack();
+  if (!track) return;
+  if (showAlignStatus) {
+    enqueueSync(track);
+    return;
+  }
+  openSong(track.id);
+}
+
+function enqueueSync(track) {
+  if (!track || track.whisper_aligned) {
+    updatePrimaryAction();
+    return;
+  }
+  if (syncActiveId === track.id || syncQueuedIds.has(track.id)) {
+    updatePrimaryAction();
+    return;
+  }
+  syncLastError = "";
+  syncQueue.push(track.id);
+  syncQueuedIds.add(track.id);
+  refreshAlignBadges();
+  updatePrimaryAction();
+  processSyncQueue();
+}
+
+async function waitAlignJob(jobId) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const job = await api(`/api/align/${encodeURIComponent(jobId)}`);
+    if (job.status === "done") return job;
+    if (job.status === "error") {
+      throw new Error(job.error || "Alineació fallida");
+    }
+  }
+}
+
+async function runQueuedAlign(trackId) {
+  const job = await api("/api/align", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track_id: trackId, language: "ca" }),
+  });
+  if (job.status === "done") return job;
+  if (job.status === "unavailable") {
+    throw new Error(job.error || "Alineació no disponible");
+  }
+  if (job.status === "running" && job.job_id) {
+    return waitAlignJob(job.job_id);
+  }
+  throw new Error(job.error || "L’alineació no s’ha iniciat");
+}
+
+async function processSyncQueue() {
+  if (syncRunning) return;
+  syncRunning = true;
+  while (syncQueue.length) {
+    const trackId = syncQueue.shift();
+    syncQueuedIds.delete(trackId);
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track || track.whisper_aligned) {
+      refreshAlignBadges();
+      updatePrimaryAction();
+      continue;
+    }
+    syncActiveId = trackId;
+    syncLastError = "";
+    refreshAlignBadges();
+    updatePrimaryAction();
+    try {
+      await runQueuedAlign(trackId);
+      markTrackAligned(trackId);
+    } catch (err) {
+      syncLastError = err.message || "Error de sincronització";
+    } finally {
+      syncActiveId = null;
+      refreshAlignBadges();
+      updatePrimaryAction();
+    }
+  }
+  syncRunning = false;
+  updatePrimaryAction();
 }
 
 function layoutCovers() {
@@ -218,10 +458,10 @@ function renderCoverflowItems() {
     btn.className = "cover-item";
     btn.dataset.index = String(index);
     btn.setAttribute("aria-label", `${track.artist || "Artista"} — ${track.title || track.relpath}`);
-    btn.appendChild(coverImageFor(track));
+    btn.appendChild(coverMediaFor(track));
     btn.addEventListener("click", () => {
       if (index === selectedIndex) {
-        openSong(track.id);
+        activateSelectedTrack();
         return;
       }
       setSelectedIndex(index);
@@ -238,7 +478,7 @@ function renderGridItems() {
     btn.className = "grid-card";
     btn.dataset.index = String(index);
     btn.setAttribute("aria-label", `${track.artist || "Artista"} — ${track.title || track.relpath}`);
-    btn.appendChild(coverImageFor(track));
+    btn.appendChild(coverMediaFor(track));
     const artist = document.createElement("p");
     artist.className = "grid-artist";
     artist.textContent = track.artist || "Artista desconegut";
@@ -248,7 +488,7 @@ function renderGridItems() {
     btn.append(artist, title);
     btn.addEventListener("click", () => {
       if (index === selectedIndex) {
-        openSong(track.id);
+        activateSelectedTrack();
         return;
       }
       setSelectedIndex(index);
@@ -298,6 +538,7 @@ function renderSongs(filter = "", options = { play: true }) {
 function applyAlignedLyrics(payload) {
   renderLyrics(payload);
   lyricsStatus.textContent = `Alineat per paraules · ${payload.source || "whisper-align"}`;
+  if (currentId) markTrackAligned(currentId);
 }
 
 async function pollAlignJob(jobId, trackId, token) {
@@ -619,6 +860,7 @@ async function openSong(trackId) {
       lyricsStatus.textContent = "No hi ha lletra a LRCLIB";
     } else if (payload.aligned) {
       lyricsStatus.textContent = `Alineat per paraules · ${payload.source}`;
+      markTrackAligned(trackId);
     } else if (payload.synced) {
       lyricsStatus.textContent = `Mode karaoke · ${payload.source}`;
       startAlignment(trackId);
@@ -649,9 +891,9 @@ coverPrev.addEventListener("click", () => setSelectedIndex(selectedIndex - 1));
 coverNext.addEventListener("click", () => setSelectedIndex(selectedIndex + 1));
 modeCoverBtn.addEventListener("click", () => setBrowseMode("cover"));
 modeGridBtn.addEventListener("click", () => setBrowseMode("grid"));
+syncStatusBtn.addEventListener("click", () => setShowAlignStatus(!showAlignStatus));
 singBtn.addEventListener("click", () => {
-  const track = selectedTrack();
-  if (track) openSong(track.id);
+  activateSelectedTrack();
 });
 coverTrack.addEventListener(
   "wheel",
@@ -702,8 +944,7 @@ window.addEventListener(
 
     if (key === "Enter") {
       event.preventDefault();
-      const track = selectedTrack();
-      if (track) openSong(track.id);
+      activateSelectedTrack();
     }
   },
   true

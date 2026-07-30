@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import threading
 import uuid
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 
@@ -13,9 +15,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .covers import covers_cache_dir, resolve_cover
 from .align import align_lyrics, alignment_available
 from .config import DEFAULT_PORT, aligned_cache_dir, cache_dir, default_music_root
+from .covers import covers_cache_dir, resolve_cover
 from .library import TrackInfo, scan_library
 from .lyrics import (
     LyricsPayload,
@@ -26,7 +28,14 @@ from .lyrics import (
     save_aligned_cached,
 )
 
-WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+
+def _project_root() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parents[2]
+
+
+WEB_DIR = _project_root() / "web"
 
 app = FastAPI(title="Karaoke Party")
 _music_root: Path | None = default_music_root()
@@ -134,7 +143,7 @@ def _library_snapshot() -> dict:
 
     lyrics_path = cache_dir(Path.cwd())
     aligned_path = aligned_cache_dir(Path.cwd())
-    playable: list[TrackInfo] = []
+    playable: list[dict] = []
     pending = 0
     hidden = 0
     for track in _tracks.values():
@@ -146,7 +155,10 @@ def _library_snapshot() -> dict:
             aligned_cache=aligned_path,
         )
         if status is True:
-            playable.append(track)
+            item = asdict(track)
+            key = cache_key(track.artist, track.title, track.duration)
+            item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
+            playable.append(item)
         elif status is False:
             hidden += 1
         else:
@@ -154,7 +166,7 @@ def _library_snapshot() -> dict:
 
     return {
         "root": str(_music_root),
-        "tracks": [asdict(track) for track in playable],
+        "tracks": playable,
         "total": len(_tracks),
         "with_lyrics": len(playable),
         "pending": pending,
@@ -351,12 +363,23 @@ def main() -> None:
     parser.add_argument("--music", type=Path, help="Music library folder")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the app in the default browser",
+    )
     args = parser.parse_args()
     if args.music:
         _reload_library(args.music)
     elif _music_root is not None:
         _reload_library(_music_root)
-    uvicorn.run("karaoke_party.app:app", host=args.host, port=args.port, reload=False)
+
+    url = f"http://{args.host}:{args.port}"
+    if args.open:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+
+    # String import breaks under PyInstaller; pass the app object instead.
+    uvicorn.run(app, host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":
