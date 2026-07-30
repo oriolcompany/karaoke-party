@@ -66,6 +66,7 @@ let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
 let libraryPollTimer = 0;
+let stageOutroTimer = 0;
 
 /** @type {string[]} */
 const syncQueue = [];
@@ -73,6 +74,7 @@ const syncQueuedIds = new Set();
 let syncActiveId = null;
 let syncRunning = false;
 let syncLastError = "";
+let syncProgress = 0;
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -100,7 +102,16 @@ function stopAlignPoll() {
   alignToken += 1;
 }
 
+function clearStageOutro() {
+  if (stageOutroTimer) {
+    clearTimeout(stageOutroTimer);
+    stageOutroTimer = 0;
+  }
+  viewStage.classList.remove("is-outro");
+}
+
 function showMenu() {
+  clearStageOutro();
   viewMenu.classList.remove("hidden");
   viewStage.classList.add("hidden");
   document.body.classList.remove("mode-stage");
@@ -111,6 +122,20 @@ function showMenu() {
   currentId = null;
   updatePlayButton();
   renderSongs(searchEl.value);
+}
+
+function beginStageOutro() {
+  clearStageOutro();
+  viewStage.classList.remove("is-live");
+  viewStage.classList.add("is-outro");
+  stopTicker();
+  updatePlayButton();
+  const trackId = currentId;
+  stageOutroTimer = setTimeout(() => {
+    stageOutroTimer = 0;
+    if (currentId !== trackId) return;
+    showMenu();
+  }, 500);
 }
 
 function stopPreview() {
@@ -269,9 +294,11 @@ function updateSyncQueueMeta() {
   if (syncActiveId) {
     const active = tracks.find((t) => t.id === syncActiveId);
     const rest = syncQueue.length;
+    const pct =
+      syncProgress > 0 ? ` · ${Math.round(syncProgress * 100)}%` : "";
     syncQueueMeta.textContent = rest
-      ? `Sincronitzant: ${trackLabel(active)} · ${rest} més a la cua`
-      : `Sincronitzant: ${trackLabel(active)}`;
+      ? `Sincronitzant: ${trackLabel(active)}${pct} · ${rest} més a la cua`
+      : `Sincronitzant: ${trackLabel(active)}${pct}`;
     return;
   }
   if (syncLastError) {
@@ -377,13 +404,23 @@ function enqueueSync(track) {
 }
 
 async function waitAlignJob(jobId) {
+  const started = Date.now();
+  const maxMs = 30 * 60 * 1000;
   for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    if (Date.now() - started > maxMs) {
+      throw new Error("La sincronització ha trigat massa i s’ha cancel·lat l’espera");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
     const job = await api(`/api/align/${encodeURIComponent(jobId)}`);
+    if (typeof job.progress === "number") {
+      syncProgress = job.progress;
+      updateSyncQueueMeta();
+    }
     if (job.status === "done") return job;
     if (job.status === "error") {
       throw new Error(job.error || "Alineació fallida");
     }
+    // queued | running — keep waiting
   }
 }
 
@@ -397,7 +434,7 @@ async function runQueuedAlign(trackId) {
   if (job.status === "unavailable") {
     throw new Error(job.error || "Alineació no disponible");
   }
-  if (job.status === "running" && job.job_id) {
+  if ((job.status === "running" || job.status === "queued") && job.job_id) {
     return waitAlignJob(job.job_id);
   }
   throw new Error(job.error || "L’alineació no s’ha iniciat");
@@ -417,6 +454,7 @@ async function processSyncQueue() {
     }
     syncActiveId = trackId;
     syncLastError = "";
+    syncProgress = 0;
     refreshAlignBadges();
     updatePrimaryAction();
     try {
@@ -426,6 +464,7 @@ async function processSyncQueue() {
       syncLastError = err.message || "Error de sincronització";
     } finally {
       syncActiveId = null;
+      syncProgress = 0;
       refreshAlignBadges();
       updatePrimaryAction();
     }
@@ -599,6 +638,14 @@ async function pollAlignJob(jobId, trackId, token) {
     if (job.status === "error") {
       stopAlignPoll();
       lyricsStatus.textContent = `Alineació fallida · ${job.error || "error desconegut"}`;
+      return;
+    }
+    if (typeof job.progress === "number" && job.progress > 0) {
+      const pct = Math.round(job.progress * 100);
+      const phase = job.status === "queued" ? "A la cua" : "Alineant";
+      lyricsStatus.textContent = `${phase} la lletra amb l’àudio… ${pct}%`;
+    } else if (job.status === "queued") {
+      lyricsStatus.textContent = "Alineació a la cua del servidor…";
     }
   } catch (err) {
     if (token !== alignToken || currentId !== trackId) return;
@@ -626,10 +673,10 @@ async function startAlignment(trackId) {
       lyricsStatus.textContent = job.error || "Alineació no disponible";
       return;
     }
-    if (job.status === "running" && job.job_id) {
+    if ((job.status === "running" || job.status === "queued") && job.job_id) {
       alignPollTimer = setInterval(() => {
         pollAlignJob(job.job_id, trackId, token);
-      }, 1500);
+      }, 1200);
       return;
     }
     lyricsStatus.textContent = job.error || "L’alineació no s’ha iniciat";
@@ -640,6 +687,7 @@ async function startAlignment(trackId) {
 }
 
 function showStage() {
+  clearStageOutro();
   stopPreview();
   viewMenu.classList.add("hidden");
   viewStage.classList.remove("hidden");
@@ -1019,8 +1067,7 @@ player.addEventListener("pause", () => {
 });
 player.addEventListener("ended", () => {
   syncWordFills(Number.POSITIVE_INFINITY);
-  stopTicker();
-  updatePlayButton();
+  beginStageOutro();
 });
 
 loadLibrary().catch((err) => {

@@ -680,6 +680,15 @@ button:hover {
   isolation: isolate;
 }
 
+.view-stage.is-outro .back-btn,
+.view-stage.is-outro .stage-meta,
+.view-stage.is-outro .karaoke-board,
+.view-stage.is-outro .stage-dock {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
 .stage-fx {
   position: absolute;
   inset: 0;

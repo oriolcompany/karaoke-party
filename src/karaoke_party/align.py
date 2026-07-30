@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -72,25 +73,39 @@ def transcribe_words(
     language: str = "ca",
     model_size: str = DEFAULT_MODEL_SIZE,
     initial_prompt: str | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> list[AsrWord]:
     model = _get_model(model_size)
     # VAD often deletes sung vocals as "non-speech"; keep it off for karaoke.
-    segments, _info = model.transcribe(
+    # beam_size=1 keeps CPU sync usable for background queue jobs.
+    segments, info = model.transcribe(
         str(audio_path),
         language=language,
         word_timestamps=True,
         vad_filter=False,
-        beam_size=5,
+        beam_size=1,
+        best_of=1,
         condition_on_previous_text=False,
         initial_prompt=initial_prompt,
     )
+    duration = float(getattr(info, "duration", 0) or 0)
     words: list[AsrWord] = []
     for segment in segments:
+        if on_progress is not None and duration > 0:
+            try:
+                on_progress(min(0.99, float(segment.end) / duration))
+            except Exception:  # noqa: BLE001 — progress must not abort ASR
+                pass
         for word in segment.words or []:
             text = (word.word or "").strip()
             if not text:
                 continue
             words.append(AsrWord(text=text, start=float(word.start), end=float(word.end)))
+    if on_progress is not None:
+        try:
+            on_progress(1.0)
+        except Exception:  # noqa: BLE001
+            pass
     return words
 
 
@@ -261,6 +276,7 @@ def align_lyrics(
     *,
     language: str = "ca",
     model_size: str = DEFAULT_MODEL_SIZE,
+    on_progress: Callable[[float], None] | None = None,
 ) -> list[LyricLine]:
     """Align known lyric lines to the audio with faster-whisper word timestamps."""
     if not lines:
@@ -274,6 +290,7 @@ def align_lyrics(
         language=language,
         model_size=model_size,
         initial_prompt=(prompt[:900] or None),
+        on_progress=on_progress,
     )
     if not asr_words:
         return [

@@ -42,6 +42,9 @@ _music_root: Path | None = default_music_root()
 _tracks: dict[str, TrackInfo] = {}
 _align_jobs: dict[str, dict] = {}
 _align_lock = threading.Lock()
+_align_queue: list[tuple[str, TrackInfo, str]] = []
+_align_worker_started = False
+_align_wake = threading.Event()
 _probe_lock = threading.Lock()
 _probe_state: dict = {
     "running": False,
@@ -102,9 +105,17 @@ def _align_done_payload(payload: LyricsPayload) -> dict:
     }
 
 
+def _set_align_job(job_id: str, **fields) -> None:
+    with _align_lock:
+        current = dict(_align_jobs.get(job_id) or {})
+        current.update(fields)
+        _align_jobs[job_id] = current
+
+
 def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
     key = cache_key(track.artist, track.title, track.duration)
     try:
+        _set_align_job(job_id, status="running", progress=0.0, phase="lyrics")
         payload = asyncio.run(
             fetch_lyrics(
                 artist=track.artist,
@@ -115,11 +126,19 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             )
         )
         if not payload.lines:
-            with _align_lock:
-                _align_jobs[job_id] = {"status": "error", "error": "No hi ha lletra per alinear"}
+            _set_align_job(job_id, status="error", error="No hi ha lletra per alinear", progress=0.0)
             return
 
-        aligned_lines = align_lyrics(Path(track.path), payload.lines, language=language)
+        def on_progress(ratio: float) -> None:
+            _set_align_job(job_id, status="running", progress=round(float(ratio), 3), phase="whisper")
+
+        _set_align_job(job_id, status="running", progress=0.0, phase="whisper")
+        aligned_lines = align_lyrics(
+            Path(track.path),
+            payload.lines,
+            language=language,
+            on_progress=on_progress,
+        )
         aligned_payload = LyricsPayload(
             synced=True,
             source="whisper-align",
@@ -127,11 +146,44 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             plain=payload.plain,
         )
         save_aligned_cached(aligned_cache_dir(Path.cwd()), key, aligned_payload)
-        with _align_lock:
-            _align_jobs[job_id] = _align_done_payload(aligned_payload)
+        _set_align_job(job_id, **_align_done_payload(aligned_payload), progress=1.0, phase="done")
     except Exception as exc:  # noqa: BLE001 — surface to client poll
-        with _align_lock:
-            _align_jobs[job_id] = {"status": "error", "error": str(exc)}
+        _set_align_job(job_id, status="error", error=str(exc), progress=0.0)
+
+
+def _align_worker_loop() -> None:
+    while True:
+        _align_wake.wait(timeout=1.0)
+        while True:
+            with _align_lock:
+                if not _align_queue:
+                    _align_wake.clear()
+                    break
+                job_id, track, language = _align_queue.pop(0)
+            _run_align_job(job_id, track, language)
+
+
+def _ensure_align_worker() -> None:
+    global _align_worker_started
+    with _align_lock:
+        if _align_worker_started:
+            return
+        _align_worker_started = True
+    thread = threading.Thread(target=_align_worker_loop, name="align-worker", daemon=True)
+    thread.start()
+
+
+def _enqueue_align_job(job_id: str, track: TrackInfo, language: str) -> None:
+    _ensure_align_worker()
+    with _align_lock:
+        _align_jobs[job_id] = {
+            "status": "queued",
+            "progress": 0.0,
+            "phase": "queued",
+            "track_id": track.id,
+        }
+        _align_queue.append((job_id, track, language))
+    _align_wake.set()
 
 
 def _library_snapshot() -> dict:
@@ -333,16 +385,22 @@ def start_align(body: AlignBody) -> dict:
             "error": 'Instal·la l’alineació amb: pip install -e ".[align]"',
         }
 
-    job_id = uuid.uuid4().hex
+    # Reuse an in-flight / queued job for the same track.
     with _align_lock:
-        _align_jobs[job_id] = {"status": "running"}
-    thread = threading.Thread(
-        target=_run_align_job,
-        args=(job_id, track, body.language or "ca"),
-        daemon=True,
-    )
-    thread.start()
-    return {"job_id": job_id, "status": "running"}
+        for existing_id, job in _align_jobs.items():
+            if job.get("track_id") != track.id:
+                continue
+            if job.get("status") in {"queued", "running"}:
+                return {
+                    "job_id": existing_id,
+                    "status": job.get("status") or "running",
+                    "progress": job.get("progress", 0.0),
+                    "phase": job.get("phase"),
+                }
+
+    job_id = uuid.uuid4().hex
+    _enqueue_align_job(job_id, track, body.language or "ca")
+    return {"job_id": job_id, "status": "queued", "progress": 0.0, "phase": "queued"}
 
 
 @app.get("/api/align/{job_id}")
