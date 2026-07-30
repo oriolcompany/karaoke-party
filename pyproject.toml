@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karaoke-party"
+version = "0.1.0"
+description = "Local web karaoke player with synced lyrics from LRCLIB"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "mutagen>=1.48.1",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+align = [
+    "faster-whisper>=1.0.0",
+]
+
+[project.scripts]
+karaoke-party = "karaoke_party.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+karaoke_party = ["../web/*"]

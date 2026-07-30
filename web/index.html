@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ca">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Karaoke Party</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="fx" aria-hidden="true">
+      <div class="fx-glow fx-glow-a"></div>
+      <div class="fx-glow fx-glow-b"></div>
+      <div class="fx-scan"></div>
+    </div>
+
+    <!-- Selecció de cançons -->
+    <section id="view-menu" class="view view-menu">
+      <header class="menu-hero">
+        <p class="menu-kicker">Nit local</p>
+        <h1 class="menu-brand">Karaoke Party</h1>
+        <p class="menu-tagline" id="libraryMeta">Tria una cançó i puja a l’escenari.</p>
+      </header>
+
+      <div class="menu-toolbar">
+        <div class="toolbar-row">
+          <input id="search" type="search" placeholder="Cerca cançons, artistes…" />
+          <div class="view-toggle" role="group" aria-label="Mode de vista">
+            <button
+              id="modeCover"
+              class="mode-btn is-active"
+              type="button"
+              aria-label="Vista carrusel"
+              title="Carrusel"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="5" width="8" height="14" rx="1.5" fill="currentColor" />
+                <rect x="2" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
+                <rect x="17" y="7.5" width="5" height="9" rx="1" fill="currentColor" opacity="0.45" />
+              </svg>
+            </button>
+            <button
+              id="modeGrid"
+              class="mode-btn"
+              type="button"
+              aria-label="Vista graella"
+              title="Graella"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" fill="currentColor" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" fill="currentColor" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="root-bar">
+          <input id="rootInput" type="text" placeholder="Carpeta de música" spellcheck="false" />
+          <button id="loadBtn" type="button">Carregar biblioteca</button>
+        </div>
+      </div>
+
+      <div class="browse-panel" id="browsePanel" data-mode="cover">
+        <audio id="previewPlayer" preload="metadata"></audio>
+
+        <div class="coverflow" id="coverflow">
+          <div class="coverflow-stage">
+            <button id="coverPrev" class="cover-nav" type="button" aria-label="Cançó anterior">‹</button>
+            <div id="coverTrack" class="cover-track" tabindex="0"></div>
+            <button id="coverNext" class="cover-nav" type="button" aria-label="Cançó següent">›</button>
+          </div>
+        </div>
+
+        <div id="songGrid" class="song-grid" hidden></div>
+
+        <div class="cover-meta">
+          <p id="coverArtist" class="cover-artist"></p>
+          <h2 id="coverTitle" class="cover-title"></h2>
+          <p id="coverIndex" class="cover-index"></p>
+        </div>
+        <div class="cover-actions">
+          <button id="singBtn" class="sing-btn" type="button">Cantar</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Escenari de karaoke -->
+    <section id="view-stage" class="view view-stage hidden">
+      <div class="stage-fx" aria-hidden="true">
+        <div class="stage-curtains"></div>
+        <div class="stage-spot stage-spot-a"></div>
+        <div class="stage-spot stage-spot-b"></div>
+        <div class="stage-spot stage-spot-c"></div>
+        <div class="stage-beam stage-beam-l"></div>
+        <div class="stage-beam stage-beam-r"></div>
+        <div class="stage-floor"></div>
+        <div class="stage-sparkles">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="stage-eq">
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </div>
+
+      <button id="backBtn" class="back-btn" type="button">← Cançons</button>
+
+      <div class="stage-meta">
+        <p id="songArtist" class="stage-artist"></p>
+        <h2 id="songTitle" class="stage-title"></h2>
+      </div>
+
+      <div id="lyrics" class="karaoke-board" aria-live="polite">
+        <div id="lineCurrent" class="k-slot k-slot-current"></div>
+        <div id="lineNext" class="k-slot k-slot-next"></div>
+      </div>
+
+      <div class="stage-dock">
+        <audio id="player" preload="metadata"></audio>
+        <button id="playBtn" class="play-btn" type="button" aria-label="Reproduir">Inicia</button>
+        <p id="lyricsStatus" class="status">Preparat</p>
+      </div>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
