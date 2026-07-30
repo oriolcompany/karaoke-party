@@ -7,6 +7,7 @@ const browsePanel = document.getElementById("browsePanel");
 const searchEl = document.getElementById("search");
 const rootInput = document.getElementById("rootInput");
 const loadBtn = document.getElementById("loadBtn");
+const retryLyricsBtn = document.getElementById("retryLyricsBtn");
 const backBtn = document.getElementById("backBtn");
 const player = document.getElementById("player");
 const previewPlayer = document.getElementById("previewPlayer");
@@ -860,16 +861,22 @@ function updateLibraryMeta(data) {
   const pending = data.pending || 0;
   const hidden = data.hidden || 0;
   const total = data.total || 0;
+  const errors = data.errors || 0;
+
+  retryLyricsBtn.hidden = !errors;
 
   if (!data.root) {
     libraryMeta.textContent = "Carrega una carpeta de MP3s etiquetats per començar la nit";
   } else if (!tracks.length && pending) {
     libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
+  } else if (!tracks.length && errors) {
+    libraryMeta.textContent = `No s’ha pogut connectar a LRCLIB per ${errors} cançons · prova “Reintentar lletres”`;
   } else if (!tracks.length) {
     libraryMeta.textContent = `Cap cançó amb lletra (de ${total} al disc)`;
-  } else if (hidden || pending) {
+  } else if (hidden || pending || errors) {
     const bits = [`${tracks.length} cançons amb lletra`];
-    if (hidden) bits.push(`${hidden} amagades sense lletra`);
+    if (hidden - errors > 0) bits.push(`${hidden - errors} amagades sense lletra`);
+    if (errors) bits.push(`${errors} amb error de connexió`);
     if (pending) bits.push(`${pending} pendents`);
     libraryMeta.textContent = bits.join(" · ");
   } else {
@@ -958,6 +965,18 @@ loadBtn.addEventListener("click", () => {
   setRoot().catch((err) => {
     libraryMeta.textContent = err.message || "Error en carregar";
   });
+});
+retryLyricsBtn.addEventListener("click", () => {
+  retryLyricsBtn.disabled = true;
+  libraryMeta.textContent = "Tornant a buscar les lletres…";
+  api("/api/library/retry", { method: "POST" })
+    .then(() => loadLibrary())
+    .catch((err) => {
+      libraryMeta.textContent = err.message || "Error en reintentar";
+    })
+    .finally(() => {
+      retryLyricsBtn.disabled = false;
+    });
 });
 backBtn.addEventListener("click", showMenu);
 searchEl.addEventListener("input", () => {

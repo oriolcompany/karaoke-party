@@ -11,6 +11,8 @@ from mutagen.flac import FLAC, Picture
 from mutagen.id3 import APIC, ID3, ID3NoHeaderError
 from mutagen.mp4 import MP4, MP4Cover
 
+from .config import _resolve_cache_dir
+
 FOLDER_COVER_NAMES = (
     "cover.jpg",
     "cover.jpeg",
@@ -37,10 +39,7 @@ class CoverResult:
 
 
 def covers_cache_dir(root: Path | None = None) -> Path:
-    base = root or Path.cwd()
-    path = base / ".cache" / "covers"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _resolve_cache_dir("covers", root)
 
 
 def _mime_from_suffix(path: Path) -> str:

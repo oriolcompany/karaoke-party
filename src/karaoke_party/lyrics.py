@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -13,6 +14,9 @@ LRC_LINE_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\](.*)")
 ENHANCED_WORD_RE = re.compile(r"<(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?>([^<]*)")
 LRCLIB_GET = "https://lrclib.net/api/get"
 LRCLIB_SEARCH = "https://lrclib.net/api/search"
+RETRY_BASE_DELAY = 1.0
+MAX_RETRY_DELAY = 8.0
+PROBE_ERROR_SOURCE = "probe-error"
 
 
 @dataclass
@@ -205,6 +209,53 @@ def _from_lrclib_record(record: dict[str, Any], source: str) -> LyricsPayload | 
     return None
 
 
+class LyricsUnavailable(RuntimeError):
+    """LRCLIB could not be reached (timeout, throttling, server error).
+
+    Distinct from "this song has no lyrics" so a transient failure is never
+    cached as a permanent miss.
+    """
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+async def _get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    *,
+    attempts: int = 3,
+) -> httpx.Response:
+    """GET that retries throttling/server errors instead of giving up at once."""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = await client.get(url, params=params)
+        except httpx.HTTPError as exc:
+            last_error = exc
+        else:
+            if response.status_code < 500 and response.status_code != 429:
+                return response
+            last_error = LyricsUnavailable(f"{url} returned {response.status_code}")
+            wait = _retry_after_seconds(response)
+            if wait is None:
+                wait = RETRY_BASE_DELAY * (2**attempt)
+            if attempt < attempts - 1:
+                await asyncio.sleep(min(wait, MAX_RETRY_DELAY))
+            continue
+        if attempt < attempts - 1:
+            await asyncio.sleep(min(RETRY_BASE_DELAY * (2**attempt), MAX_RETRY_DELAY))
+    raise LyricsUnavailable(str(last_error) if last_error else f"{url} unreachable")
+
+
 async def fetch_lyrics(
     artist: str,
     title: str,
@@ -229,14 +280,15 @@ async def fetch_lyrics(
         params["duration"] = int(round(duration))
 
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
-        response = await client.get(LRCLIB_GET, params=params)
+        response = await _get_with_retry(client, LRCLIB_GET, params)
         payload: LyricsPayload | None = None
         if response.status_code == 200:
             payload = _from_lrclib_record(response.json(), "lrclib")
         if payload is None:
-            search = await client.get(
+            search = await _get_with_retry(
+                client,
                 LRCLIB_SEARCH,
-                params={"q": f"{artist} {title}"},
+                {"q": f"{artist} {title}"},
             )
             if search.status_code == 200:
                 results = search.json() or []
@@ -293,10 +345,52 @@ def lyrics_status_cached(
     aligned_cache: Path | None = None,
 ) -> bool | None:
     """True = has lyrics, False = known miss, None = not checked yet."""
+    status, _source = lyrics_status_and_source(
+        artist,
+        title,
+        duration,
+        lyrics_cache=lyrics_cache,
+        aligned_cache=aligned_cache,
+    )
+    return status
+
+
+def lyrics_status_and_source(
+    artist: str,
+    title: str,
+    duration: float | None = None,
+    *,
+    lyrics_cache: Path,
+    aligned_cache: Path | None = None,
+) -> tuple[bool | None, str]:
+    """Status plus the cache source, so probe errors stay distinguishable."""
     key = cache_key(artist, title, duration)
     if aligned_cache is not None and load_aligned_cached(aligned_cache, key) is not None:
-        return True
-    cached = load_cached(lyrics_cache, key)
+        return True, "aligned"
+    try:
+        cached = load_cached(lyrics_cache, key)
+    except (OSError, ValueError):
+        return None, ""
     if cached is None:
-        return None
-    return bool(cached.lines)
+        return None, ""
+    return bool(cached.lines), cached.source
+
+
+def clear_probe_errors(lyrics_cache: Path) -> int:
+    """Drop cached entries that only failed because LRCLIB was unreachable."""
+    if not lyrics_cache.is_dir():
+        return 0
+    removed = 0
+    for path in lyrics_cache.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(data.get("source") or "") != PROBE_ERROR_SOURCE:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed

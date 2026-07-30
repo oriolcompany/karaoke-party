@@ -15,16 +15,19 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import __version__
 from .align import align_lyrics, alignment_available
 from .config import DEFAULT_PORT, aligned_cache_dir, cache_dir, default_music_root
 from .covers import covers_cache_dir, resolve_cover
 from .library import TrackInfo, scan_library
 from .lyrics import (
+    PROBE_ERROR_SOURCE,
     LyricsPayload,
     cache_key,
+    clear_probe_errors,
     fetch_lyrics,
     load_aligned_cached,
-    lyrics_status_cached,
+    lyrics_status_and_source,
     save_aligned_cached,
     save_cached,
 )
@@ -61,6 +64,7 @@ _probe_pass_complete: bool = False
 # Bumped to invalidate in-flight workers when the probe is reset/replaced.
 _probe_generation: int = 0
 _probe_thread: threading.Thread | None = None
+PROBE_CONCURRENCY = 3
 
 
 class SetRootBody(BaseModel):
@@ -147,7 +151,7 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
                 title=track.title,
                 album=track.album,
                 duration=track.duration,
-                cache_dir=cache_dir(Path.cwd()),
+                cache_dir=cache_dir(),
             )
         )
         if not payload.lines:
@@ -170,7 +174,7 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             lines=aligned_lines,
             plain=payload.plain,
         )
-        save_aligned_cached(aligned_cache_dir(Path.cwd()), key, aligned_payload)
+        save_aligned_cached(aligned_cache_dir(), key, aligned_payload)
         _set_align_job(job_id, **_align_done_payload(aligned_payload), progress=1.0, phase="done")
     except Exception as exc:  # noqa: BLE001 — surface to client poll
         _set_align_job(job_id, status="error", error=str(exc), progress=0.0)
@@ -213,18 +217,27 @@ def _enqueue_align_job(job_id: str, track: TrackInfo, language: str) -> None:
 
 def _library_snapshot() -> dict:
     if _music_root is None:
-        return {"root": None, "tracks": [], "total": 0, "with_lyrics": 0, "pending": 0, "hidden": 0}
+        return {
+            "root": None,
+            "tracks": [],
+            "total": 0,
+            "with_lyrics": 0,
+            "pending": 0,
+            "hidden": 0,
+            "errors": 0,
+        }
 
     if not _tracks:
         _reload_library(_music_root)
 
-    lyrics_path = cache_dir(Path.cwd())
-    aligned_path = aligned_cache_dir(Path.cwd())
+    lyrics_path = cache_dir()
+    aligned_path = aligned_cache_dir()
     playable: list[dict] = []
     pending = 0
     hidden = 0
+    errors = 0
     for track in _tracks.values():
-        status = lyrics_status_cached(
+        status, source = lyrics_status_and_source(
             track.artist,
             track.title,
             track.duration,
@@ -238,9 +251,12 @@ def _library_snapshot() -> dict:
             playable.append(item)
         elif status is False:
             hidden += 1
+            if source == PROBE_ERROR_SOURCE:
+                errors += 1
         elif track.id in _probe_attempted:
             # Soft-fail this session (network/API error): do not keep it pending.
             hidden += 1
+            errors += 1
         else:
             pending += 1
 
@@ -253,6 +269,7 @@ def _library_snapshot() -> dict:
         "with_lyrics": len(playable),
         "pending": pending,
         "hidden": hidden,
+        "errors": errors,
         "probe": probe,
     }
 
@@ -263,14 +280,14 @@ def _cache_probe_miss(track: TrackInfo, lyrics_path: Path) -> None:
     save_cached(
         lyrics_path,
         key,
-        LyricsPayload(synced=False, source="probe-error", lines=[], plain=""),
+        LyricsPayload(synced=False, source=PROBE_ERROR_SOURCE, lines=[], plain=""),
     )
 
 
 def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
     """Probe unknown tracks. Caller must set running/done/total under lock first."""
     global _probe_pass_complete
-    lyrics_path = cache_dir(Path.cwd())
+    lyrics_path = cache_dir()
 
     async def _probe_one(track: TrackInfo) -> bool:
         payload = await fetch_lyrics(
@@ -283,7 +300,9 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
         return bool(payload.lines)
 
     async def _probe_all() -> None:
-        semaphore = asyncio.Semaphore(6)
+        # Keep LRCLIB happy: too many parallel requests get throttled, and a
+        # throttled response used to be stored as "this song has no lyrics".
+        semaphore = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def worker(track: TrackInfo) -> None:
             found = False
@@ -324,8 +343,8 @@ def _ensure_lyrics_probe() -> None:
     if not _tracks:
         _reload_library(_music_root, reset_probe=False)
 
-    lyrics_path = cache_dir(Path.cwd())
-    aligned_path = aligned_cache_dir(Path.cwd())
+    lyrics_path = cache_dir()
+    aligned_path = aligned_cache_dir()
     with _probe_lock:
         if _probe_state["running"]:
             return
@@ -339,13 +358,13 @@ def _ensure_lyrics_probe() -> None:
             track.id
             for track in _tracks.values()
             if track.id not in _probe_attempted
-            and lyrics_status_cached(
+            and lyrics_status_and_source(
                 track.artist,
                 track.title,
                 track.duration,
                 lyrics_cache=lyrics_path,
                 aligned_cache=aligned_path,
-            )
+            )[0]
             is None
         ]
         if not unknown:
@@ -369,8 +388,10 @@ def _ensure_lyrics_probe() -> None:
 def health() -> dict:
     return {
         "ok": True,
+        "version": __version__,
         "music_root": str(_music_root) if _music_root else None,
         "tracks": len(_tracks),
+        "cache": str(cache_dir()),
         "alignment": alignment_available(),
     }
 
@@ -394,6 +415,17 @@ def set_root(body: SetRootBody) -> dict:
     return {"root": str(root), "tracks": len(tracks)}
 
 
+@app.post("/api/library/retry")
+def retry_failed_lyrics() -> dict:
+    """User-triggered retry for songs whose lookup failed (never automatic)."""
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta carregada")
+    cleared = clear_probe_errors(cache_dir())
+    _reset_probe_state()
+    _ensure_lyrics_probe()
+    return {"cleared": cleared}
+
+
 @app.get("/api/audio/{track_id:path}")
 def audio(track_id: str):
     track = _resolve_track(track_id)
@@ -412,7 +444,7 @@ async def cover(track_id: str):
         artist=track.artist,
         title=track.title,
         album=track.album,
-        cache_dir=covers_cache_dir(Path.cwd()),
+        cache_dir=covers_cache_dir(),
         generic_path=generic if generic.is_file() else WEB_DIR / "album-generic.png",
     )
     if not result.path.is_file():
@@ -428,7 +460,7 @@ async def cover(track_id: str):
 async def lyrics(track_id: str = Query(...)):
     track = _resolve_track(track_id)
     key = cache_key(track.artist, track.title, track.duration)
-    aligned = load_aligned_cached(aligned_cache_dir(Path.cwd()), key)
+    aligned = load_aligned_cached(aligned_cache_dir(), key)
     if aligned is not None:
         return _lyrics_response(track, track_id, aligned, aligned=True)
 
@@ -437,7 +469,7 @@ async def lyrics(track_id: str = Query(...)):
         title=track.title,
         album=track.album,
         duration=track.duration,
-        cache_dir=cache_dir(Path.cwd()),
+        cache_dir=cache_dir(),
     )
     return _lyrics_response(track, track_id, payload, aligned=False)
 
@@ -446,7 +478,7 @@ async def lyrics(track_id: str = Query(...)):
 def start_align(body: AlignBody) -> dict:
     track = _resolve_track(body.track_id)
     key = cache_key(track.artist, track.title, track.duration)
-    cached = load_aligned_cached(aligned_cache_dir(Path.cwd()), key)
+    cached = load_aligned_cached(aligned_cache_dir(), key)
     if cached is not None:
         return {"job_id": None, **_align_done_payload(cached)}
 
@@ -482,6 +514,16 @@ def align_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail="Treball d’alineació no trobat")
     return {"job_id": job_id, **job}
+
+
+@app.middleware("http")
+async def _no_store_for_ui(request, call_next):
+    """Never let a browser keep an old app.js: it used to poll every 2s."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.endswith((".js", ".css", ".html")) or path == "/":
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 if WEB_DIR.is_dir():
