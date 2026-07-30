@@ -237,6 +237,13 @@ button:hover {
   box-shadow: 0 8px 20px rgba(47, 214, 123, 0.28);
 }
 
+.sync-status-btn.is-filter {
+  background: linear-gradient(135deg, var(--gold), #ffb020);
+  color: #1a1000;
+  border-color: transparent;
+  box-shadow: 0 8px 20px rgba(255, 176, 32, 0.3);
+}
+
 .mode-btn {
   width: 2.45rem;
   height: 2.45rem;
