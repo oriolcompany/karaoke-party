@@ -26,6 +26,7 @@ from .lyrics import (
     load_aligned_cached,
     lyrics_status_cached,
     save_aligned_cached,
+    save_cached,
 )
 
 
@@ -55,6 +56,8 @@ _probe_state: dict = {
 # Track ids already probed this session. Prevents restart loops when LRCLIB
 # errors leave the on-disk cache empty (status still "unknown").
 _probe_attempted: set[str] = set()
+# After one full probe pass for the current root, do not auto-restart.
+_probe_pass_complete: bool = False
 
 
 class SetRootBody(BaseModel):
@@ -66,20 +69,33 @@ class AlignBody(BaseModel):
     language: str = "ca"
 
 
-def _reload_library(root: Path) -> list[TrackInfo]:
-    global _music_root, _tracks
-    _music_root = root
-    tracks = scan_library(root)
-    _tracks = {track.id: track for track in tracks}
+def _reset_probe_state() -> None:
+    global _probe_pass_complete
     with _probe_lock:
         _probe_attempted.clear()
+        _probe_pass_complete = False
+        _probe_state.update({"running": False, "done": 0, "total": 0, "found": 0})
+
+
+def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[TrackInfo]:
+    """Rescan music files. Probe state resets only when the root folder changes."""
+    global _music_root, _tracks
+    new_root = root.expanduser().resolve()
+    old_root = _music_root.resolve() if _music_root is not None else None
+    root_changed = old_root is None or new_root != old_root
+    _music_root = new_root
+    tracks = scan_library(new_root)
+    _tracks = {track.id: track for track in tracks}
+    if reset_probe if reset_probe is not None else root_changed:
+        _reset_probe_state()
     return tracks
 
 
 def _resolve_track(track_id: str) -> TrackInfo:
     track = _tracks.get(track_id)
     if track is None and _music_root is not None:
-        _reload_library(_music_root)
+        # Rescan must not wipe probe progress (covers/audio 404s used to restart it).
+        _reload_library(_music_root, reset_probe=False)
         track = _tracks.get(track_id)
     if track is None:
         raise HTTPException(status_code=404, detail="Cançó no trobada")
@@ -237,8 +253,19 @@ def _library_snapshot() -> dict:
     }
 
 
+def _cache_probe_miss(track: TrackInfo, lyrics_path: Path) -> None:
+    """Persist a negative result so the track leaves the pending set."""
+    key = cache_key(track.artist, track.title, track.duration)
+    save_cached(
+        lyrics_path,
+        key,
+        LyricsPayload(synced=False, source="probe-error", lines=[], plain=""),
+    )
+
+
 def _run_lyrics_probe(track_ids: list[str]) -> None:
     """Probe unknown tracks. Caller must set running/done/total under lock first."""
+    global _probe_pass_complete
     lyrics_path = cache_dir(Path.cwd())
 
     async def _probe_one(track: TrackInfo) -> bool:
@@ -261,6 +288,10 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
                     found = await _probe_one(track)
             except Exception:  # noqa: BLE001
                 found = False
+                try:
+                    _cache_probe_miss(track, lyrics_path)
+                except Exception:  # noqa: BLE001
+                    pass
             with _probe_lock:
                 _probe_attempted.add(track.id)
                 _probe_state["done"] += 1
@@ -274,18 +305,23 @@ def _run_lyrics_probe(track_ids: list[str]) -> None:
     finally:
         with _probe_lock:
             _probe_state["running"] = False
+            _probe_pass_complete = True
 
 
 def _ensure_lyrics_probe() -> None:
+    global _probe_pass_complete
     if _music_root is None:
         return
     if not _tracks:
-        _reload_library(_music_root)
+        _reload_library(_music_root, reset_probe=False)
 
     lyrics_path = cache_dir(Path.cwd())
     aligned_path = aligned_cache_dir(Path.cwd())
     with _probe_lock:
         if _probe_state["running"]:
+            return
+        # One pass per root: finishing must not restart from 0/N.
+        if _probe_pass_complete:
             return
         unknown = [
             track.id
@@ -301,6 +337,7 @@ def _ensure_lyrics_probe() -> None:
             is None
         ]
         if not unknown:
+            _probe_pass_complete = True
             return
         # Claim the run under the same lock to avoid duplicate probe threads.
         _probe_state.update({"running": True, "done": 0, "total": len(unknown), "found": 0})
@@ -320,10 +357,9 @@ def health() -> dict:
 
 @app.get("/api/library")
 def library() -> dict:
-    snapshot = _library_snapshot()
-    if snapshot.get("pending"):
+    if _library_snapshot().get("pending"):
         _ensure_lyrics_probe()
-    return snapshot
+    return _library_snapshot()
 
 
 @app.post("/api/library/root")
@@ -331,7 +367,7 @@ def set_root(body: SetRootBody) -> dict:
     root = Path(body.path)
     if not root.is_dir():
         raise HTTPException(status_code=400, detail="La carpeta no existeix")
-    tracks = _reload_library(root)
+    tracks = _reload_library(root, reset_probe=True)
     _ensure_lyrics_probe()
     return {"root": str(root), "tracks": len(tracks)}
 
