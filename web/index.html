@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=2" />
+    <link rel="stylesheet" href="/styles.css?v=11" />
   </head>
   <body>
     <div class="fx" aria-hidden="true">
@@ -75,17 +75,28 @@
                 </svg>
               </button>
             </div>
+            <button
+              id="settingsBtn"
+              class="mode-btn settings-btn"
+              type="button"
+              aria-haspopup="dialog"
+              aria-controls="settingsModal"
+              aria-label="Configuració"
+              title="Configuració"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.6.24-1.14.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.58a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.43.34.6.22l2.39-.96c.49.39 1.03.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.8c.24 0 .44-.18.49-.42l.36-2.54c.6-.24 1.14-.55 1.63-.94l2.39.96c.17.12.46.02.6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"
+                />
+              </svg>
+            </button>
           </div>
-        </div>
-        <div class="root-bar">
-          <input id="rootInput" type="text" placeholder="Carpeta de música" spellcheck="false" />
-          <button id="loadBtn" type="button">Carregar biblioteca</button>
-          <button id="retryLyricsBtn" type="button" hidden>Reintentar lletres</button>
         </div>
       </div>
 
       <div class="browse-panel" id="browsePanel" data-mode="cover">
-        <audio id="previewPlayer" preload="metadata"></audio>
+        <audio id="previewPlayer" preload="auto"></audio>
 
         <div class="coverflow" id="coverflow">
           <div class="coverflow-stage">
@@ -103,11 +114,138 @@
           <p id="coverIndex" class="cover-index"></p>
         </div>
         <div class="cover-actions">
+          <button id="albumBackBtn" class="album-back-btn" type="button" hidden>← Àlbums</button>
           <button id="singBtn" class="sing-btn" type="button">Cantar</button>
+          <button id="resyncCoverBtn" class="resync-cover-btn" type="button" hidden>Nova portada</button>
           <p id="syncQueueMeta" class="sync-queue-meta" hidden></p>
         </div>
       </div>
     </section>
+
+    <div
+      id="settingsModal"
+      class="settings-modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settingsTitle"
+      hidden
+    >
+      <div class="settings-backdrop" data-settings-close></div>
+      <div class="settings-panel">
+        <header class="settings-header">
+          <h2 id="settingsTitle">Configuració</h2>
+          <button
+            id="settingsCloseBtn"
+            class="settings-close"
+            type="button"
+            aria-label="Tancar configuració"
+            data-settings-close
+          >
+            ×
+          </button>
+        </header>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="Seccions de configuració">
+            <button
+              type="button"
+              class="settings-nav-btn is-active"
+              data-settings-section="general"
+              aria-controls="settingsSectionGeneral"
+            >
+              General
+            </button>
+          </nav>
+          <div id="settingsBody" class="settings-body">
+            <section
+              id="settingsSectionGeneral"
+              class="settings-section is-active"
+              data-settings-section-panel="general"
+            >
+              <h3 class="settings-section-title">General</h3>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Biblioteca</h4>
+                <p class="settings-help">Carpeta on hi ha els MP3s etiquetats.</p>
+                <div class="settings-field-row">
+                  <input
+                    id="rootInput"
+                    type="text"
+                    placeholder="Carpeta de música"
+                    spellcheck="false"
+                  />
+                  <button id="loadBtn" type="button">Recarregar biblioteca</button>
+                </div>
+                <button id="retryLyricsBtn" class="settings-secondary-btn" type="button" hidden>
+                  Reintentar lletres
+                </button>
+                <p id="librarySettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Vista de biblioteca</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Mostra totes les cançons o agrupa-les per àlbum.
+                  </p>
+                  <div class="settings-toggle" role="group" aria-label="Vista de biblioteca">
+                    <button
+                      id="libraryBrowseSongBtn"
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      aria-pressed="true"
+                    >
+                      Per cançó
+                    </button>
+                    <button
+                      id="libraryBrowseAlbumBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Per àlbum
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Mostra només les cançons amagades perquè no tenen lletra a LRCLIB.
+                  </p>
+                  <div class="settings-toggle" role="group" aria-label="Filtre de cançons ocultes">
+                    <button
+                      id="hiddenOnlyOffBtn"
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      aria-pressed="true"
+                    >
+                      Amb lletra
+                    </button>
+                    <button
+                      id="hiddenOnlyOnBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Només ocultes
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Portades</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Torna a buscar i incrustar les imatges de totes les cançons.
+                  </p>
+                  <button id="resyncCoversBtn" type="button">Resincronitzar portades</button>
+                </div>
+                <p id="coversSettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Escenari de karaoke -->
     <section id="view-stage" class="view view-stage hidden">
@@ -149,6 +287,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=2"></script>
+    <script src="/app.js?v=9"></script>
   </body>
 </html>

@@ -147,9 +147,121 @@ def find_folder_cover(audio_path: Path) -> Path | None:
     return None
 
 
+def _audio_cache_digest(audio_path: Path) -> str:
+    return hashlib.sha1(str(Path(audio_path).resolve()).encode("utf-8")).hexdigest()
+
+
 def _cache_path_for_embedded(audio_path: Path, mime: str, cache_dir: Path) -> Path:
-    digest = hashlib.sha1(str(audio_path.resolve()).encode("utf-8")).hexdigest()
-    return cache_dir / f"{digest}{_suffix_from_mime(mime)}"
+    return Path(cache_dir) / f"{_audio_cache_digest(audio_path)}{_suffix_from_mime(mime)}"
+
+
+def find_cached_cover(audio_path: Path, cache_dir: Path) -> Path | None:
+    """Return the on-disk cache file for this audio path, if any."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.is_dir():
+        return None
+    digest = _audio_cache_digest(audio_path)
+    matches = sorted(cache_dir.glob(f"{digest}.*"))
+    return matches[0] if matches else None
+
+
+def embed_cached_cover(audio_path: Path, cache_dir: Path) -> bool:
+    """If a cache image exists and the file has no art, embed it. Returns True on embed."""
+    audio_path = Path(audio_path)
+    if not audio_path.is_file():
+        return False
+    if extract_embedded_cover(audio_path):
+        return False
+    cached = find_cached_cover(audio_path, cache_dir)
+    if cached is None or not cached.is_file():
+        return False
+    data = cached.read_bytes()
+    if not data:
+        return False
+    return embed_cover_in_audio(audio_path, data, _mime_from_suffix(cached))
+
+
+def migrate_cached_covers_into_audio(
+    tracks: list[Path] | list[object],
+    cache_dir: Path,
+) -> dict[str, int]:
+    """Embed cached (or album-mate) covers into audio files that lack art.
+
+    ``tracks`` may be bare paths or objects with ``.path`` / ``.artist`` / ``.album``.
+    """
+    items: list[tuple[Path, str, str]] = []
+    for track in tracks:
+        if isinstance(track, (str, Path)):
+            items.append((Path(track), "", ""))
+        else:
+            items.append(
+                (
+                    Path(getattr(track, "path")),
+                    str(getattr(track, "artist", "") or ""),
+                    str(getattr(track, "album", "") or ""),
+                )
+            )
+
+    from_cache = 0
+    skipped = 0
+    failed = 0
+    for path, _artist, _album in items:
+        if not path.is_file():
+            continue
+        if extract_embedded_cover(path):
+            skipped += 1
+            continue
+        cached = find_cached_cover(path, cache_dir)
+        if cached is None or not cached.is_file():
+            continue
+        data = cached.read_bytes()
+        if not data:
+            continue
+        if embed_cover_in_audio(path, data, _mime_from_suffix(cached)):
+            from_cache += 1
+        else:
+            failed += 1
+
+    # Second pass: copy art from another track on the same album.
+    donors: dict[tuple[str, str], tuple[bytes, str]] = {}
+    for path, artist, album in items:
+        if not artist or not album or not path.is_file():
+            continue
+        key = (artist.casefold(), album.casefold())
+        if key in donors:
+            continue
+        found = extract_embedded_cover(path)
+        if found:
+            donors[key] = found
+
+    from_album = 0
+    for path, artist, album in items:
+        if not path.is_file() or extract_embedded_cover(path):
+            continue
+        key = (artist.casefold(), album.casefold())
+        donor = donors.get(key)
+        if not donor:
+            continue
+        data, mime = donor
+        if embed_cover_in_audio(path, data, mime):
+            _write_cover_cache(path, data, mime, cache_dir)
+            from_album += 1
+        else:
+            failed += 1
+
+    still_missing = sum(
+        1
+        for path, _artist, _album in items
+        if path.is_file() and not extract_embedded_cover(path)
+    )
+    return {
+        "embedded": from_cache + from_album,
+        "from_cache": from_cache,
+        "from_album": from_album,
+        "skipped": skipped,
+        "missing": still_missing,
+        "failed": failed,
+    }
 
 
 # Exact artist+title is the bar for accepting a remote image. We never fall
@@ -316,6 +428,36 @@ def _write_cover_cache(audio_path: Path, data: bytes, mime: str, cache_dir: Path
     return cached
 
 
+def clear_cover_cache(audio_path: Path, cache_dir: Path) -> int:
+    """Remove disk-cached cover bytes for this audio file. Returns files deleted."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.is_dir():
+        return 0
+    digest = _audio_cache_digest(audio_path)
+    removed = 0
+    for path in cache_dir.glob(f"{digest}.*"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+async def _apply_remote_cover(
+    audio_path: Path,
+    data: bytes,
+    mime: str,
+    cache_dir: Path,
+) -> CoverResult:
+    if embed_cover_in_audio(audio_path, data, mime):
+        cached = _write_cover_cache(audio_path, data, mime, cache_dir)
+        return CoverResult(path=cached, mime=mime, source="remote-embedded")
+    # Could not write tags — still serve from cache for this session.
+    cached = _write_cover_cache(audio_path, data, mime, cache_dir)
+    return CoverResult(path=cached, mime=mime, source="remote-cache")
+
+
 async def resolve_cover(
     audio_path: Path,
     *,
@@ -324,6 +466,7 @@ async def resolve_cover(
     album: str = "",
     cache_dir: Path,
     generic_path: Path,
+    force: bool = False,
 ) -> CoverResult:
     """
     Resolve cover art in order:
@@ -331,10 +474,21 @@ async def resolve_cover(
     2) image file in the same folder
     3) remote lookup (embedded into the audio file when possible)
     4) generic fallback
+
+    With force=True, clear the disk cache and re-query iTunes first. A remote
+    hit overwrites embedded art; a miss keeps the existing resolution path so
+    we never strip art without a replacement.
     """
     audio_path = Path(audio_path)
     if not audio_path.is_file():
         return CoverResult(path=generic_path, mime="image/png", source="generic")
+
+    if force:
+        clear_cover_cache(audio_path, cache_dir)
+        remote = await fetch_remote_cover(artist=artist, title=title, album=album)
+        if remote:
+            data, mime = remote
+            return await _apply_remote_cover(audio_path, data, mime, cache_dir)
 
     embedded = extract_embedded_cover(audio_path)
     if embedded:
@@ -342,22 +496,28 @@ async def resolve_cover(
         cached = _write_cover_cache(audio_path, data, mime, cache_dir)
         return CoverResult(path=cached, mime=mime, source="embedded")
 
+    # Older sessions may have left art only in the cache — promote it into tags.
+    cached_only = find_cached_cover(audio_path, cache_dir)
+    if cached_only is not None and cached_only.is_file():
+        data = cached_only.read_bytes()
+        mime = _mime_from_suffix(cached_only)
+        if data and embed_cover_in_audio(audio_path, data, mime):
+            return CoverResult(path=cached_only, mime=mime, source="cache-embedded")
+        if data:
+            return CoverResult(path=cached_only, mime=mime, source="cache")
+
     folder_cover = find_folder_cover(audio_path)
     if folder_cover is not None:
-        return CoverResult(
-            path=folder_cover,
-            mime=_mime_from_suffix(folder_cover),
-            source="folder",
-        )
+        data = folder_cover.read_bytes()
+        mime = _mime_from_suffix(folder_cover)
+        if data and embed_cover_in_audio(audio_path, data, mime):
+            cached = _write_cover_cache(audio_path, data, mime, cache_dir)
+            return CoverResult(path=cached, mime=mime, source="folder-embedded")
+        return CoverResult(path=folder_cover, mime=mime, source="folder")
 
     remote = await fetch_remote_cover(artist=artist, title=title, album=album)
     if remote:
         data, mime = remote
-        if embed_cover_in_audio(audio_path, data, mime):
-            cached = _write_cover_cache(audio_path, data, mime, cache_dir)
-            return CoverResult(path=cached, mime=mime, source="remote-embedded")
-        # Could not write tags — still serve from cache for this session.
-        cached = _write_cover_cache(audio_path, data, mime, cache_dir)
-        return CoverResult(path=cached, mime=mime, source="remote-cache")
+        return await _apply_remote_cover(audio_path, data, mime, cache_dir)
 
     return CoverResult(path=generic_path, mime="image/png", source="generic")

@@ -18,8 +18,8 @@ from pydantic import BaseModel
 from . import __version__
 from .align import align_lyrics, alignment_available
 from .config import DEFAULT_PORT, aligned_cache_dir, cache_dir, default_music_root
-from .covers import covers_cache_dir, resolve_cover
-from .library import TrackInfo, scan_library
+from .covers import covers_cache_dir, migrate_cached_covers_into_audio, resolve_cover
+from .library import TrackInfo, _sort_key, scan_library
 from .lyrics import (
     PROBE_ERROR_SOURCE,
     PROBE_TIMEOUT,
@@ -70,6 +70,15 @@ _probe_thread: threading.Thread | None = None
 PROBE_CONCURRENCY = 3
 # Consecutive network failures after which the pass stops calling LRCLIB.
 OFFLINE_FAILURE_STREAK = 5
+_cover_resync_lock = threading.Lock()
+_cover_resync_state: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "updated": 0,
+}
+_cover_resync_thread: threading.Thread | None = None
+COVER_RESYNC_CONCURRENCY = 3
 
 
 class SetRootBody(BaseModel):
@@ -79,6 +88,10 @@ class SetRootBody(BaseModel):
 class AlignBody(BaseModel):
     track_id: str
     language: str = "ca"
+
+
+class ResyncCoverBody(BaseModel):
+    track_id: str
 
 
 def _reset_probe_state() -> None:
@@ -92,6 +105,14 @@ def _reset_probe_state() -> None:
         )
 
 
+def _migrate_covers_background(tracks: list[TrackInfo]) -> None:
+    """Promote disk-cached covers into audio tags without blocking the UI."""
+    try:
+        migrate_cached_covers_into_audio(tracks, covers_cache_dir())
+    except Exception:
+        pass
+
+
 def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[TrackInfo]:
     """Rescan music files. Probe state resets only when the root folder changes."""
     global _music_root, _tracks
@@ -103,6 +124,12 @@ def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[Trac
     _tracks = {track.id: track for track in tracks}
     if reset_probe if reset_probe is not None else root_changed:
         _reset_probe_state()
+    threading.Thread(
+        target=_migrate_covers_background,
+        args=(list(tracks),),
+        daemon=True,
+        name="cover-migrate",
+    ).start()
     return tracks
 
 
@@ -227,6 +254,7 @@ def _library_snapshot() -> dict:
         return {
             "root": None,
             "tracks": [],
+            "hidden_tracks": [],
             "total": 0,
             "with_lyrics": 0,
             "pending": 0,
@@ -239,7 +267,8 @@ def _library_snapshot() -> dict:
 
     lyrics_path = cache_dir()
     aligned_path = aligned_cache_dir()
-    playable: list[dict] = []
+    playable_tracks: list[TrackInfo] = []
+    hidden_tracks: list[TrackInfo] = []
     pending = 0
     hidden = 0
     errors = 0
@@ -252,32 +281,52 @@ def _library_snapshot() -> dict:
             aligned_cache=aligned_path,
         )
         if status is True:
-            item = asdict(track)
-            key = cache_key(track.artist, track.title, track.duration)
-            item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
-            playable.append(item)
+            playable_tracks.append(track)
         elif status is False:
             hidden += 1
+            hidden_tracks.append(track)
             if source == PROBE_ERROR_SOURCE:
                 errors += 1
         elif track.id in _probe_attempted:
             # Soft-fail this session (network/API error): do not keep it pending.
             hidden += 1
+            hidden_tracks.append(track)
             errors += 1
         else:
             pending += 1
 
+    playable_tracks.sort(key=_sort_key)
+    hidden_tracks.sort(key=_sort_key)
+    playable: list[dict] = []
+    for track in playable_tracks:
+        item = asdict(track)
+        key = cache_key(track.artist, track.title, track.duration)
+        item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
+        item["has_lyrics"] = True
+        playable.append(item)
+
+    hidden_items: list[dict] = []
+    for track in hidden_tracks:
+        item = asdict(track)
+        item["whisper_aligned"] = False
+        item["has_lyrics"] = False
+        hidden_items.append(item)
+
     with _probe_lock:
         probe = dict(_probe_state)
+    with _cover_resync_lock:
+        covers_resync = dict(_cover_resync_state)
     return {
         "root": str(_music_root),
         "tracks": playable,
+        "hidden_tracks": hidden_items,
         "total": len(_tracks),
         "with_lyrics": len(playable),
         "pending": pending,
         "hidden": hidden,
         "errors": errors,
         "probe": probe,
+        "covers_resync": covers_resync,
     }
 
 
@@ -456,6 +505,103 @@ def retry_failed_lyrics() -> dict:
     return {"cleared": cleared}
 
 
+def _generic_cover_path() -> Path:
+    generic = WEB_DIR / "album-generic.png"
+    return generic if generic.is_file() else WEB_DIR / "album-generic.png"
+
+
+async def _resync_cover_track(track: TrackInfo) -> bool:
+    """Force remote cover lookup. True when a remote cover was applied."""
+    result = await resolve_cover(
+        Path(track.path),
+        artist=track.artist,
+        title=track.title,
+        album=track.album,
+        cache_dir=covers_cache_dir(),
+        generic_path=_generic_cover_path(),
+        force=True,
+    )
+    return result.source.startswith("remote")
+
+
+def _run_cover_resync(track_ids: list[str]) -> None:
+    async def _resync_all() -> None:
+        sem = asyncio.Semaphore(COVER_RESYNC_CONCURRENCY)
+
+        async def _one(track_id: str) -> None:
+            track = _tracks.get(track_id)
+            updated = False
+            if track is not None:
+                try:
+                    async with sem:
+                        updated = await _resync_cover_track(track)
+                except Exception:
+                    updated = False
+            with _cover_resync_lock:
+                _cover_resync_state["done"] += 1
+                if updated:
+                    _cover_resync_state["updated"] += 1
+
+        await asyncio.gather(*(_one(tid) for tid in track_ids))
+
+    try:
+        asyncio.run(_resync_all())
+    finally:
+        with _cover_resync_lock:
+            _cover_resync_state["running"] = False
+
+
+@app.post("/api/library/covers/resync")
+def resync_library_covers() -> dict:
+    """User-triggered force re-fetch of cover art for every scanned track."""
+    global _cover_resync_thread
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta carregada")
+    if not _tracks:
+        _reload_library(_music_root, reset_probe=False)
+    track_ids = list(_tracks)
+    with _cover_resync_lock:
+        if _cover_resync_state["running"]:
+            return dict(_cover_resync_state)
+        if _cover_resync_thread is not None and _cover_resync_thread.is_alive():
+            return dict(_cover_resync_state)
+        if not track_ids:
+            return {"running": False, "done": 0, "total": 0, "updated": 0}
+        _cover_resync_state.update(
+            {"running": True, "done": 0, "total": len(track_ids), "updated": 0}
+        )
+        thread = threading.Thread(
+            target=_run_cover_resync,
+            args=(track_ids,),
+            daemon=True,
+            name="cover-resync",
+        )
+        _cover_resync_thread = thread
+        state = dict(_cover_resync_state)
+    thread.start()
+    return state
+
+
+@app.post("/api/covers/resync")
+async def resync_cover(body: ResyncCoverBody) -> dict:
+    """Force re-fetch cover art for one song (overwrites on remote hit)."""
+    track = _resolve_track(body.track_id)
+    result = await resolve_cover(
+        Path(track.path),
+        artist=track.artist,
+        title=track.title,
+        album=track.album,
+        cache_dir=covers_cache_dir(),
+        generic_path=_generic_cover_path(),
+        force=True,
+    )
+    return {
+        "track_id": body.track_id,
+        "source": result.source,
+        "updated": result.source.startswith("remote"),
+    }
+
+
 @app.get("/api/audio/{track_id:path}")
 def audio(track_id: str):
     track = _resolve_track(track_id)
@@ -468,14 +614,13 @@ def audio(track_id: str):
 @app.get("/api/cover/{track_id:path}")
 async def cover(track_id: str):
     track = _resolve_track(track_id)
-    generic = WEB_DIR / "album-generic.png"
     result = await resolve_cover(
         Path(track.path),
         artist=track.artist,
         title=track.title,
         album=track.album,
         cache_dir=covers_cache_dir(),
-        generic_path=generic if generic.is_file() else WEB_DIR / "album-generic.png",
+        generic_path=_generic_cover_path(),
     )
     if not result.path.is_file():
         raise HTTPException(status_code=404, detail="Portada no trobada")

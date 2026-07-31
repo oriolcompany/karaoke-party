@@ -73,8 +73,8 @@ echo [3/3] Arrencant servidor a http://127.0.0.1:8765
 echo         Tanca aquesta finestra per aturar Karaoke Party.
 echo.
 
-REM Use python -m so we don't depend on karaoke-party.exe (often locked if already running).
-python -m karaoke_party --open --host 127.0.0.1 --port 8765
+REM Always use the venv interpreter (avoid a leftover system Python on PATH).
+".venv\Scripts\python.exe" -m karaoke_party --open --host 127.0.0.1 --port 8765
 set "EXITCODE=%errorlevel%"
 echo.
 if not "%EXITCODE%"=="0" (

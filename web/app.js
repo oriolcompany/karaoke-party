@@ -8,9 +8,14 @@ const searchEl = document.getElementById("search");
 const rootInput = document.getElementById("rootInput");
 const loadBtn = document.getElementById("loadBtn");
 const retryLyricsBtn = document.getElementById("retryLyricsBtn");
+const resyncCoversBtn = document.getElementById("resyncCoversBtn");
+const resyncCoverBtn = document.getElementById("resyncCoverBtn");
 const backBtn = document.getElementById("backBtn");
 const player = document.getElementById("player");
-const previewPlayer = document.getElementById("previewPlayer");
+const previewPlayers = [
+  document.getElementById("previewPlayer"),
+  Object.assign(new Audio(), { preload: "auto" }),
+];
 const lyricsEl = document.getElementById("lyrics");
 const lineCurrentEl = document.getElementById("lineCurrent");
 const lineNextEl = document.getElementById("lineNext");
@@ -29,11 +34,24 @@ const modeCoverBtn = document.getElementById("modeCover");
 const modeGridBtn = document.getElementById("modeGrid");
 const syncStatusBtn = document.getElementById("syncStatusBtn");
 const syncQueueMeta = document.getElementById("syncQueueMeta");
+const settingsBtn = document.getElementById("settingsBtn");
+const settingsModal = document.getElementById("settingsModal");
+const settingsCloseBtn = document.getElementById("settingsCloseBtn");
+const librarySettingsStatus = document.getElementById("librarySettingsStatus");
+const coversSettingsStatus = document.getElementById("coversSettingsStatus");
+const libraryBrowseSongBtn = document.getElementById("libraryBrowseSongBtn");
+const libraryBrowseAlbumBtn = document.getElementById("libraryBrowseAlbumBtn");
+const hiddenOnlyOffBtn = document.getElementById("hiddenOnlyOffBtn");
+const hiddenOnlyOnBtn = document.getElementById("hiddenOnlyOnBtn");
+const albumBackBtn = document.getElementById("albumBackBtn");
 
 const GENERIC_COVER = "/album-generic.png";
 const COVER_VISIBLE = 4;
 const VIEW_MODE_KEY = "karaoke-browse-mode";
 const ALIGN_MODE_KEY = "karaoke-align-mode";
+const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
+const HIDDEN_ONLY_KEY = "karaoke-show-hidden-only";
+let coverBust = 0;
 
 const ICON_SYNCED =
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 5.4 12.8l1.4-1.4 2.4 2.4 7-7 1.4 1.4z"/></svg>`;
@@ -52,11 +70,24 @@ function loadAlignMode() {
   return "off";
 }
 
+let playableTracks = [];
+let hiddenTracks = [];
 let tracks = [];
 let filteredTracks = [];
+let filteredAlbums = [];
 let selectedIndex = 0;
 let previewToken = 0;
+let previewActive = 0;
+let previewFadeTimer = 0;
+const PREVIEW_FADE_MS = 320;
+let previewCtx = null;
+let previewGains = [null, null];
+let previewGraphReady = false;
 let browseMode = localStorage.getItem(VIEW_MODE_KEY) === "grid" ? "grid" : "cover";
+let libraryBrowseMode =
+  localStorage.getItem(LIBRARY_BROWSE_KEY) === "album" ? "album" : "song";
+let showHiddenOnly = localStorage.getItem(HIDDEN_ONLY_KEY) === "1";
+let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
 let lyricLines = [];
@@ -138,43 +169,472 @@ function beginStageOutro() {
   }, 500);
 }
 
-function stopPreview() {
-  previewToken += 1;
-  previewPlayer.pause();
-  previewPlayer.removeAttribute("src");
-  previewPlayer.load();
+function previewSlots() {
+  return {
+    current: previewPlayers[previewActive],
+    next: previewPlayers[1 - previewActive],
+    currentGain: previewGains[previewActive],
+    nextGain: previewGains[1 - previewActive],
+    currentIndex: previewActive,
+    nextIndex: 1 - previewActive,
+  };
 }
 
-function playPreviewForSelection() {
-  const track = filteredTracks[selectedIndex];
+async function ensurePreviewGraph() {
+  if (!previewGraphReady) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    previewCtx = new Ctx();
+    previewPlayers.forEach((el, index) => {
+      el.volume = 1; // level is controlled by Web Audio gains
+      const source = previewCtx.createMediaElementSource(el);
+      const gain = previewCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain);
+      gain.connect(previewCtx.destination);
+      previewGains[index] = gain;
+    });
+    previewGraphReady = true;
+    // Probe/debug access for transition tests.
+    window.__previewProbe = {
+      gains: () => previewGains.map((g) => (g ? g.gain.value : 0)),
+      active: () => previewActive,
+      players: () =>
+        previewPlayers.map((el) => ({
+          paused: el.paused,
+          ended: el.ended,
+          t: el.currentTime,
+          rs: el.readyState,
+          src: (el.currentSrc || "").split("/").pop() || "",
+        })),
+    };
+  }
+  if (previewCtx.state === "suspended") {
+    await previewCtx.resume();
+  }
+}
+
+function setPreviewGain(index, value) {
+  const gain = previewGains[index];
+  if (!gain || !previewCtx) return;
+  const now = previewCtx.currentTime;
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setValueAtTime(value, now);
+}
+
+function clearPreviewElement(el) {
+  // Never call el.load() here — it can mute the shared audio device briefly.
+  el.pause();
+  el.removeAttribute("src");
+}
+
+function silencePreviewElement(el, index) {
+  el.pause();
+  if (typeof index === "number") setPreviewGain(index, 0);
+}
+
+function cancelPreviewFade() {
+  if (previewFadeTimer) {
+    clearTimeout(previewFadeTimer);
+    previewFadeTimer = 0;
+  }
+  if (!previewCtx) return;
+  const now = previewCtx.currentTime;
+  previewGains.forEach((gain) => {
+    if (!gain) return;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+  });
+}
+
+function stopPreview() {
+  previewToken += 1;
+  cancelPreviewFade();
+  previewPlayers.forEach((el, index) => {
+    setPreviewGain(index, 0);
+    clearPreviewElement(el);
+  });
+  previewActive = 0;
+}
+
+function settlePreviewRoles() {
+  cancelPreviewFade();
+  const a = previewPlayers[0];
+  const b = previewPlayers[1];
+  const aGain = previewGains[0] ? previewGains[0].gain.value : 0;
+  const bGain = previewGains[1] ? previewGains[1].gain.value : 0;
+  const aLive = !a.paused && !a.ended && aGain > 0.05;
+  const bLive = !b.paused && !b.ended && bGain > 0.05;
+  if (aLive && bLive) {
+    previewActive = aGain >= bGain ? 0 : 1;
+  } else if (bLive && !aLive) {
+    previewActive = 1;
+  } else if (aLive && !bLive) {
+    previewActive = 0;
+  }
+  setPreviewGain(1 - previewActive, 0);
+  silencePreviewElement(previewPlayers[1 - previewActive], 1 - previewActive);
+  if (!previewPlayers[previewActive].paused && !previewPlayers[previewActive].ended) {
+    setPreviewGain(previewActive, 1);
+  }
+}
+
+function crossfadePreview(fromIndex, toIndex, token) {
+  if (!previewCtx) return;
+  const fromGain = previewGains[fromIndex];
+  const toGain = previewGains[toIndex];
+  const fromEl = previewPlayers[fromIndex];
+  const fromAlive = fromEl && !fromEl.paused && !fromEl.ended && fromGain.gain.value > 0.01;
+  const now = previewCtx.currentTime;
+  const dur = PREVIEW_FADE_MS / 1000;
+  const steps = 32;
+  const fadeOut = new Float32Array(steps);
+  const fadeIn = new Float32Array(steps);
+  for (let i = 0; i < steps; i += 1) {
+    const t = i / (steps - 1);
+    const angle = t * (Math.PI / 2);
+    fadeOut[i] = fromAlive ? Math.cos(angle) : 0;
+    fadeIn[i] = Math.sin(angle);
+  }
+  fromGain.gain.cancelScheduledValues(now);
+  toGain.gain.cancelScheduledValues(now);
+  fromGain.gain.setValueAtTime(fromAlive ? Math.max(fromGain.gain.value, 0.001) : 0, now);
+  toGain.gain.setValueAtTime(Math.max(toGain.gain.value, 0.0001), now);
+  if (fromAlive) fromGain.gain.setValueCurveAtTime(fadeOut, now, dur);
+  else fromGain.gain.setValueAtTime(0, now);
+  toGain.gain.setValueCurveAtTime(fadeIn, now, dur);
+
+  previewFadeTimer = setTimeout(() => {
+    previewFadeTimer = 0;
+    if (token !== previewToken) return;
+    setPreviewGain(fromIndex, 0);
+    clearPreviewElement(fromEl);
+    setPreviewGain(toIndex, 1);
+    previewActive = toIndex;
+    setTimeout(() => {
+      if (token === previewToken) armUpcomingPreview();
+    }, 400);
+  }, PREVIEW_FADE_MS + 40);
+}
+
+function previewUrlFor(trackId) {
+  return `/api/audio/${encodeURI(trackId)}`;
+}
+
+function previewHasTrack(el, trackId) {
+  if (!el?.src || !trackId) return false;
+  try {
+    return decodeURIComponent(new URL(el.src, location.href).pathname).endsWith(
+      `/api/audio/${trackId}`
+    );
+  } catch {
+    return el.src.includes(encodeURI(trackId));
+  }
+}
+
+function preparePreviewElement(el, trackId) {
+  el.pause();
+  if (previewHasTrack(el, trackId) && el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return false;
+  }
+  el.preload = "auto";
+  el.src = previewUrlFor(trackId);
+  return true;
+}
+
+function armUpcomingPreview() {
+  const list = browseList();
+  if (viewMenu.classList.contains("hidden") || list.length < 2) return;
+  const upcomingItem = list[(selectedIndex + 1) % list.length];
+  const upcoming =
+    upcomingItem?.kind === "album" ? upcomingItem.coverTrack : upcomingItem;
+  if (!upcoming?.id) return;
+  const { next, nextIndex } = previewSlots();
+  setPreviewGain(nextIndex, 0);
+  preparePreviewElement(next, upcoming.id);
+}
+
+function sleepPreview(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForPreviewPrimed(el, token, minTime = 0.15) {
+  const deadline = performance.now() + 1800;
+  while (performance.now() < deadline) {
+    if (token !== previewToken) return false;
+    if (
+      !el.paused &&
+      !el.ended &&
+      el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
+      el.currentTime >= minTime
+    ) {
+      return true;
+    }
+    await sleepPreview(16);
+  }
+  return !el.paused && !el.ended && token === previewToken;
+}
+
+async function playPreviewForSelection() {
+  const track = selectedTrack();
   if (!track) {
     stopPreview();
     return;
   }
+  await ensurePreviewGraph();
+  settlePreviewRoles();
   const token = ++previewToken;
-  previewPlayer.src = `/api/audio/${encodeURI(track.id)}`;
-  previewPlayer.currentTime = 0;
-  previewPlayer.play().catch(() => {
+  const { current, next, currentIndex, nextIndex } = previewSlots();
+
+  // Already playing this track — keep it, and arm the following one.
+  if (previewHasTrack(current, track.id) && !current.paused && !current.ended) {
+    setPreviewGain(currentIndex, 1);
+    setTimeout(() => {
+      if (token === previewToken) armUpcomingPreview();
+    }, 200);
+    return;
+  }
+
+  // Keep the current song audible until the next one is really producing audio.
+  if (!current.paused && !current.ended) setPreviewGain(currentIndex, 1);
+  setPreviewGain(nextIndex, 0);
+  preparePreviewElement(next, track.id);
+
+  const startIncoming = async () => {
     if (token !== previewToken) return;
+    try {
+      if (next.currentTime > 0.01) next.currentTime = 0;
+    } catch {
+      /* ignore seek before metadata */
+    }
+    setPreviewGain(nextIndex, 0);
+    try {
+      await next.play();
+    } catch {
+      if (token !== previewToken) silencePreviewElement(next, nextIndex);
+      return;
+    }
+    const primed = await waitForPreviewPrimed(next, token, 0.15);
+    if (token !== previewToken) {
+      silencePreviewElement(next, nextIndex);
+      return;
+    }
+    if (!primed && (current.paused || current.ended)) {
+      setPreviewGain(nextIndex, 1);
+      previewActive = nextIndex;
+      return;
+    }
+    crossfadePreview(currentIndex, nextIndex, token);
+  };
+
+  if (next.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+    await startIncoming();
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const onReady = () => {
+      next.removeEventListener("canplay", onReady);
+      resolve();
+    };
+    next.addEventListener("canplay", onReady);
+    setTimeout(() => {
+      next.removeEventListener("canplay", onReady);
+      resolve();
+    }, 1500);
   });
+  if (token !== previewToken) return;
+  await startIncoming();
+}
+
+function isAlbumListView() {
+  return libraryBrowseMode === "album" && !openedAlbum;
+}
+
+function browseList() {
+  return isAlbumListView() ? filteredAlbums : filteredTracks;
+}
+
+function selectedBrowseItem() {
+  return browseList()[selectedIndex] || null;
 }
 
 function selectedTrack() {
-  return filteredTracks[selectedIndex] || null;
+  const item = selectedBrowseItem();
+  if (!item) return null;
+  if (item.kind === "album") return item.coverTrack || null;
+  return item;
+}
+
+function albumKey(artist, album) {
+  return `${(artist || "").toLowerCase()}::${(album || "").toLowerCase()}`;
+}
+
+function pickAlbumCoverTrack(albumTracks) {
+  if (!albumTracks.length) return null;
+  // Prefer the image shared by most songs; tie-break by lowest track number.
+  const byHash = new Map();
+  for (const track of albumTracks) {
+    const hash = track.cover_hash || "";
+    if (!hash) continue;
+    let bucket = byHash.get(hash);
+    if (!bucket) {
+      bucket = [];
+      byHash.set(hash, bucket);
+    }
+    bucket.push(track);
+  }
+  if (byHash.size) {
+    let best = null;
+    for (const group of byHash.values()) {
+      if (
+        !best ||
+        group.length > best.length ||
+        (group.length === best.length &&
+          (group[0].track || 10 ** 9) < (best[0].track || 10 ** 9))
+      ) {
+        best = group;
+      }
+    }
+    return (
+      [...best].sort(
+        (a, b) => (a.track || 10 ** 9) - (b.track || 10 ** 9) || a.title.localeCompare(b.title)
+      )[0] || best[0]
+    );
+  }
+  return (
+    [...albumTracks].sort(
+      (a, b) => (a.track || 10 ** 9) - (b.track || 10 ** 9) || a.title.localeCompare(b.title)
+    )[0] || albumTracks[0]
+  );
+}
+
+function buildAlbums(sourceTracks) {
+  const map = new Map();
+  for (const track of sourceTracks) {
+    const artist = track.artist || "Artista desconegut";
+    const album = track.album || "Sense àlbum";
+    const key = albumKey(artist, album);
+    let entry = map.get(key);
+    if (!entry) {
+      entry = {
+        kind: "album",
+        key,
+        artist,
+        album,
+        year: track.year || 0,
+        tracks: [],
+        coverTrack: track,
+      };
+      map.set(key, entry);
+    }
+    entry.tracks.push(track);
+    entry.year = Math.max(entry.year || 0, track.year || 0);
+  }
+  for (const entry of map.values()) {
+    entry.coverTrack = pickAlbumCoverTrack(entry.tracks);
+  }
+  return [...map.values()].sort((a, b) => {
+    const artistCmp = a.artist.localeCompare(b.artist, "ca", { sensitivity: "base" });
+    if (artistCmp) return artistCmp;
+    if ((b.year || 0) !== (a.year || 0)) return (b.year || 0) - (a.year || 0);
+    return a.album.localeCompare(b.album, "ca", { sensitivity: "base" });
+  });
+}
+
+function applyLibraryBrowseMode() {
+  const albumMode = libraryBrowseMode === "album";
+  libraryBrowseSongBtn?.classList.toggle("is-active", !albumMode);
+  libraryBrowseAlbumBtn?.classList.toggle("is-active", albumMode);
+  libraryBrowseSongBtn?.setAttribute("aria-pressed", albumMode ? "false" : "true");
+  libraryBrowseAlbumBtn?.setAttribute("aria-pressed", albumMode ? "true" : "false");
+  browsePanel.dataset.libraryBrowse = libraryBrowseMode;
+  browsePanel.dataset.albumOpen = openedAlbum ? "1" : "0";
+  if (albumBackBtn) albumBackBtn.hidden = !(libraryBrowseMode === "album" && openedAlbum);
+  if (searchEl) {
+    searchEl.placeholder = isAlbumListView()
+      ? "Cerca àlbums, artistes…"
+      : openedAlbum
+        ? `Cerca a “${openedAlbum.album}”…`
+        : "Cerca cançons, artistes…";
+  }
+}
+
+function setLibraryBrowseMode(mode) {
+  libraryBrowseMode = mode === "album" ? "album" : "song";
+  localStorage.setItem(LIBRARY_BROWSE_KEY, libraryBrowseMode);
+  openedAlbum = null;
+  selectedIndex = 0;
+  applyLibraryBrowseMode();
+  renderSongs(searchEl.value, { play: false });
+}
+
+function applyHiddenOnlyMode() {
+  hiddenOnlyOffBtn?.classList.toggle("is-active", !showHiddenOnly);
+  hiddenOnlyOnBtn?.classList.toggle("is-active", showHiddenOnly);
+  hiddenOnlyOffBtn?.setAttribute("aria-pressed", showHiddenOnly ? "false" : "true");
+  hiddenOnlyOnBtn?.setAttribute("aria-pressed", showHiddenOnly ? "true" : "false");
+  browsePanel.dataset.hiddenOnly = showHiddenOnly ? "1" : "0";
+  tracks = showHiddenOnly ? hiddenTracks : playableTracks;
+}
+
+function setShowHiddenOnly(enabled) {
+  showHiddenOnly = !!enabled;
+  localStorage.setItem(HIDDEN_ONLY_KEY, showHiddenOnly ? "1" : "0");
+  openedAlbum = null;
+  selectedIndex = 0;
+  applyHiddenOnlyMode();
+  applyLibraryBrowseMode();
+  renderSongs(searchEl.value, { play: false });
+  refreshLibraryMetaLabel();
+}
+
+function openAlbum(album) {
+  if (!album || album.kind !== "album") return;
+  openedAlbum = album;
+  selectedIndex = 0;
+  if (searchEl) searchEl.value = "";
+  applyLibraryBrowseMode();
+  renderSongs("", { play: true });
+}
+
+function closeAlbum() {
+  if (!openedAlbum) return;
+  const previousKey = openedAlbum.key;
+  openedAlbum = null;
+  selectedIndex = 0;
+  applyLibraryBrowseMode();
+  renderSongs(searchEl.value, { play: true });
+  const idx = filteredAlbums.findIndex((a) => a.key === previousKey);
+  if (idx >= 0) setSelectedIndex(idx, { play: true });
 }
 
 function updateCoverMeta() {
-  const track = selectedTrack();
-  if (!track) {
+  const item = selectedBrowseItem();
+  if (!item) {
     coverArtist.textContent = "";
     coverTitle.textContent = "";
     coverIndex.textContent = "";
+    resyncCoverBtn.hidden = true;
     updatePrimaryAction();
     return;
   }
-  coverArtist.textContent = track.artist || "Artista desconegut";
-  coverTitle.textContent = track.title || track.relpath;
-  coverIndex.textContent = `${selectedIndex + 1}/${filteredTracks.length}`;
+  const list = browseList();
+  if (item.kind === "album") {
+    coverArtist.textContent = item.artist || "Artista desconegut";
+    coverTitle.textContent = item.album || "Sense àlbum";
+    const year = item.year ? ` · ${item.year}` : "";
+    coverIndex.textContent = `${selectedIndex + 1}/${list.length} · ${item.tracks.length} cançons${year}`;
+    resyncCoverBtn.hidden = true;
+  } else {
+    coverArtist.textContent = openedAlbum
+      ? openedAlbum.album || item.album || "Àlbum"
+      : item.artist || "Artista desconegut";
+    coverTitle.textContent = item.title || item.relpath;
+    coverIndex.textContent = openedAlbum
+      ? `${selectedIndex + 1}/${list.length} · ${item.artist || ""}`
+      : `${selectedIndex + 1}/${list.length}`;
+    resyncCoverBtn.hidden = false;
+  }
   updatePrimaryAction();
 }
 
@@ -198,7 +658,8 @@ function setBrowseMode(mode, { rerender = true } = {}) {
 
 function coverImageFor(track) {
   const img = document.createElement("img");
-  img.src = `/api/cover/${encodeURI(track.id)}`;
+  const bust = coverBust ? `?t=${coverBust}` : "";
+  img.src = `/api/cover/${encodeURI(track.id)}${bust}`;
   img.alt = "";
   img.draggable = false;
   img.loading = "lazy";
@@ -207,6 +668,11 @@ function coverImageFor(track) {
     img.src = GENERIC_COVER;
   };
   return img;
+}
+
+function refreshCoverImages() {
+  coverBust = Date.now();
+  renderSongs(searchEl.value, { play: false });
 }
 
 function alignBadgeFor(track) {
@@ -257,6 +723,16 @@ function refreshAlignBadges() {
   });
 }
 
+function findBrowseIndexByTrackId(trackId) {
+  if (!trackId) return -1;
+  return browseList().findIndex((item) => {
+    if (item?.kind === "album") {
+      return item.coverTrack?.id === trackId || item.tracks?.some((t) => t.id === trackId);
+    }
+    return item?.id === trackId;
+  });
+}
+
 function markTrackAligned(trackId) {
   const track = tracks.find((t) => t.id === trackId);
   if (track) track.whisper_aligned = true;
@@ -264,7 +740,7 @@ function markTrackAligned(trackId) {
     const previousId = selectedTrack()?.id;
     renderSongs(searchEl.value, { play: false });
     if (previousId) {
-      const idx = filteredTracks.findIndex((t) => t.id === previousId);
+      const idx = findBrowseIndexByTrackId(previousId);
       if (idx >= 0) {
         selectedIndex = idx;
         layoutCovers();
@@ -315,12 +791,25 @@ function showAlignBadges() {
 }
 
 function updatePrimaryAction() {
+  const item = selectedBrowseItem();
   const track = selectedTrack();
   const syncActions = isSyncActionMode();
-  singBtn.classList.toggle("is-sync-mode", syncActions);
+  singBtn.classList.toggle("is-sync-mode", syncActions && !isAlbumListView());
+  if (isAlbumListView()) {
+    singBtn.disabled = !item;
+    singBtn.textContent = "Obrir àlbum";
+    updateSyncQueueMeta();
+    return;
+  }
   if (!track) {
     singBtn.disabled = true;
     singBtn.textContent = syncActions ? "Sincronitzar" : "Cantar";
+    updateSyncQueueMeta();
+    return;
+  }
+  if (track.has_lyrics === false) {
+    singBtn.disabled = true;
+    singBtn.textContent = "Sense lletra";
     updateSyncQueueMeta();
     return;
   }
@@ -377,13 +866,18 @@ function cycleAlignMode() {
 }
 
 function activateSelectedTrack() {
-  const track = selectedTrack();
-  if (!track) return;
-  if (isSyncActionMode()) {
-    enqueueSync(track);
+  const item = selectedBrowseItem();
+  if (!item) return;
+  if (item.kind === "album") {
+    openAlbum(item);
     return;
   }
-  openSong(track.id);
+  if (item.has_lyrics === false) return;
+  if (isSyncActionMode()) {
+    enqueueSync(item);
+    return;
+  }
+  openSong(item.id);
 }
 
 function enqueueSync(track) {
@@ -511,14 +1005,27 @@ function layoutGridSelection() {
   }
 }
 
+function gridColumnCount() {
+  const cards = songGrid.querySelectorAll(".grid-card");
+  if (cards.length < 2) return 1;
+  const firstTop = cards[0].offsetTop;
+  let cols = 1;
+  for (let i = 1; i < cards.length; i += 1) {
+    if (cards[i].offsetTop !== firstTop) break;
+    cols += 1;
+  }
+  return Math.max(1, cols);
+}
+
 function setSelectedIndex(index, { play = true } = {}) {
-  if (!filteredTracks.length) {
+  const list = browseList();
+  if (!list.length) {
     selectedIndex = 0;
     updateCoverMeta();
     stopPreview();
     return;
   }
-  const next = ((index % filteredTracks.length) + filteredTracks.length) % filteredTracks.length;
+  const next = ((index % list.length) + list.length) % list.length;
   selectedIndex = next;
   layoutCovers();
   layoutGridSelection();
@@ -528,15 +1035,39 @@ function setSelectedIndex(index, { play = true } = {}) {
   }
 }
 
+function coverMediaForItem(item) {
+  if (item?.kind === "album") {
+    const media = document.createElement("span");
+    media.className = "cover-media";
+    if (item.coverTrack) media.appendChild(coverImageFor(item.coverTrack));
+    else {
+      const img = document.createElement("img");
+      img.src = GENERIC_COVER;
+      img.alt = "";
+      img.draggable = false;
+      media.appendChild(img);
+    }
+    return media;
+  }
+  return coverMediaFor(item);
+}
+
+function itemAriaLabel(item) {
+  if (item?.kind === "album") {
+    return `${item.artist || "Artista"} — ${item.album || "Àlbum"}`;
+  }
+  return `${item?.artist || "Artista"} — ${item?.title || item?.relpath || ""}`;
+}
+
 function renderCoverflowItems() {
   coverTrack.innerHTML = "";
-  filteredTracks.forEach((track, index) => {
+  browseList().forEach((item, index) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "cover-item";
     btn.dataset.index = String(index);
-    btn.setAttribute("aria-label", `${track.artist || "Artista"} — ${track.title || track.relpath}`);
-    btn.appendChild(coverMediaFor(track));
+    btn.setAttribute("aria-label", itemAriaLabel(item));
+    btn.appendChild(coverMediaForItem(item));
     btn.addEventListener("click", () => {
       if (index === selectedIndex) {
         activateSelectedTrack();
@@ -550,19 +1081,25 @@ function renderCoverflowItems() {
 
 function renderGridItems() {
   songGrid.innerHTML = "";
-  filteredTracks.forEach((track, index) => {
+  browseList().forEach((item, index) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "grid-card";
     btn.dataset.index = String(index);
-    btn.setAttribute("aria-label", `${track.artist || "Artista"} — ${track.title || track.relpath}`);
-    btn.appendChild(coverMediaFor(track));
+    btn.setAttribute("aria-label", itemAriaLabel(item));
+    btn.appendChild(coverMediaForItem(item));
     const artist = document.createElement("p");
     artist.className = "grid-artist";
-    artist.textContent = track.artist || "Artista desconegut";
+    artist.textContent =
+      item.kind === "album"
+        ? item.artist || "Artista desconegut"
+        : item.artist || "Artista desconegut";
     const title = document.createElement("p");
     title.className = "grid-title";
-    title.textContent = track.title || track.relpath;
+    title.textContent =
+      item.kind === "album"
+        ? item.album || "Sense àlbum"
+        : item.title || item.relpath;
     btn.append(artist, title);
     btn.addEventListener("click", () => {
       if (index === selectedIndex) {
@@ -577,33 +1114,63 @@ function renderGridItems() {
 
 function renderSongs(filter = "", options = { play: true }) {
   const needle = filter.trim().toLowerCase();
-  filteredTracks = tracks.filter((t) => {
+  const baseTracks = tracks.filter((t) => {
     if (alignMode === "synced" && !t.whisper_aligned) return false;
-    if (!needle) return true;
-    return `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(needle);
+    return true;
   });
 
+  if (libraryBrowseMode === "album" && openedAlbum) {
+    const albumTracks = openedAlbum.tracks.filter((t) => baseTracks.some((b) => b.id === t.id));
+    filteredTracks = albumTracks.filter((t) => {
+      if (!needle) return true;
+      return `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(needle);
+    });
+    filteredAlbums = [];
+  } else if (isAlbumListView()) {
+    filteredAlbums = buildAlbums(baseTracks).filter((album) => {
+      if (!needle) return true;
+      const hay = `${album.artist} ${album.album} ${album.tracks.map((t) => t.title).join(" ")}`;
+      return hay.toLowerCase().includes(needle);
+    });
+    filteredTracks = [];
+  } else {
+    filteredTracks = baseTracks.filter((t) => {
+      if (!needle) return true;
+      return `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(needle);
+    });
+    filteredAlbums = [];
+  }
+
   applyBrowseMode();
+  applyLibraryBrowseMode();
   coverTrack.innerHTML = "";
   songGrid.innerHTML = "";
 
-  if (!filteredTracks.length) {
+  const list = browseList();
+  if (!list.length) {
     stopPreview();
     coverArtist.textContent = "";
     coverTitle.textContent = tracks.length
       ? alignMode === "synced"
         ? "Cap cançó sincronitzada"
         : "Cap resultat"
-      : "Sense cançons";
+      : showHiddenOnly
+        ? "Cap cançó oculta"
+        : "Sense cançons";
     coverIndex.textContent = "";
+    resyncCoverBtn.hidden = true;
     updatePrimaryAction();
     const empty = document.createElement("p");
     empty.className = "cover-empty";
     empty.textContent = tracks.length
       ? alignMode === "synced"
         ? "Encara no hi ha cançons amb lletra alineada amb Whisper."
-        : "Cap resultat amb aquesta cerca."
-      : "Carrega una carpeta de música per començar.";
+        : isAlbumListView()
+          ? "Cap àlbum amb aquesta cerca."
+          : "Cap resultat amb aquesta cerca."
+      : showHiddenOnly
+        ? "No hi ha cançons amagades sense lletra."
+        : "Carrega una carpeta de música per començar.";
     (browseMode === "grid" ? songGrid : coverTrack).appendChild(empty);
     return;
   }
@@ -614,7 +1181,7 @@ function renderSongs(filter = "", options = { play: true }) {
     renderCoverflowItems();
   }
 
-  if (selectedIndex >= filteredTracks.length) selectedIndex = 0;
+  if (selectedIndex >= list.length) selectedIndex = 0;
   setSelectedIndex(selectedIndex, {
     play: options.play !== false && !viewMenu.classList.contains("hidden"),
   });
@@ -854,46 +1421,136 @@ function stopTicker() {
   rafId = 0;
 }
 
-function updateLibraryMeta(data) {
-  const previousId = selectedTrack()?.id;
-  tracks = data.tracks || [];
-  rootInput.value = data.root || "";
+function setSettingsStatus(el, text, tone = "") {
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("is-running", tone === "running");
+  el.classList.toggle("is-ok", tone === "ok");
+  el.classList.toggle("is-error", tone === "error");
+}
+
+let lastLibraryData = null;
+
+function refreshLibraryMetaLabel() {
+  const data = lastLibraryData;
+  if (!data) return;
   const pending = data.pending || 0;
   const hidden = data.hidden || 0;
   const total = data.total || 0;
   const errors = data.errors || 0;
+  const coversResync = data.covers_resync || {};
 
-  retryLyricsBtn.hidden = !errors;
-
+  if (coversResync.running) {
+    const done = coversResync.done || 0;
+    const coverTotal = coversResync.total || 0;
+    libraryMeta.textContent = `Resincronitzant portades… ${done}/${coverTotal}`;
+    return;
+  }
   if (!data.root) {
     libraryMeta.textContent = "Carrega una carpeta de MP3s etiquetats per començar la nit";
-  } else if (!tracks.length && pending) {
+    return;
+  }
+  if (showHiddenOnly) {
+    const count = hiddenTracks.length;
+    if (!count && pending) {
+      libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
+    } else if (!count) {
+      libraryMeta.textContent = `Cap cançó oculta (de ${total} al disc)`;
+    } else {
+      const bits = [`${count} cançons ocultes sense lletra`];
+      if (errors) bits.push(`${errors} amb error de connexió`);
+      if (pending) bits.push(`${pending} pendents`);
+      libraryMeta.textContent = bits.join(" · ");
+    }
+    return;
+  }
+  if (!playableTracks.length && pending) {
     libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
-  } else if (!tracks.length && errors) {
-    libraryMeta.textContent = `No s’ha pogut connectar a LRCLIB per ${errors} cançons · prova “Reintentar lletres”`;
-  } else if (!tracks.length) {
+  } else if (!playableTracks.length && errors) {
+    libraryMeta.textContent = `No s’ha pogut connectar a LRCLIB per ${errors} cançons · Configuració → Reintentar lletres`;
+  } else if (!playableTracks.length) {
     libraryMeta.textContent = `Cap cançó amb lletra (de ${total} al disc)`;
   } else if (hidden || pending || errors) {
-    const bits = [`${tracks.length} cançons amb lletra`];
+    const bits = [`${playableTracks.length} cançons amb lletra`];
     if (hidden - errors > 0) bits.push(`${hidden - errors} amagades sense lletra`);
     if (errors) bits.push(`${errors} amb error de connexió`);
     if (pending) bits.push(`${pending} pendents`);
     libraryMeta.textContent = bits.join(" · ");
   } else {
-    libraryMeta.textContent = `${tracks.length} cançons a punt · tria’n una per cantar`;
+    libraryMeta.textContent = `${playableTracks.length} cançons a punt · tria’n una per cantar`;
   }
+}
+
+function updateLibraryMeta(data) {
+  const previousId = selectedTrack()?.id;
+  lastLibraryData = data;
+  playableTracks = data.tracks || [];
+  hiddenTracks = data.hidden_tracks || [];
+  applyHiddenOnlyMode();
+  rootInput.value = data.root || "";
+  const total = data.total || 0;
+  const errors = data.errors || 0;
+  const coversResync = data.covers_resync || {};
+
+  retryLyricsBtn.hidden = !errors;
+  resyncCoversBtn.disabled = !data.root || !total || !!coversResync.running;
+  resyncCoversBtn.textContent = coversResync.running
+    ? `Resincronitzant… ${coversResync.done || 0}/${coversResync.total || 0}`
+    : "Resincronitzar portades";
+
+  if (coversResync.running) {
+    const done = coversResync.done || 0;
+    const coverTotal = coversResync.total || 0;
+    setSettingsStatus(
+      coversSettingsStatus,
+      `Treballant… ${done}/${coverTotal} portades`,
+      "running"
+    );
+  }
+  refreshLibraryMetaLabel();
 
   renderSongs(searchEl.value, { play: false });
   if (previousId) {
-    const idx = filteredTracks.findIndex((t) => t.id === previousId);
+    const idx = findBrowseIndexByTrackId(previousId);
     if (idx >= 0) {
       selectedIndex = idx;
       layoutCovers();
       layoutGridSelection();
       updateCoverMeta();
     }
-  } else if (filteredTracks.length && !viewMenu.classList.contains("hidden")) {
+  } else if (browseList().length && !viewMenu.classList.contains("hidden")) {
     playPreviewForSelection();
+  }
+}
+
+async function pollCoverResync() {
+  setSettingsStatus(coversSettingsStatus, "Iniciant resincronització de portades…", "running");
+  let data = await api("/api/library");
+  while (data.covers_resync && data.covers_resync.running) {
+    const done = data.covers_resync.done || 0;
+    const total = data.covers_resync.total || 0;
+    setSettingsStatus(
+      coversSettingsStatus,
+      `Treballant… ${done}/${total} portades processades`,
+      "running"
+    );
+    updateLibraryMeta(data);
+    await sleep(500);
+    data = await api("/api/library");
+  }
+  const updated = (data.covers_resync && data.covers_resync.updated) || 0;
+  const total = (data.covers_resync && data.covers_resync.total) || 0;
+  refreshCoverImages();
+  updateLibraryMeta(data);
+  if (total) {
+    libraryMeta.textContent = `Portades actualitzades: ${updated}/${total}`;
+    setSettingsStatus(
+      coversSettingsStatus,
+      `Fet · ${updated}/${total} portades actualitzades`,
+      "ok"
+    );
+  } else {
+    setSettingsStatus(coversSettingsStatus, "No hi ha cançons per resincronitzar", "error");
   }
 }
 
@@ -903,28 +1560,58 @@ function sleep(ms) {
 
 async function loadLibrary() {
   libraryMeta.textContent = "Carregant la biblioteca…";
-  let data = await api("/api/library");
-  // Wait for the single in-flight probe pass (no perpetual 2s refresh after it ends).
-  while (data.probe && data.probe.running) {
-    const total = data.probe.total || data.pending || 0;
-    const done = Math.min(data.probe.done || 0, total || 0);
-    libraryMeta.textContent = `Buscant lletres… ${done}/${total} · ${(data.tracks || []).length} a punt`;
-    await sleep(500);
-    data = await api("/api/library");
+  setSettingsStatus(librarySettingsStatus, "Carregant la biblioteca…", "running");
+  loadBtn.disabled = true;
+  rootInput.disabled = true;
+  try {
+    let data = await api("/api/library");
+    // Wait for the single in-flight probe pass (no perpetual 2s refresh after it ends).
+    while (data.probe && data.probe.running) {
+      const total = data.probe.total || data.pending || 0;
+      const done = Math.min(data.probe.done || 0, total || 0);
+      const ready = (data.tracks || []).length;
+      const msg = `Buscant lletres… ${done}/${total} · ${ready} a punt`;
+      libraryMeta.textContent = msg;
+      setSettingsStatus(librarySettingsStatus, msg, "running");
+      await sleep(500);
+      data = await api("/api/library");
+    }
+    updateLibraryMeta(data);
+    const total = data.total || 0;
+    const withLyrics = (data.tracks || []).length;
+    setSettingsStatus(
+      librarySettingsStatus,
+      `Fet · ${withLyrics} cançons amb lletra (de ${total} al disc)`,
+      "ok"
+    );
+  } finally {
+    loadBtn.disabled = false;
+    rootInput.disabled = false;
   }
-  updateLibraryMeta(data);
 }
 
 async function setRoot() {
   const path = rootInput.value.trim();
-  if (!path) return;
+  if (!path) {
+    setSettingsStatus(librarySettingsStatus, "Indica una carpeta de música", "error");
+    return;
+  }
   libraryMeta.textContent = "Carregant la biblioteca…";
-  await api("/api/library/root", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-  await loadLibrary();
+  setSettingsStatus(librarySettingsStatus, "Recarregant la biblioteca…", "running");
+  loadBtn.disabled = true;
+  rootInput.disabled = true;
+  try {
+    await api("/api/library/root", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    await loadLibrary();
+  } catch (err) {
+    loadBtn.disabled = false;
+    rootInput.disabled = false;
+    throw err;
+  }
 }
 
 async function openSong(trackId) {
@@ -963,19 +1650,60 @@ async function openSong(trackId) {
 
 loadBtn.addEventListener("click", () => {
   setRoot().catch((err) => {
-    libraryMeta.textContent = err.message || "Error en carregar";
+    const msg = err.message || "Error en carregar";
+    libraryMeta.textContent = msg;
+    setSettingsStatus(librarySettingsStatus, msg, "error");
   });
 });
 retryLyricsBtn.addEventListener("click", () => {
   retryLyricsBtn.disabled = true;
   libraryMeta.textContent = "Tornant a buscar les lletres…";
+  setSettingsStatus(librarySettingsStatus, "Tornant a buscar les lletres…", "running");
   api("/api/library/retry", { method: "POST" })
     .then(() => loadLibrary())
     .catch((err) => {
-      libraryMeta.textContent = err.message || "Error en reintentar";
+      const msg = err.message || "Error en reintentar";
+      libraryMeta.textContent = msg;
+      setSettingsStatus(librarySettingsStatus, msg, "error");
     })
     .finally(() => {
       retryLyricsBtn.disabled = false;
+    });
+});
+resyncCoversBtn.addEventListener("click", () => {
+  resyncCoversBtn.disabled = true;
+  libraryMeta.textContent = "Resincronitzant portades…";
+  setSettingsStatus(coversSettingsStatus, "Iniciant resincronització de portades…", "running");
+  api("/api/library/covers/resync", { method: "POST" })
+    .then(() => pollCoverResync())
+    .catch((err) => {
+      const msg = err.message || "Error en resincronitzar portades";
+      libraryMeta.textContent = msg;
+      setSettingsStatus(coversSettingsStatus, msg, "error");
+      resyncCoversBtn.disabled = false;
+    });
+});
+resyncCoverBtn.addEventListener("click", () => {
+  const track = selectedTrack();
+  if (!track) return;
+  resyncCoverBtn.disabled = true;
+  libraryMeta.textContent = `Buscant portada per “${track.title}”…`;
+  api("/api/covers/resync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track_id: track.id }),
+  })
+    .then((result) => {
+      refreshCoverImages();
+      libraryMeta.textContent = result.updated
+        ? `Portada nova per “${track.title}”`
+        : `Sense portada remota per “${track.title}” · es manté l’actual`;
+    })
+    .catch((err) => {
+      libraryMeta.textContent = err.message || "Error en actualitzar la portada";
+    })
+    .finally(() => {
+      resyncCoverBtn.disabled = false;
     });
 });
 backBtn.addEventListener("click", showMenu);
@@ -988,6 +1716,56 @@ coverNext.addEventListener("click", () => setSelectedIndex(selectedIndex + 1));
 modeCoverBtn.addEventListener("click", () => setBrowseMode("cover"));
 modeGridBtn.addEventListener("click", () => setBrowseMode("grid"));
 syncStatusBtn.addEventListener("click", () => cycleAlignMode());
+
+function isSettingsOpen() {
+  return settingsModal && !settingsModal.classList.contains("hidden") && !settingsModal.hidden;
+}
+
+function showSettingsSection(sectionId) {
+  const id = sectionId || "general";
+  settingsModal?.querySelectorAll(".settings-nav-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.settingsSection === id);
+  });
+  settingsModal?.querySelectorAll("[data-settings-section-panel]").forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.settingsSectionPanel === id);
+  });
+}
+
+function openSettings(sectionId = "general") {
+  if (!settingsModal) return;
+  showSettingsSection(sectionId);
+  settingsModal.hidden = false;
+  settingsModal.classList.remove("hidden");
+  settingsBtn?.setAttribute("aria-expanded", "true");
+  (settingsCloseBtn || settingsModal).focus();
+}
+
+function closeSettings() {
+  if (!settingsModal || !isSettingsOpen()) return;
+  settingsModal.classList.add("hidden");
+  settingsModal.hidden = true;
+  settingsBtn?.setAttribute("aria-expanded", "false");
+  settingsBtn?.focus();
+}
+
+settingsBtn?.addEventListener("click", () => {
+  if (isSettingsOpen()) closeSettings();
+  else openSettings("general");
+});
+settingsModal?.addEventListener("click", (event) => {
+  if (event.target?.hasAttribute?.("data-settings-close")) closeSettings();
+});
+settingsModal?.querySelectorAll(".settings-nav-btn").forEach((btn) => {
+  btn.addEventListener("click", () => showSettingsSection(btn.dataset.settingsSection));
+});
+libraryBrowseSongBtn?.addEventListener("click", () => setLibraryBrowseMode("song"));
+libraryBrowseAlbumBtn?.addEventListener("click", () => setLibraryBrowseMode("album"));
+hiddenOnlyOffBtn?.addEventListener("click", () => setShowHiddenOnly(false));
+hiddenOnlyOnBtn?.addEventListener("click", () => setShowHiddenOnly(true));
+albumBackBtn?.addEventListener("click", () => closeAlbum());
+applyHiddenOnlyMode();
+applyLibraryBrowseMode();
+
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
 });
@@ -995,7 +1773,7 @@ coverTrack.addEventListener(
   "wheel",
   (event) => {
     if (browseMode !== "cover") return;
-    if (!filteredTracks.length || viewMenu.classList.contains("hidden")) return;
+    if (!browseList().length || viewMenu.classList.contains("hidden")) return;
     event.preventDefault();
     if (Math.abs(event.deltaY) < 2 && Math.abs(event.deltaX) < 2) return;
     const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
@@ -1006,8 +1784,19 @@ coverTrack.addEventListener(
 window.addEventListener(
   "keydown",
   (event) => {
+    if (event.key === "Escape" && isSettingsOpen()) {
+      event.preventDefault();
+      closeSettings();
+      return;
+    }
+    if (event.key === "Escape" && openedAlbum && !viewMenu.classList.contains("hidden")) {
+      event.preventDefault();
+      closeAlbum();
+      return;
+    }
+    if (isSettingsOpen()) return;
     if (viewMenu.classList.contains("hidden")) return;
-    if (!filteredTracks.length) return;
+    if (!browseList().length) return;
 
     const key = event.key;
     if (key === "ArrowLeft" || key === "Left") {
@@ -1023,15 +1812,13 @@ window.addEventListener(
     if (key === "ArrowUp" || key === "Up") {
       if (browseMode !== "grid") return;
       event.preventDefault();
-      const cols = Math.max(1, Math.floor(songGrid.clientWidth / 180));
-      setSelectedIndex(selectedIndex - cols);
+      setSelectedIndex(selectedIndex - gridColumnCount());
       return;
     }
     if (key === "ArrowDown" || key === "Down") {
       if (browseMode !== "grid") return;
       event.preventDefault();
-      const cols = Math.max(1, Math.floor(songGrid.clientWidth / 180));
-      setSelectedIndex(selectedIndex + cols);
+      setSelectedIndex(selectedIndex + gridColumnCount());
       return;
     }
 
@@ -1045,13 +1832,12 @@ window.addEventListener(
   },
   true
 );
-previewPlayer.addEventListener("ended", () => {
-  // Loop preview lightly so the selected song keeps playing.
-  if (!viewMenu.classList.contains("hidden") && selectedTrack()) {
-    previewPlayer.currentTime = 0;
-    previewPlayer.play().catch(() => {});
-  }
-});
+function onPreviewEnded(event) {
+  if (event.target !== previewPlayers[previewActive]) return;
+  if (viewMenu.classList.contains("hidden") || !browseList().length) return;
+  setSelectedIndex(selectedIndex + 1);
+}
+previewPlayers.forEach((el) => el.addEventListener("ended", onPreviewEnded));
 playBtn.addEventListener("click", () => {
   togglePlayback().catch(() => updatePlayButton());
 });
