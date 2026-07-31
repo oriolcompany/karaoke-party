@@ -118,7 +118,23 @@ def extract_embedded_cover(audio_path: Path) -> tuple[bytes, str] | None:
 
 
 def find_folder_cover(audio_path: Path) -> Path | None:
+    """Use a folder image only when this looks like an album folder.
+
+    A flat dump like Documents/Songs with dozens of tracks often has one leftover
+    cover.jpg; applying it to every song is worse than the generic art.
+    """
+    from .config import AUDIO_EXTENSIONS
+
     folder = audio_path.parent
+    audio_files = [
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS and not path.name.startswith("._")
+    ]
+    # Album folders are typically a handful of tracks; flat libraries are not.
+    if len(audio_files) > 15:
+        return None
+
     for name in FOLDER_COVER_NAMES:
         candidate = folder / name
         if candidate.is_file():
@@ -136,15 +152,19 @@ def _cache_path_for_embedded(audio_path: Path, mime: str, cache_dir: Path) -> Pa
     return cache_dir / f"{digest}{_suffix_from_mime(mime)}"
 
 
+# Exact artist+title is the bar for accepting a remote image. We never fall
+# back to "first search result" — that is what put wrong covers on songs.
+MIN_ITUNES_SCORE = 7  # artist exact (3) + title exact (4)
+
+
 async def fetch_remote_cover(artist: str, title: str, album: str = "") -> tuple[bytes, str] | None:
-    """Fetch artwork from iTunes Search API."""
-    queries = []
+    """Fetch artwork from iTunes Search API (only high-confidence matches)."""
+    queries: list[str] = []
+    # Always prefer artist+title. Title-only searches return random covers.
     if artist and title:
         queries.append(f"{artist} {title}")
     if artist and album:
         queries.append(f"{artist} {album}")
-    if title:
-        queries.append(title)
     if not queries:
         return None
 
@@ -188,34 +208,42 @@ def _pick_itunes_artwork(
     title: str,
     album: str,
 ) -> str | None:
+    """Return artwork URL only when artist+title match confidently."""
     if not results:
         return None
     want_artist = _normalize(artist)
     want_title = _normalize(title)
     want_album = _normalize(album)
+    if not want_title:
+        return None
 
     scored: list[tuple[int, str]] = []
     for row in results:
         url = row.get("artworkUrl100") or row.get("artworkUrl60")
         if not url:
             continue
+        got_artist = _normalize(str(row.get("artistName") or ""))
+        got_title = _normalize(str(row.get("trackName") or ""))
+        got_album = _normalize(str(row.get("collectionName") or ""))
+
         score = 0
-        if want_artist and _normalize(str(row.get("artistName") or "")) == want_artist:
+        if want_artist and got_artist == want_artist:
             score += 3
-        if want_title and _normalize(str(row.get("trackName") or "")) == want_title:
+        if got_title == want_title:
             score += 4
-        if want_album and _normalize(str(row.get("collectionName") or "")) == want_album:
+        if want_album and got_album == want_album:
             score += 2
-        if want_title and want_title in _normalize(str(row.get("trackName") or "")):
-            score += 1
+        # Substring title matches alone are too weak (e.g. "Love" → "Love Story").
         scored.append((score, str(url)))
 
     if not scored:
         return None
     scored.sort(key=lambda item: item[0], reverse=True)
-    if scored[0][0] <= 0:
-        return scored[0][1]
-    return scored[0][1]
+    best_score, best_url = scored[0]
+    # Need artist+title exact (7). Never return a weak / random hit.
+    if best_score < MIN_ITUNES_SCORE:
+        return None
+    return best_url
 
 
 def embed_cover_in_audio(audio_path: Path, data: bytes, mime: str) -> bool:
