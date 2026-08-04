@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=21" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -221,20 +221,11 @@
                 <h4 class="settings-block-title">Lletres</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Torna a descarregar les lletres bàsiques (LRCLIB).
+                    Torna a descarregar les lletres bàsiques (LRCLIB) de les cançons que encara no en tenen.
                   </p>
-                  <div
-                    class="settings-toggle"
-                    role="group"
-                    aria-label="Resincronitzar lletres bàsiques"
-                  >
-                    <button id="resyncLyricsAllBtn" type="button" class="settings-toggle-btn">
-                      Totes
-                    </button>
-                    <button id="resyncLyricsMissingBtn" type="button" class="settings-toggle-btn">
-                      Sense lletra
-                    </button>
-                  </div>
+                  <button id="resyncLyricsMissingBtn" type="button">
+                    Resincronitzar sense lletra
+                  </button>
                 </div>
                 <div class="settings-inline-row">
                   <p class="settings-help">
@@ -306,6 +297,33 @@
               </div>
 
               <div class="settings-block">
+                <h4 class="settings-block-title">Escenari</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Com es mostren les frases mentre cantes: una principal amb la següent a sota, o dues frases al mateix nivell que s’alternen.
+                  </p>
+                  <div class="settings-toggle" role="group" aria-label="Estil de lletra a l’escenari">
+                    <button
+                      id="lyricsLayoutStackBtn"
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      aria-pressed="true"
+                    >
+                      Principal + següent
+                    </button>
+                    <button
+                      id="lyricsLayoutDualBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Dues línies
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-block">
                 <h4 class="settings-block-title">Àudio</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
@@ -367,8 +385,10 @@
       </div>
 
       <div id="lyrics" class="karaoke-board" aria-live="polite">
-        <div id="lineCurrent" class="k-slot k-slot-current"></div>
-        <div id="lineNext" class="k-slot k-slot-next"></div>
+        <div class="k-stack" id="kStack">
+          <div id="lineCurrent" class="k-slot k-slot-current"></div>
+          <div id="lineNext" class="k-slot k-slot-next"></div>
+        </div>
       </div>
 
       <div class="stage-dock">
@@ -378,6 +398,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=15"></script>
+    <script src="/app.js?v=21"></script>
   </body>
 </html>

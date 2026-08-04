@@ -15,7 +15,6 @@ const searchEl = document.getElementById("search");
 const rootInput = document.getElementById("rootInput");
 const loadBtn = document.getElementById("loadBtn");
 const retryLyricsBtn = document.getElementById("retryLyricsBtn");
-const resyncLyricsAllBtn = document.getElementById("resyncLyricsAllBtn");
 const resyncLyricsMissingBtn = document.getElementById("resyncLyricsMissingBtn");
 const syncLyricsWhisperBtn = document.getElementById("syncLyricsWhisperBtn");
 const resyncCoverBtn = document.getElementById("resyncCoverBtn");
@@ -26,6 +25,7 @@ const previewPlayers = [
   Object.assign(new Audio(), { preload: "auto" }),
 ];
 const lyricsEl = document.getElementById("lyrics");
+const kStackEl = document.getElementById("kStack") || lyricsEl;
 const lineCurrentEl = document.getElementById("lineCurrent");
 const lineNextEl = document.getElementById("lineNext");
 const songTitle = document.getElementById("songTitle");
@@ -55,6 +55,8 @@ const lyricsFilterHiddenBtn = document.getElementById("lyricsFilterHiddenBtn");
 const lyricsFilterAllBtn = document.getElementById("lyricsFilterAllBtn");
 const muteOffBtn = document.getElementById("muteOffBtn");
 const muteOnBtn = document.getElementById("muteOnBtn");
+const lyricsLayoutStackBtn = document.getElementById("lyricsLayoutStackBtn");
+const lyricsLayoutDualBtn = document.getElementById("lyricsLayoutDualBtn");
 const albumBackBtn = document.getElementById("albumBackBtn");
 
 const GENERIC_COVER = "/album-generic.png";
@@ -63,8 +65,14 @@ const VIEW_MODE_KEY = "karaoke-browse-mode";
 const ALIGN_MODE_KEY = "karaoke-align-mode";
 const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
+const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
 const MUTE_KEY = "karaoke-muted";
 let coverBust = 0;
+
+function loadLyricsLayout() {
+  const stored = localStorage.getItem(LYRICS_LAYOUT_KEY);
+  return stored === "dual" ? "dual" : "stack";
+}
 
 function loadLyricsFilterMode() {
   const stored = localStorage.getItem(LYRICS_FILTER_KEY);
@@ -111,6 +119,7 @@ let libraryBrowseMode =
   localStorage.getItem(LIBRARY_BROWSE_KEY) === "album" ? "album" : "song";
 let lyricsFilterMode = loadLyricsFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
+let lyricsLayout = loadLyricsLayout();
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
@@ -118,6 +127,9 @@ let lyricLines = [];
 let activeLineIndex = -1;
 let wordNodes = [];
 let lineSwapTimer = null;
+let dualRefreshTimer = null;
+/** @type {{ slotEl: HTMLElement, line: object } | null} */
+let dualPending = null;
 let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
@@ -227,6 +239,27 @@ function previewSlots() {
     currentIndex: previewActive,
     nextIndex: 1 - previewActive,
   };
+}
+
+function applyLyricsLayout() {
+  const dual = lyricsLayout === "dual";
+  lyricsLayoutStackBtn?.classList.toggle("is-active", !dual);
+  lyricsLayoutDualBtn?.classList.toggle("is-active", dual);
+  lyricsLayoutStackBtn?.setAttribute("aria-pressed", dual ? "false" : "true");
+  lyricsLayoutDualBtn?.setAttribute("aria-pressed", dual ? "true" : "false");
+  lyricsEl?.classList.toggle("is-dual", dual);
+  lyricsEl?.classList.toggle("is-stack", !dual);
+}
+
+function setLyricsLayout(mode) {
+  lyricsLayout = mode === "dual" ? "dual" : "stack";
+  localStorage.setItem(LYRICS_LAYOUT_KEY, lyricsLayout);
+  applyLyricsLayout();
+  if (lyricLines.length) {
+    const index = Math.max(0, activeLineIndex);
+    activeLineIndex = -1;
+    setActiveLine(index);
+  }
 }
 
 function applyAudioMute() {
@@ -1403,13 +1436,30 @@ function lineWords(line) {
   return [{ time: line.time, end: line.time + 1.5, text: line.text }];
 }
 
-function fillSlot(slotEl, line, { trackWords = false } = {}) {
+function clearLineRoll() {
+  if (lineSwapTimer) {
+    clearTimeout(lineSwapTimer);
+    lineSwapTimer = null;
+  }
+  if (dualRefreshTimer) {
+    clearTimeout(dualRefreshTimer);
+    dualRefreshTimer = null;
+  }
+  dualPending = null;
+  kStackEl.classList.remove("is-rolling");
+  kStackEl.querySelectorAll(".k-slot-ghost").forEach((node) => node.remove());
+  lineCurrentEl.classList.remove("is-rising", "is-refreshing");
+  lineNextEl.classList.remove("is-entering", "is-refreshing");
+}
+
+function fillSlot(slotEl, line, { trackWords = false, resetWords = true } = {}) {
   slotEl.innerHTML = "";
-  slotEl.classList.remove("is-empty", "swap-out", "swap-in");
+  slotEl.classList.remove("is-empty", "is-rising", "is-entering", "is-refreshing");
   if (!line) {
     slotEl.classList.add("is-empty");
     return;
   }
+  if (trackWords && resetWords) wordNodes = [];
   for (const word of lineWords(line)) {
     const node = buildWordNode(word);
     slotEl.appendChild(node);
@@ -1424,37 +1474,232 @@ function fillSlot(slotEl, line, { trackWords = false } = {}) {
   }
 }
 
-function showTwoLines(index, animate) {
+function bindSlotWords(slotEl, line) {
+  wordNodes = [];
+  if (!line || !slotEl) return;
+  const nodes = [...slotEl.querySelectorAll(".k-word")];
+  lineWords(line).forEach((word, index) => {
+    const el = nodes[index];
+    if (!el) return;
+    wordNodes.push({
+      start: Number(word.time),
+      end: Number(word.end),
+      el,
+      fill: el.querySelector(".k-word-fill"),
+    });
+  });
+}
+
+function setSlotRole(slotEl, role) {
+  slotEl.classList.toggle("is-active", role === "active");
+  slotEl.classList.toggle("is-idle", role === "idle");
+  if (role === "active") slotEl.classList.remove("is-empty");
+}
+
+function markSlotSung(slotEl) {
+  slotEl.querySelectorAll(".k-word").forEach((el) => {
+    el.classList.add("done");
+    el.classList.remove("active");
+    const fill = el.querySelector(".k-word-fill");
+    if (fill) fill.style.width = "100%";
+  });
+}
+
+function slotMatchesLine(slotEl, line) {
+  if (!line || !slotEl) return false;
+  const nodes = [...slotEl.querySelectorAll(".k-word")];
+  const expected = lineWords(line);
+  if (nodes.length !== expected.length) return false;
+  return nodes.every((node, index) => {
+    const text = node.querySelector(".k-word-base")?.textContent ?? node.textContent;
+    return text === expected[index].text;
+  });
+}
+
+function lineTimeSpan(line, index) {
+  const words = lineWords(line);
+  const start = words.length ? Number(words[0].time) : Number(line.time);
+  let end;
+  if (words.length) {
+    end = Number(words[words.length - 1].end);
+  } else if (lyricLines[index + 1]) {
+    end = Number(lyricLines[index + 1].time);
+  } else {
+    end = start + 4;
+  }
+  return { start, end: Math.max(end, start + 0.05) };
+}
+
+function activeLineProgress(t, index) {
+  const line = lyricLines[index];
+  if (!line) return 0;
+  const { start, end } = lineTimeSpan(line, index);
+  return (t - start) / (end - start);
+}
+
+function maybeRevealDualUpcoming(t) {
+  if (!dualPending || lyricsLayout !== "dual") return;
+  if (activeLineIndex < 0) return;
+  if (activeLineProgress(t, activeLineIndex) < 0.25) return;
+  const { slotEl, line } = dualPending;
+  dualPending = null;
+  if (!line) {
+    slotEl.classList.add("is-empty");
+    setSlotRole(slotEl, "idle");
+    return;
+  }
+  refreshSlotSoft(slotEl, line);
+}
+
+function refreshSlotSoft(slotEl, line) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) {
+    fillSlot(slotEl, line);
+    setSlotRole(slotEl, "idle");
+    return;
+  }
+  slotEl.classList.add("is-refreshing");
+  if (dualRefreshTimer) clearTimeout(dualRefreshTimer);
+  dualRefreshTimer = setTimeout(() => {
+    slotEl.innerHTML = "";
+    slotEl.classList.remove("is-empty", "is-rising", "is-entering");
+    if (!line) {
+      slotEl.classList.add("is-empty");
+      setSlotRole(slotEl, "idle");
+      dualRefreshTimer = null;
+      return;
+    }
+    for (const word of lineWords(line)) {
+      slotEl.appendChild(buildWordNode(word));
+    }
+    setSlotRole(slotEl, "idle");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => slotEl.classList.remove("is-refreshing"));
+    });
+    dualRefreshTimer = null;
+  }, 160);
+}
+
+function showStackLines(index, animate) {
   const current = lyricLines[index] || null;
   const next = lyricLines[index + 1] || null;
   wordNodes = [];
+  lineCurrentEl.classList.remove("is-active", "is-idle");
+  lineNextEl.classList.remove("is-active", "is-idle");
 
-  if (!animate) {
+  if (!animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    clearLineRoll();
     fillSlot(lineCurrentEl, current, { trackWords: true });
     fillSlot(lineNextEl, next);
     syncWordFills(player.currentTime);
     return;
   }
 
-  lineCurrentEl.classList.add("swap-out");
-  if (lineSwapTimer) clearTimeout(lineSwapTimer);
+  clearLineRoll();
+
+  const stackRect = kStackEl.getBoundingClientRect();
+  const currentRect = lineCurrentEl.getBoundingClientRect();
+
+  const ghost = document.createElement("div");
+  ghost.className = "k-slot k-slot-ghost";
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.innerHTML = lineCurrentEl.innerHTML;
+  ghost.style.top = `${currentRect.top - stackRect.top}px`;
+  ghost.style.left = `${currentRect.left - stackRect.left}px`;
+  ghost.style.width = `${currentRect.width}px`;
+  kStackEl.appendChild(ghost);
+
+  fillSlot(lineCurrentEl, current, { trackWords: true });
+  lineCurrentEl.classList.add("is-rising");
+  fillSlot(lineNextEl, next);
+  lineNextEl.classList.add("is-entering");
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      kStackEl.classList.add("is-rolling");
+      lineCurrentEl.classList.remove("is-rising");
+      lineNextEl.classList.remove("is-entering");
+      syncWordFills(player.currentTime);
+    });
+  });
+
   lineSwapTimer = setTimeout(() => {
-    fillSlot(lineCurrentEl, current, { trackWords: true });
-    fillSlot(lineNextEl, next);
-    lineCurrentEl.classList.add("swap-in");
+    clearLineRoll();
     syncWordFills(player.currentTime);
-    requestAnimationFrame(() => lineCurrentEl.classList.remove("swap-in"));
-  }, 160);
+  }, 580);
+}
+
+function showDualLines(index, sequential) {
+  const current = lyricLines[index] || null;
+  const upcoming = lyricLines[index + 1] || null;
+  const previous = index > 0 ? lyricLines[index - 1] : null;
+  const activeOnTop = index % 2 === 0;
+  const activeSlot = activeOnTop ? lineCurrentEl : lineNextEl;
+  const idleSlot = activeOnTop ? lineNextEl : lineCurrentEl;
+  const t = player.currentTime;
+
+  clearLineRoll();
+
+  if (!sequential) {
+    wordNodes = [];
+    fillSlot(activeSlot, current, { trackWords: true });
+    setSlotRole(activeSlot, "active");
+
+    // First pair shows both lines. Later, keep the finished line until the
+    // active one passes its first quarter, then reveal the next upcoming phrase.
+    if (index === 0) {
+      fillSlot(idleSlot, upcoming);
+      setSlotRole(idleSlot, "idle");
+      if (!upcoming) idleSlot.classList.add("is-empty");
+    } else if (activeLineProgress(t, index) >= 0.25) {
+      fillSlot(idleSlot, upcoming);
+      setSlotRole(idleSlot, "idle");
+      if (!upcoming) idleSlot.classList.add("is-empty");
+    } else {
+      fillSlot(idleSlot, previous);
+      setSlotRole(idleSlot, "idle");
+      if (previous) markSlotSung(idleSlot);
+      else idleSlot.classList.add("is-empty");
+      if (upcoming) dualPending = { slotEl: idleSlot, line: upcoming };
+    }
+    syncWordFills(t);
+    return;
+  }
+
+  // Illumination moves to the line already on screen; finished slot waits for first quarter.
+  setSlotRole(activeSlot, "active");
+  setSlotRole(idleSlot, "idle");
+  if (slotMatchesLine(activeSlot, current)) {
+    bindSlotWords(activeSlot, current);
+  } else {
+    fillSlot(activeSlot, current, { trackWords: true });
+  }
+  markSlotSung(idleSlot);
+  if (upcoming) dualPending = { slotEl: idleSlot, line: upcoming };
+  maybeRevealDualUpcoming(t);
+  syncWordFills(t);
+}
+
+function showLyricsLayout(index, animate) {
+  if (lyricsLayout === "dual") {
+    showDualLines(index, animate);
+  } else {
+    showStackLines(index, animate);
+  }
 }
 
 function renderLyrics(payload) {
   lyricLines = payload.lines || [];
   activeLineIndex = -1;
   wordNodes = [];
+  applyLyricsLayout();
 
   if (!lyricLines.length) {
+    clearLineRoll();
     lineCurrentEl.innerHTML = "";
     lineNextEl.innerHTML = "";
+    lineCurrentEl.classList.remove("is-active", "is-idle");
+    lineNextEl.classList.remove("is-active", "is-idle");
     lineNextEl.classList.add("is-empty");
     const p = document.createElement("span");
     p.className = "lyrics-empty";
@@ -1463,14 +1708,15 @@ function renderLyrics(payload) {
     return;
   }
 
-  showTwoLines(0, false);
+  showLyricsLayout(0, false);
 }
 
 function setActiveLine(index) {
   if (index === activeLineIndex) return;
-  const animate = activeLineIndex >= 0;
+  const prev = activeLineIndex;
+  const sequential = prev >= 0 && index === prev + 1;
   activeLineIndex = index;
-  showTwoLines(index, animate);
+  showLyricsLayout(index, sequential);
 }
 
 function syncWordFills(t) {
@@ -1521,6 +1767,7 @@ function syncKaraoke() {
   }
   setActiveLine(lineIndex);
   syncWordFills(t);
+  maybeRevealDualUpcoming(t);
 }
 
 function tick() {
@@ -1628,7 +1875,6 @@ function updateLibraryMeta(data) {
 
   retryLyricsBtn.hidden = !errors;
   const resyncBusy = !data.root || !total || !!probe.running;
-  if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = resyncBusy;
   if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = resyncBusy;
   if (syncLyricsWhisperBtn) {
     syncLyricsWhisperBtn.disabled = !data.root || !playableTracks.length || syncRunning;
@@ -1921,19 +2167,15 @@ retryLyricsBtn.addEventListener("click", () => {
       retryLyricsBtn.disabled = false;
     });
 });
-function startBasicLyricsResync(scope) {
-  const label =
-    scope === "missing"
-      ? "Resincronitzant cançons sense lletra…"
-      : "Resincronitzant totes les lletres bàsiques…";
-  if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = true;
+function startBasicLyricsResync() {
+  const label = "Resincronitzant cançons sense lletra…";
   if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = true;
   libraryMeta.textContent = label;
   setSettingsStatus(lyricsSyncSettingsStatus, label, "running");
   api("/api/library/lyrics/resync", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scope }),
+    body: JSON.stringify({ scope: "missing" }),
   })
     .then(() => pollBasicLyricsResync())
     .catch((err) => {
@@ -1942,13 +2184,11 @@ function startBasicLyricsResync(scope) {
       setSettingsStatus(lyricsSyncSettingsStatus, msg, "error");
     })
     .finally(() => {
-      if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = false;
       if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = false;
     });
 }
 
-resyncLyricsAllBtn?.addEventListener("click", () => startBasicLyricsResync("all"));
-resyncLyricsMissingBtn?.addEventListener("click", () => startBasicLyricsResync("missing"));
+resyncLyricsMissingBtn?.addEventListener("click", () => startBasicLyricsResync());
 syncLyricsWhisperBtn?.addEventListener("click", () => {
   syncLyricsWhisperBtn.disabled = true;
   try {
@@ -2039,10 +2279,13 @@ lyricsFilterHiddenBtn?.addEventListener("click", () => setLyricsFilterMode("hidd
 lyricsFilterAllBtn?.addEventListener("click", () => setLyricsFilterMode("all"));
 muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
 muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
+lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
+lyricsLayoutDualBtn?.addEventListener("click", () => setLyricsLayout("dual"));
 albumBackBtn?.addEventListener("click", () => closeAlbum());
 applyLyricsFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
+applyLyricsLayout();
 
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
