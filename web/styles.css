@@ -112,6 +112,209 @@ body.mode-stage .fx-scan {
   min-height: 100vh;
 }
 
+/* ---------- Title screen (game boot) ---------- */
+body.mode-title .fx {
+  background:
+    radial-gradient(ellipse 85% 50% at 50% -8%, rgba(255, 45, 106, 0.48), transparent 58%),
+    radial-gradient(ellipse 55% 45% at 95% 85%, rgba(61, 231, 255, 0.22), transparent 55%),
+    radial-gradient(ellipse 45% 40% at 5% 75%, rgba(255, 225, 74, 0.16), transparent 50%),
+    linear-gradient(180deg, #1a0a14 0%, var(--bg) 42%, #05040a 100%);
+}
+
+body.mode-title .fx-glow {
+  opacity: 0.45;
+}
+
+.view-title {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: clamp(1.5rem, 5vh, 3rem) clamp(1rem, 4vw, 2.5rem);
+  box-sizing: border-box;
+}
+
+.title-stage {
+  width: min(40rem, 100%);
+  text-align: center;
+  display: grid;
+  gap: 0.35rem;
+  justify-items: center;
+}
+
+.title-kicker {
+  margin: 0;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  font-size: 0.78rem;
+  font-weight: 700;
+  opacity: 0;
+  animation: title-rise 0.7s ease-out 0.1s forwards;
+}
+
+.title-brand {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(3.4rem, 14vw, 7.5rem);
+  line-height: 0.88;
+  letter-spacing: 0.02em;
+  text-shadow:
+    0 0 40px rgba(255, 45, 106, 0.65),
+    0 0 80px rgba(255, 45, 106, 0.25),
+    0 12px 0 rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  animation: title-rise 0.85s ease-out 0.22s forwards;
+}
+
+.title-tagline {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: clamp(0.95rem, 2.4vw, 1.15rem);
+  font-weight: 600;
+  max-width: 22rem;
+  opacity: 0;
+  animation: title-rise 0.7s ease-out 0.4s forwards;
+}
+
+.title-cta {
+  margin-top: clamp(1.6rem, 5vh, 2.6rem);
+  width: min(32rem, 100%);
+  display: grid;
+  gap: 0.55rem;
+  opacity: 0;
+  animation: title-rise 0.75s ease-out 0.55s forwards;
+}
+
+.title-path-label {
+  justify-self: start;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.title-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: stretch;
+  width: 100%;
+}
+
+.title-path-row input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.4);
+  color: var(--ink);
+  padding: 0.95rem 1.2rem;
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.title-path-row input:focus {
+  outline: 2px solid rgba(61, 231, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.title-browse-btn {
+  min-width: 7.5rem;
+  padding: 0.95rem 1.1rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: rgba(255, 246, 234, 0.08);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.title-browse-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+  border-color: rgba(255, 246, 234, 0.28);
+}
+
+.title-browse-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  filter: none;
+}
+
+.title-start-btn {
+  justify-self: center;
+  margin-top: 0.85rem;
+  min-width: 14rem;
+  padding: 1rem 1.8rem;
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  animation: title-pulse 2.4s ease-in-out 1.4s infinite;
+}
+
+.title-start-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  filter: none;
+  animation: none;
+}
+
+.title-status {
+  margin: 0.15rem 0 0;
+  min-height: 1.3em;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: left;
+  justify-self: stretch;
+}
+
+.title-status.is-error {
+  color: #ff8aa8;
+}
+
+.title-status.is-running {
+  color: var(--cyan);
+}
+
+@keyframes title-rise {
+  from {
+    opacity: 0;
+    transform: translateY(1.1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes title-pulse {
+  0%,
+  100% {
+    box-shadow: 0 10px 30px rgba(255, 45, 106, 0.35);
+  }
+  50% {
+    box-shadow:
+      0 12px 36px rgba(255, 45, 106, 0.55),
+      0 0 24px rgba(255, 225, 74, 0.18);
+  }
+}
+
+@media (max-width: 640px) {
+  .title-path-row {
+    grid-template-columns: 1fr;
+  }
+
+  .title-browse-btn {
+    width: 100%;
+  }
+
+  .title-start-btn {
+    width: min(100%, 18rem);
+  }
+}
+
 /* ---------- Menu (SingStar select) ---------- */
 .view-menu {
   min-height: 100vh;
@@ -484,6 +687,15 @@ button:hover {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.55rem;
   align-items: center;
+}
+
+.settings-field-row-path {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.settings-field-row-path .settings-secondary-btn {
+  justify-self: stretch;
+  white-space: nowrap;
 }
 
 .settings-field-row input {

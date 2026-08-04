@@ -1,5 +1,12 @@
+const viewTitle = document.getElementById("view-title");
 const viewMenu = document.getElementById("view-menu");
 const viewStage = document.getElementById("view-stage");
+const titleRootInput = document.getElementById("titleRootInput");
+const titleBrowseBtn = document.getElementById("titleBrowseBtn");
+const titleStartBtn = document.getElementById("titleStartBtn");
+const titleStartForm = document.getElementById("titleStartForm");
+const titleStatus = document.getElementById("titleStatus");
+const browseRootBtn = document.getElementById("browseRootBtn");
 const coverTrack = document.getElementById("coverTrack");
 const songGrid = document.getElementById("songGrid");
 const coverflow = document.getElementById("coverflow");
@@ -8,7 +15,9 @@ const searchEl = document.getElementById("search");
 const rootInput = document.getElementById("rootInput");
 const loadBtn = document.getElementById("loadBtn");
 const retryLyricsBtn = document.getElementById("retryLyricsBtn");
-const resyncCoversBtn = document.getElementById("resyncCoversBtn");
+const resyncLyricsAllBtn = document.getElementById("resyncLyricsAllBtn");
+const resyncLyricsMissingBtn = document.getElementById("resyncLyricsMissingBtn");
+const syncLyricsWhisperBtn = document.getElementById("syncLyricsWhisperBtn");
 const resyncCoverBtn = document.getElementById("resyncCoverBtn");
 const backBtn = document.getElementById("backBtn");
 const player = document.getElementById("player");
@@ -38,11 +47,14 @@ const settingsBtn = document.getElementById("settingsBtn");
 const settingsModal = document.getElementById("settingsModal");
 const settingsCloseBtn = document.getElementById("settingsCloseBtn");
 const librarySettingsStatus = document.getElementById("librarySettingsStatus");
-const coversSettingsStatus = document.getElementById("coversSettingsStatus");
+const lyricsSyncSettingsStatus = document.getElementById("lyricsSyncSettingsStatus");
 const libraryBrowseSongBtn = document.getElementById("libraryBrowseSongBtn");
 const libraryBrowseAlbumBtn = document.getElementById("libraryBrowseAlbumBtn");
-const hiddenOnlyOffBtn = document.getElementById("hiddenOnlyOffBtn");
-const hiddenOnlyOnBtn = document.getElementById("hiddenOnlyOnBtn");
+const lyricsFilterLyricsBtn = document.getElementById("lyricsFilterLyricsBtn");
+const lyricsFilterHiddenBtn = document.getElementById("lyricsFilterHiddenBtn");
+const lyricsFilterAllBtn = document.getElementById("lyricsFilterAllBtn");
+const muteOffBtn = document.getElementById("muteOffBtn");
+const muteOnBtn = document.getElementById("muteOnBtn");
 const albumBackBtn = document.getElementById("albumBackBtn");
 
 const GENERIC_COVER = "/album-generic.png";
@@ -50,8 +62,17 @@ const COVER_VISIBLE = 4;
 const VIEW_MODE_KEY = "karaoke-browse-mode";
 const ALIGN_MODE_KEY = "karaoke-align-mode";
 const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
-const HIDDEN_ONLY_KEY = "karaoke-show-hidden-only";
+const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
+const MUTE_KEY = "karaoke-muted";
 let coverBust = 0;
+
+function loadLyricsFilterMode() {
+  const stored = localStorage.getItem(LYRICS_FILTER_KEY);
+  if (stored === "lyrics" || stored === "hidden" || stored === "all") return stored;
+  // legacy toggle: karaoke-show-hidden-only
+  if (localStorage.getItem("karaoke-show-hidden-only") === "1") return "hidden";
+  return "lyrics";
+}
 
 const ICON_SYNCED =
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 5.4 12.8l1.4-1.4 2.4 2.4 7-7 1.4 1.4z"/></svg>`;
@@ -72,6 +93,7 @@ function loadAlignMode() {
 
 let playableTracks = [];
 let hiddenTracks = [];
+let pendingTracks = [];
 let tracks = [];
 let filteredTracks = [];
 let filteredAlbums = [];
@@ -82,11 +104,13 @@ let previewFadeTimer = 0;
 const PREVIEW_FADE_MS = 320;
 let previewCtx = null;
 let previewGains = [null, null];
+let previewMasterGain = null;
 let previewGraphReady = false;
 let browseMode = localStorage.getItem(VIEW_MODE_KEY) === "grid" ? "grid" : "cover";
 let libraryBrowseMode =
   localStorage.getItem(LIBRARY_BROWSE_KEY) === "album" ? "album" : "song";
-let showHiddenOnly = localStorage.getItem(HIDDEN_ONLY_KEY) === "1";
+let lyricsFilterMode = loadLyricsFilterMode();
+let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
@@ -141,10 +165,35 @@ function clearStageOutro() {
   viewStage.classList.remove("is-outro");
 }
 
+function setTitleStatus(message, kind) {
+  if (!titleStatus) return;
+  titleStatus.textContent = message || "";
+  titleStatus.classList.toggle("is-error", kind === "error");
+  titleStatus.classList.toggle("is-running", kind === "running");
+}
+
+function showTitleScreen() {
+  clearStageOutro();
+  viewTitle?.classList.remove("hidden");
+  viewMenu.classList.add("hidden");
+  viewStage.classList.add("hidden");
+  document.body.classList.add("mode-title");
+  document.body.classList.remove("mode-stage");
+  viewStage.classList.remove("is-live");
+  player.pause();
+  stopTicker();
+  stopAlignPoll();
+  currentId = null;
+  updatePlayButton();
+  titleRootInput?.focus();
+}
+
 function showMenu() {
   clearStageOutro();
+  viewTitle?.classList.add("hidden");
   viewMenu.classList.remove("hidden");
   viewStage.classList.add("hidden");
+  document.body.classList.remove("mode-title");
   document.body.classList.remove("mode-stage");
   viewStage.classList.remove("is-live");
   player.pause();
@@ -180,17 +229,42 @@ function previewSlots() {
   };
 }
 
+function applyAudioMute() {
+  muteOffBtn?.classList.toggle("is-active", !audioMuted);
+  muteOnBtn?.classList.toggle("is-active", audioMuted);
+  muteOffBtn?.setAttribute("aria-pressed", audioMuted ? "false" : "true");
+  muteOnBtn?.setAttribute("aria-pressed", audioMuted ? "true" : "false");
+  if (player) player.muted = audioMuted;
+  previewPlayers.forEach((el) => {
+    el.muted = audioMuted;
+  });
+  if (previewMasterGain && previewCtx) {
+    const now = previewCtx.currentTime;
+    previewMasterGain.gain.cancelScheduledValues(now);
+    previewMasterGain.gain.setValueAtTime(audioMuted ? 0 : 1, now);
+  }
+}
+
+function setAudioMuted(muted) {
+  audioMuted = !!muted;
+  localStorage.setItem(MUTE_KEY, audioMuted ? "1" : "0");
+  applyAudioMute();
+}
+
 async function ensurePreviewGraph() {
   if (!previewGraphReady) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     previewCtx = new Ctx();
+    previewMasterGain = previewCtx.createGain();
+    previewMasterGain.gain.value = audioMuted ? 0 : 1;
+    previewMasterGain.connect(previewCtx.destination);
     previewPlayers.forEach((el, index) => {
       el.volume = 1; // level is controlled by Web Audio gains
       const source = previewCtx.createMediaElementSource(el);
       const gain = previewCtx.createGain();
       gain.gain.value = 0;
       source.connect(gain);
-      gain.connect(previewCtx.destination);
+      gain.connect(previewMasterGain);
       previewGains[index] = gain;
     });
     previewGraphReady = true;
@@ -568,21 +642,50 @@ function setLibraryBrowseMode(mode) {
   renderSongs(searchEl.value, { play: false });
 }
 
-function applyHiddenOnlyMode() {
-  hiddenOnlyOffBtn?.classList.toggle("is-active", !showHiddenOnly);
-  hiddenOnlyOnBtn?.classList.toggle("is-active", showHiddenOnly);
-  hiddenOnlyOffBtn?.setAttribute("aria-pressed", showHiddenOnly ? "false" : "true");
-  hiddenOnlyOnBtn?.setAttribute("aria-pressed", showHiddenOnly ? "true" : "false");
-  browsePanel.dataset.hiddenOnly = showHiddenOnly ? "1" : "0";
-  tracks = showHiddenOnly ? hiddenTracks : playableTracks;
+function compareTracks(a, b) {
+  const artistCmp = (a.artist || "").localeCompare(b.artist || "", "ca", {
+    sensitivity: "base",
+  });
+  if (artistCmp) return artistCmp;
+  if ((b.year || 0) !== (a.year || 0)) return (b.year || 0) - (a.year || 0);
+  const albumCmp = (a.album || "").localeCompare(b.album || "", "ca", {
+    sensitivity: "base",
+  });
+  if (albumCmp) return albumCmp;
+  if ((a.disc || 0) !== (b.disc || 0)) return (a.disc || 0) - (b.disc || 0);
+  const at = a.track > 0 ? a.track : 10 ** 9;
+  const bt = b.track > 0 ? b.track : 10 ** 9;
+  if (at !== bt) return at - bt;
+  return (a.title || "").localeCompare(b.title || "", "ca", { sensitivity: "base" });
 }
 
-function setShowHiddenOnly(enabled) {
-  showHiddenOnly = !!enabled;
-  localStorage.setItem(HIDDEN_ONLY_KEY, showHiddenOnly ? "1" : "0");
+function tracksForLyricsFilter() {
+  if (lyricsFilterMode === "hidden") return hiddenTracks;
+  if (lyricsFilterMode === "all") {
+    return [...playableTracks, ...hiddenTracks, ...pendingTracks].sort(compareTracks);
+  }
+  return playableTracks;
+}
+
+function applyLyricsFilterMode() {
+  const mode = lyricsFilterMode;
+  lyricsFilterLyricsBtn?.classList.toggle("is-active", mode === "lyrics");
+  lyricsFilterHiddenBtn?.classList.toggle("is-active", mode === "hidden");
+  lyricsFilterAllBtn?.classList.toggle("is-active", mode === "all");
+  lyricsFilterLyricsBtn?.setAttribute("aria-pressed", mode === "lyrics" ? "true" : "false");
+  lyricsFilterHiddenBtn?.setAttribute("aria-pressed", mode === "hidden" ? "true" : "false");
+  lyricsFilterAllBtn?.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
+  browsePanel.dataset.lyricsFilter = mode;
+  tracks = tracksForLyricsFilter();
+}
+
+function setLyricsFilterMode(mode) {
+  lyricsFilterMode =
+    mode === "hidden" || mode === "all" || mode === "lyrics" ? mode : "lyrics";
+  localStorage.setItem(LYRICS_FILTER_KEY, lyricsFilterMode);
   openedAlbum = null;
   selectedIndex = 0;
-  applyHiddenOnlyMode();
+  applyLyricsFilterMode();
   applyLibraryBrowseMode();
   renderSongs(searchEl.value, { play: false });
   refreshLibraryMetaLabel();
@@ -809,7 +912,7 @@ function updatePrimaryAction() {
   }
   if (track.has_lyrics === false) {
     singBtn.disabled = true;
-    singBtn.textContent = "Sense lletra";
+    singBtn.textContent = track.lyrics_pending ? "Pendent" : "Sense lletra";
     updateSyncQueueMeta();
     return;
   }
@@ -937,10 +1040,12 @@ async function runQueuedAlign(trackId) {
 async function processSyncQueue() {
   if (syncRunning) return;
   syncRunning = true;
+  if (syncLyricsWhisperBtn) syncLyricsWhisperBtn.disabled = true;
   while (syncQueue.length) {
     const trackId = syncQueue.shift();
     syncQueuedIds.delete(trackId);
-    const track = tracks.find((t) => t.id === trackId);
+    const track =
+      playableTracks.find((t) => t.id === trackId) || tracks.find((t) => t.id === trackId);
     if (!track || track.whisper_aligned) {
       refreshAlignBadges();
       updatePrimaryAction();
@@ -951,6 +1056,11 @@ async function processSyncQueue() {
     syncProgress = 0;
     refreshAlignBadges();
     updatePrimaryAction();
+    setSettingsStatus(
+      lyricsSyncSettingsStatus,
+      `Whisper · ${track.title || trackId}`,
+      "running"
+    );
     try {
       await runQueuedAlign(trackId);
       markTrackAligned(trackId);
@@ -964,7 +1074,15 @@ async function processSyncQueue() {
     }
   }
   syncRunning = false;
+  if (syncLyricsWhisperBtn) {
+    syncLyricsWhisperBtn.disabled = !playableTracks.length;
+  }
   updatePrimaryAction();
+  if (syncLastError) {
+    setSettingsStatus(lyricsSyncSettingsStatus, syncLastError, "error");
+  } else {
+    setSettingsStatus(lyricsSyncSettingsStatus, "Sincronització Whisper enllestida", "ok");
+  }
 }
 
 function layoutCovers() {
@@ -1154,7 +1272,7 @@ function renderSongs(filter = "", options = { play: true }) {
       ? alignMode === "synced"
         ? "Cap cançó sincronitzada"
         : "Cap resultat"
-      : showHiddenOnly
+      : lyricsFilterMode === "hidden"
         ? "Cap cançó oculta"
         : "Sense cançons";
     coverIndex.textContent = "";
@@ -1168,7 +1286,7 @@ function renderSongs(filter = "", options = { play: true }) {
         : isAlbumListView()
           ? "Cap àlbum amb aquesta cerca."
           : "Cap resultat amb aquesta cerca."
-      : showHiddenOnly
+      : lyricsFilterMode === "hidden"
         ? "No hi ha cançons amagades sense lletra."
         : "Carrega una carpeta de música per començar.";
     (browseMode === "grid" ? songGrid : coverTrack).appendChild(empty);
@@ -1256,8 +1374,10 @@ async function startAlignment(trackId) {
 function showStage() {
   clearStageOutro();
   stopPreview();
+  viewTitle?.classList.add("hidden");
   viewMenu.classList.add("hidden");
   viewStage.classList.remove("hidden");
+  document.body.classList.remove("mode-title");
   document.body.classList.add("mode-stage");
 }
 
@@ -1450,7 +1570,7 @@ function refreshLibraryMetaLabel() {
     libraryMeta.textContent = "Carrega una carpeta de MP3s etiquetats per començar la nit";
     return;
   }
-  if (showHiddenOnly) {
+  if (lyricsFilterMode === "hidden") {
     const count = hiddenTracks.length;
     if (!count && pending) {
       libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
@@ -1460,6 +1580,19 @@ function refreshLibraryMetaLabel() {
       const bits = [`${count} cançons ocultes sense lletra`];
       if (errors) bits.push(`${errors} amb error de connexió`);
       if (pending) bits.push(`${pending} pendents`);
+      libraryMeta.textContent = bits.join(" · ");
+    }
+    return;
+  }
+  if (lyricsFilterMode === "all") {
+    const count = playableTracks.length + hiddenTracks.length + pendingTracks.length;
+    if (!count) {
+      libraryMeta.textContent = `Cap cançó a la biblioteca (de ${total} al disc)`;
+    } else {
+      const bits = [`${count} cançons`];
+      if (playableTracks.length) bits.push(`${playableTracks.length} amb lletra`);
+      if (hiddenTracks.length) bits.push(`${hiddenTracks.length} sense lletra`);
+      if (pendingTracks.length) bits.push(`${pendingTracks.length} pendents`);
       libraryMeta.textContent = bits.join(" · ");
     }
     return;
@@ -1486,24 +1619,27 @@ function updateLibraryMeta(data) {
   lastLibraryData = data;
   playableTracks = data.tracks || [];
   hiddenTracks = data.hidden_tracks || [];
-  applyHiddenOnlyMode();
+  pendingTracks = data.pending_tracks || [];
+  applyLyricsFilterMode();
   rootInput.value = data.root || "";
   const total = data.total || 0;
   const errors = data.errors || 0;
-  const coversResync = data.covers_resync || {};
+  const probe = data.probe || {};
 
   retryLyricsBtn.hidden = !errors;
-  resyncCoversBtn.disabled = !data.root || !total || !!coversResync.running;
-  resyncCoversBtn.textContent = coversResync.running
-    ? `Resincronitzant… ${coversResync.done || 0}/${coversResync.total || 0}`
-    : "Resincronitzar portades";
+  const resyncBusy = !data.root || !total || !!probe.running;
+  if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = resyncBusy;
+  if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = resyncBusy;
+  if (syncLyricsWhisperBtn) {
+    syncLyricsWhisperBtn.disabled = !data.root || !playableTracks.length || syncRunning;
+  }
 
-  if (coversResync.running) {
-    const done = coversResync.done || 0;
-    const coverTotal = coversResync.total || 0;
+  if (probe.running) {
+    const done = probe.done || 0;
+    const probeTotal = probe.total || 0;
     setSettingsStatus(
-      coversSettingsStatus,
-      `Treballant… ${done}/${coverTotal} portades`,
+      lyricsSyncSettingsStatus,
+      `Buscant lletres bàsiques… ${done}/${probeTotal}`,
       "running"
     );
   }
@@ -1523,42 +1659,65 @@ function updateLibraryMeta(data) {
   }
 }
 
-async function pollCoverResync() {
-  setSettingsStatus(coversSettingsStatus, "Iniciant resincronització de portades…", "running");
+async function pollBasicLyricsResync() {
+  setSettingsStatus(lyricsSyncSettingsStatus, "Iniciant resincronització de lletres…", "running");
   let data = await api("/api/library");
-  while (data.covers_resync && data.covers_resync.running) {
-    const done = data.covers_resync.done || 0;
-    const total = data.covers_resync.total || 0;
+  while (data.probe && data.probe.running) {
+    const done = data.probe.done || 0;
+    const total = data.probe.total || 0;
     setSettingsStatus(
-      coversSettingsStatus,
-      `Treballant… ${done}/${total} portades processades`,
+      lyricsSyncSettingsStatus,
+      `Buscant lletres bàsiques… ${done}/${total}`,
       "running"
     );
     updateLibraryMeta(data);
     await sleep(500);
     data = await api("/api/library");
   }
-  const updated = (data.covers_resync && data.covers_resync.updated) || 0;
-  const total = (data.covers_resync && data.covers_resync.total) || 0;
-  refreshCoverImages();
   updateLibraryMeta(data);
-  if (total) {
-    libraryMeta.textContent = `Portades actualitzades: ${updated}/${total}`;
-    setSettingsStatus(
-      coversSettingsStatus,
-      `Fet · ${updated}/${total} portades actualitzades`,
-      "ok"
-    );
-  } else {
-    setSettingsStatus(coversSettingsStatus, "No hi ha cançons per resincronitzar", "error");
+  const found = (data.probe && data.probe.found) || 0;
+  const total = (data.probe && data.probe.total) || data.total || 0;
+  const msg = total
+    ? `Lletres bàsiques actualitzades · ${found}/${total} amb lletra`
+    : "No hi ha cançons per resincronitzar";
+  libraryMeta.textContent = msg;
+  setSettingsStatus(lyricsSyncSettingsStatus, msg, total ? "ok" : "error");
+}
+
+function enqueueWhisperForLibrary() {
+  const pending = playableTracks.filter(
+    (track) =>
+      track &&
+      !track.whisper_aligned &&
+      syncActiveId !== track.id &&
+      !syncQueuedIds.has(track.id)
+  );
+  if (!pending.length) {
+    const msg = playableTracks.length
+      ? "Totes les cançons amb lletra ja tenen Whisper"
+      : "No hi ha cançons amb lletra per sincronitzar";
+    libraryMeta.textContent = msg;
+    setSettingsStatus(lyricsSyncSettingsStatus, msg, playableTracks.length ? "ok" : "error");
+    return 0;
   }
+  for (const track of pending) {
+    syncQueue.push(track.id);
+    syncQueuedIds.add(track.id);
+  }
+  refreshAlignBadges();
+  updatePrimaryAction();
+  processSyncQueue();
+  const msg = `Encades ${pending.length} cançons a Whisper`;
+  libraryMeta.textContent = msg;
+  setSettingsStatus(lyricsSyncSettingsStatus, msg, "running");
+  return pending.length;
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function loadLibrary() {
+async function loadLibrary({ onProgress } = {}) {
   libraryMeta.textContent = "Carregant la biblioteca…";
   setSettingsStatus(librarySettingsStatus, "Carregant la biblioteca…", "running");
   loadBtn.disabled = true;
@@ -1573,6 +1732,7 @@ async function loadLibrary() {
       const msg = `Buscant lletres… ${done}/${total} · ${ready} a punt`;
       libraryMeta.textContent = msg;
       setSettingsStatus(librarySettingsStatus, msg, "running");
+      if (typeof onProgress === "function") onProgress(msg, data);
       await sleep(500);
       data = await api("/api/library");
     }
@@ -1584,9 +1744,100 @@ async function loadLibrary() {
       `Fet · ${withLyrics} cançons amb lletra (de ${total} al disc)`,
       "ok"
     );
+    return data;
   } finally {
     loadBtn.disabled = false;
     rootInput.disabled = false;
+  }
+}
+
+async function enterLibraryFromTitle() {
+  const path = (titleRootInput?.value || "").trim();
+  if (!path) {
+    setTitleStatus("Indica una carpeta de música", "error");
+    titleRootInput?.focus();
+    return;
+  }
+  if (rootInput) rootInput.value = path;
+  setTitleStatus("Carregant la biblioteca…", "running");
+  if (titleStartBtn) titleStartBtn.disabled = true;
+  if (titleRootInput) titleRootInput.disabled = true;
+  try {
+    await api("/api/library/root", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    await loadLibrary({
+      onProgress: (msg) => setTitleStatus(msg, "running"),
+    });
+    setTitleStatus("");
+    showMenu();
+  } catch (err) {
+    const msg = err.message || "No s’ha pogut carregar la carpeta";
+    setTitleStatus(msg, "error");
+  } finally {
+    if (titleStartBtn) titleStartBtn.disabled = false;
+    if (titleRootInput) titleRootInput.disabled = false;
+  }
+}
+
+async function bootTitleScreen() {
+  showTitleScreen();
+  setTitleStatus("Connectant…", "running");
+  try {
+    const health = await api("/api/health");
+    if (health.music_root && titleRootInput && !titleRootInput.value) {
+      titleRootInput.value = health.music_root;
+    }
+    if (health.music_root && rootInput && !rootInput.value) {
+      rootInput.value = health.music_root;
+    }
+    setTitleStatus("");
+  } catch (err) {
+    setTitleStatus(err.message || "No s’ha pogut contactar amb l’API", "error");
+  }
+}
+
+async function browseMusicFolder(initial) {
+  const result = await api("/api/library/browse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initial: initial || null }),
+  });
+  if (result.cancelled || !result.path) return null;
+  return result.path;
+}
+
+async function pickFolderInto(inputEl, { statusEl } = {}) {
+  if (!inputEl) return null;
+  const buttons = [titleBrowseBtn, browseRootBtn, titleStartBtn].filter(Boolean);
+  buttons.forEach((btn) => {
+    btn.disabled = true;
+  });
+  try {
+    const path = await browseMusicFolder(inputEl.value.trim());
+    if (!path) {
+      if (statusEl === "title") setTitleStatus("Selecció cancel·lada", "");
+      return null;
+    }
+    inputEl.value = path;
+    if (inputEl === titleRootInput && rootInput) rootInput.value = path;
+    if (inputEl === rootInput && titleRootInput) titleRootInput.value = path;
+    if (statusEl === "title") setTitleStatus("Carpeta seleccionada", "");
+    if (statusEl === "settings") {
+      setSettingsStatus(librarySettingsStatus, "Carpeta seleccionada · recarrega per aplicar", "ok");
+    }
+    return path;
+  } catch (err) {
+    const msg = err.message || "No s’ha pogut obrir el selector de carpetes";
+    if (statusEl === "title") setTitleStatus(msg, "error");
+    if (statusEl === "settings") setSettingsStatus(librarySettingsStatus, msg, "error");
+    return null;
+  } finally {
+    buttons.forEach((btn) => {
+      btn.disabled = false;
+    });
   }
 }
 
@@ -1670,18 +1921,41 @@ retryLyricsBtn.addEventListener("click", () => {
       retryLyricsBtn.disabled = false;
     });
 });
-resyncCoversBtn.addEventListener("click", () => {
-  resyncCoversBtn.disabled = true;
-  libraryMeta.textContent = "Resincronitzant portades…";
-  setSettingsStatus(coversSettingsStatus, "Iniciant resincronització de portades…", "running");
-  api("/api/library/covers/resync", { method: "POST" })
-    .then(() => pollCoverResync())
+function startBasicLyricsResync(scope) {
+  const label =
+    scope === "missing"
+      ? "Resincronitzant cançons sense lletra…"
+      : "Resincronitzant totes les lletres bàsiques…";
+  if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = true;
+  if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = true;
+  libraryMeta.textContent = label;
+  setSettingsStatus(lyricsSyncSettingsStatus, label, "running");
+  api("/api/library/lyrics/resync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  })
+    .then(() => pollBasicLyricsResync())
     .catch((err) => {
-      const msg = err.message || "Error en resincronitzar portades";
+      const msg = err.message || "Error en resincronitzar lletres";
       libraryMeta.textContent = msg;
-      setSettingsStatus(coversSettingsStatus, msg, "error");
-      resyncCoversBtn.disabled = false;
+      setSettingsStatus(lyricsSyncSettingsStatus, msg, "error");
+    })
+    .finally(() => {
+      if (resyncLyricsAllBtn) resyncLyricsAllBtn.disabled = false;
+      if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = false;
     });
+}
+
+resyncLyricsAllBtn?.addEventListener("click", () => startBasicLyricsResync("all"));
+resyncLyricsMissingBtn?.addEventListener("click", () => startBasicLyricsResync("missing"));
+syncLyricsWhisperBtn?.addEventListener("click", () => {
+  syncLyricsWhisperBtn.disabled = true;
+  try {
+    enqueueWhisperForLibrary();
+  } finally {
+    syncLyricsWhisperBtn.disabled = false;
+  }
 });
 resyncCoverBtn.addEventListener("click", () => {
   const track = selectedTrack();
@@ -1760,11 +2034,15 @@ settingsModal?.querySelectorAll(".settings-nav-btn").forEach((btn) => {
 });
 libraryBrowseSongBtn?.addEventListener("click", () => setLibraryBrowseMode("song"));
 libraryBrowseAlbumBtn?.addEventListener("click", () => setLibraryBrowseMode("album"));
-hiddenOnlyOffBtn?.addEventListener("click", () => setShowHiddenOnly(false));
-hiddenOnlyOnBtn?.addEventListener("click", () => setShowHiddenOnly(true));
+lyricsFilterLyricsBtn?.addEventListener("click", () => setLyricsFilterMode("lyrics"));
+lyricsFilterHiddenBtn?.addEventListener("click", () => setLyricsFilterMode("hidden"));
+lyricsFilterAllBtn?.addEventListener("click", () => setLyricsFilterMode("all"));
+muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
+muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
 albumBackBtn?.addEventListener("click", () => closeAlbum());
-applyHiddenOnlyMode();
+applyLyricsFilterMode();
 applyLibraryBrowseMode();
+applyAudioMute();
 
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
@@ -1858,8 +2136,16 @@ player.addEventListener("ended", () => {
   beginStageOutro();
 });
 
-loadLibrary().catch((err) => {
-  libraryMeta.textContent = "Arrenca el servidor i carrega una carpeta";
-  lyricsStatus.textContent = err.message || "No s’ha pogut contactar amb l’API";
+titleStartForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  enterLibraryFromTitle();
 });
+titleBrowseBtn?.addEventListener("click", () => {
+  pickFolderInto(titleRootInput, { statusEl: "title" });
+});
+browseRootBtn?.addEventListener("click", () => {
+  pickFolderInto(rootInput, { statusEl: "settings" });
+});
+
+bootTitleScreen();
 startTicker();

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 from .lyrics import LyricLine, LyricWord, estimate_words
@@ -13,7 +15,51 @@ _model = None
 _model_lock = threading.Lock()
 _model_name: str | None = None
 
-DEFAULT_MODEL_SIZE = "small"
+# Whisper knobs. Bigger models transcribe sung Catalan noticeably better but cost
+# CPU time, so the default stays usable and the upgrade is opt-in via env.
+DEFAULT_MODEL_SIZE = (os.environ.get("KARAOKE_WHISPER_MODEL") or "").strip() or "small"
+WHISPER_DEVICE = (os.environ.get("KARAOKE_WHISPER_DEVICE") or "").strip() or "cpu"
+WHISPER_COMPUTE_TYPE = (os.environ.get("KARAOKE_WHISPER_COMPUTE") or "").strip() or (
+    "int8" if WHISPER_DEVICE == "cpu" else "float16"
+)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int((os.environ.get(name) or "").strip() or default))
+    except ValueError:
+        return default
+
+
+WHISPER_BEAM_SIZE = _env_int("KARAOKE_WHISPER_BEAM", 1)
+
+# Matching thresholds. A token pair below MATCH_MIN is never linked: leaving a
+# hole for interpolation beats pinning a word onto the wrong audio position.
+MATCH_MIN = 0.58
+# One/two letter tokens ("a", "hi", "el") match almost anything by ratio, so they
+# only count on a near exact hit.
+SHORT_TOKEN_LEN = 2
+SHORT_TOKEN_MIN = 0.95
+# Dropping a lyric token must hurt more than skipping ASR noise, otherwise the
+# path would rather ignore the lyrics than accept a slightly fuzzy match.
+SKIP_LYRIC_PENALTY = 0.42
+SKIP_ASR_PENALTY = 0.06
+# Prefer a plain 1:1 link when a merge scores the same.
+MERGE_PENALTY = 0.04
+# Diagonal band around the proportional path. The length difference is added
+# because ASR often carries whole blocks the lyrics do not have (long intros,
+# hallucinated "lalala" outros), which shifts the true path off the diagonal.
+BAND_MIN_RADIUS = 200
+BAND_MAX_CELLS = 8_000_000
+
+_PTR_NONE = 0
+_PTR_MATCH = 1
+_PTR_SKIP_LYRIC = 2
+_PTR_SKIP_ASR = 3
+_PTR_MERGE_ASR = 4  # one lyric token spans two ASR words ("l'amor" vs "l'" "amor")
+_PTR_MERGE_LYRIC = 5  # two lyric tokens share one ASR word ("que et" vs "quet")
+
+_NEG = float("-inf")
 
 
 @dataclass
@@ -41,9 +87,12 @@ def alignment_available() -> bool:
 
 
 def _normalize(token: str) -> str:
+    # Apostrophes vanish here on purpose: "l'amor" becomes "lamor", which is what
+    # Whisper's "l'" + "amor" split collapses to once the two words are merged.
     return re.sub(r"[^\wÀ-ÿ]+", "", token.lower(), flags=re.UNICODE)
 
 
+@lru_cache(maxsize=200_000)
 def _similar(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
@@ -52,39 +101,52 @@ def _similar(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _match_score(lyric_norm: str, asr_norm: str) -> float:
+    """Similarity of a candidate link, or 0 when the pair must not be linked."""
+    if not lyric_norm or not asr_norm:
+        return 0.0
+    score = _similar(lyric_norm, asr_norm)
+    if score < MATCH_MIN:
+        return 0.0
+    if min(len(lyric_norm), len(asr_norm)) <= SHORT_TOKEN_LEN and score < SHORT_TOKEN_MIN:
+        return 0.0
+    return score
+
+
 def _split_tokens(text: str) -> list[str]:
     return [part for part in re.split(r"(\s+)", text) if part and not part.isspace()]
 
 
-def _get_model(model_size: str = DEFAULT_MODEL_SIZE):
+def _get_model(model_size: str | None = None):
     global _model, _model_name
+    size = model_size or DEFAULT_MODEL_SIZE
     with _model_lock:
-        if _model is not None and _model_name == model_size:
+        if _model is not None and _model_name == size:
             return _model
         from faster_whisper import WhisperModel
 
-        _model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        _model_name = model_size
+        _model = WhisperModel(size, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+        _model_name = size
         return _model
 
 
 def transcribe_words(
     audio_path: Path,
     language: str = "ca",
-    model_size: str = DEFAULT_MODEL_SIZE,
+    model_size: str | None = None,
     initial_prompt: str | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> list[AsrWord]:
     model = _get_model(model_size)
     # VAD often deletes sung vocals as "non-speech"; keep it off for karaoke.
-    # beam_size=1 keeps CPU sync usable for background queue jobs.
+    # beam_size defaults to 1 to keep CPU sync usable for background queue jobs.
     segments, info = model.transcribe(
         str(audio_path),
         language=language,
         word_timestamps=True,
         vad_filter=False,
-        beam_size=1,
-        best_of=1,
+        beam_size=WHISPER_BEAM_SIZE,
+        best_of=WHISPER_BEAM_SIZE,
         condition_on_previous_text=False,
         initial_prompt=initial_prompt,
     )
@@ -190,17 +252,109 @@ def align_line_words(
     return _interpolate_missing(aligned, line_start, line_end)
 
 
-def _best_asr_index(norm: str, asr_norms: list[str], start: int, stop: int) -> tuple[int | None, float]:
-    best_i = None
-    best_score = 0.0
-    for idx in range(start, min(stop, len(asr_norms))):
-        score = _similar(norm, asr_norms[idx])
-        if score > best_score:
-            best_score = score
-            best_i = idx
-        if score >= 0.95:
-            break
-    return best_i, best_score
+def _band(i: int, n: int, m: int, radius: int) -> tuple[int, int]:
+    center = int(round(i * m / n)) if n else 0
+    return max(0, center - radius), min(m, center + radius)
+
+
+def _align_path(lyric_norms: list[str], asr_norms: list[str]) -> list[tuple[int, int, int, int]]:
+    """Monotonic best-path match between lyric tokens and ASR words.
+
+    Returns (lyric_index, asr_from, asr_to, share) tuples, where share is 0 for a
+    full span, 1 for the first half of a shared ASR word and 2 for the second.
+    A monotonic path is what keeps repeated choruses from stealing each other's
+    timings, which a per-token nearest-match scan cannot guarantee.
+    """
+    n, m = len(lyric_norms), len(asr_norms)
+    if not n or not m:
+        return []
+
+    radius = max(BAND_MIN_RADIUS, abs(m - n) + int(0.15 * max(n, m)))
+    if n * (2 * radius + 1) > BAND_MAX_CELLS:
+        radius = max(BAND_MIN_RADIUS, BAND_MAX_CELLS // (2 * n) if n else BAND_MIN_RADIUS)
+    width = m + 1
+    ptr = bytearray(width * (n + 1))
+
+    prev2: list[float] | None = None
+    prev = [-SKIP_ASR_PENALTY * j for j in range(width)]
+    for j in range(1, width):
+        ptr[j] = _PTR_SKIP_ASR
+
+    for i in range(1, n + 1):
+        cur = [_NEG] * width
+        base = i * width
+        low, high = _band(i, n, m, radius)
+        if low == 0:
+            cur[0] = -SKIP_LYRIC_PENALTY * i
+            ptr[base] = _PTR_SKIP_LYRIC
+        lyric = lyric_norms[i - 1]
+        previous_lyric = lyric_norms[i - 2] if i >= 2 else ""
+
+        for j in range(max(1, low), high + 1):
+            best = prev[j] - SKIP_LYRIC_PENALTY
+            code = _PTR_SKIP_LYRIC
+
+            value = cur[j - 1] - SKIP_ASR_PENALTY
+            if value > best:
+                best, code = value, _PTR_SKIP_ASR
+
+            score = _match_score(lyric, asr_norms[j - 1])
+            if score:
+                value = prev[j - 1] + score
+                if value > best:
+                    best, code = value, _PTR_MATCH
+
+            if j >= 2:
+                merged = _match_score(lyric, asr_norms[j - 2] + asr_norms[j - 1])
+                if merged:
+                    value = prev[j - 2] + merged - MERGE_PENALTY
+                    if value > best:
+                        best, code = value, _PTR_MERGE_ASR
+
+            if i >= 2 and prev2 is not None:
+                merged = _match_score(previous_lyric + lyric, asr_norms[j - 1])
+                if merged:
+                    value = prev2[j - 1] + merged - MERGE_PENALTY
+                    if value > best:
+                        best, code = value, _PTR_MERGE_LYRIC
+
+            cur[j] = best
+            ptr[base + j] = code
+
+        prev2 = prev
+        prev = cur
+
+    pairs: list[tuple[int, int, int, int]] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        code = ptr[i * width + j] if (i or j) else _PTR_NONE
+        if code == _PTR_MATCH:
+            pairs.append((i - 1, j - 1, j - 1, 0))
+            i -= 1
+            j -= 1
+        elif code == _PTR_MERGE_ASR:
+            pairs.append((i - 1, j - 2, j - 1, 0))
+            i -= 1
+            j -= 2
+        elif code == _PTR_MERGE_LYRIC:
+            pairs.append((i - 1, j - 1, j - 1, 2))
+            pairs.append((i - 2, j - 1, j - 1, 1))
+            i -= 2
+            j -= 1
+        elif code == _PTR_SKIP_LYRIC:
+            i -= 1
+        elif code == _PTR_SKIP_ASR:
+            j -= 1
+        elif i > 0 and j > 0:
+            i -= 1
+            j -= 1
+        elif i > 0:
+            i -= 1
+        else:
+            j -= 1
+
+    pairs.reverse()
+    return pairs
 
 
 def align_tokens_globally(
@@ -227,47 +381,42 @@ def align_tokens_globally(
     if not tokens or not asr_words:
         return placeholders
 
-    lyric_norms = [token.norm for token in tokens]
     asr_norms = [_normalize(word.text) for word in asr_words]
-    matcher = SequenceMatcher(a=lyric_norms, b=asr_norms, autojunk=False)
+    pairs = _align_path([token.norm for token in tokens], asr_norms)
 
-    asr_cursor = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            for offset in range(i2 - i1):
-                token = tokens[i1 + offset]
-                hit = asr_words[j1 + offset]
-                placeholders[token.line_index][token.token_index] = LyricWord(
-                    time=hit.start,
-                    end=max(hit.end, hit.start + 0.05),
-                    text=token.text,
-                )
-            asr_cursor = j2
-            continue
-
-        if tag in {"replace", "delete"}:
-            # Fuzzy-fill lyric tokens that SequenceMatcher did not exact-match.
-            local_asr_start = max(asr_cursor, j1 - 2)
-            local_asr_stop = min(len(asr_words), max(j2 + 8, local_asr_start + (i2 - i1) * 3 + 4))
-            cursor = local_asr_start
-            for token in tokens[i1:i2]:
-                if not token.norm:
-                    continue
-                match_idx, score = _best_asr_index(token.norm, asr_norms, cursor, local_asr_stop)
-                if match_idx is not None and score >= 0.62:
-                    hit = asr_words[match_idx]
-                    placeholders[token.line_index][token.token_index] = LyricWord(
-                        time=hit.start,
-                        end=max(hit.end, hit.start + 0.05),
-                        text=token.text,
-                    )
-                    cursor = match_idx + 1
-            asr_cursor = max(asr_cursor, j2, cursor)
-
-        if tag == "insert":
-            asr_cursor = max(asr_cursor, j2)
+    for lyric_index, asr_from, asr_to, share in pairs:
+        token = tokens[lyric_index]
+        start = asr_words[asr_from].start
+        end = max(asr_words[asr_to].end, start + 0.05)
+        if share:
+            middle = start + (end - start) / 2
+            start, end = (start, middle) if share == 1 else (middle, end)
+        placeholders[token.line_index][token.token_index] = LyricWord(
+            time=start,
+            end=max(end, start + 0.05),
+            text=token.text,
+        )
 
     return placeholders
+
+
+def _enforce_monotonic(lines: list[LyricLine]) -> list[LyricLine]:
+    """Never let a word start before the previous one: backwards jumps read as a bug."""
+    flat = [word for line in lines for word in line.words]
+    last_start = _NEG
+    for word in flat:
+        if word.time < last_start:
+            word.time = last_start
+        if word.end < word.time + 0.05:
+            word.end = word.time + 0.05
+        last_start = word.time
+    for word, following in zip(flat, flat[1:]):
+        if word.end > following.time + 0.05:
+            word.end = max(word.time + 0.05, following.time)
+    for line in lines:
+        if line.words:
+            line.time = line.words[0].time
+    return lines
 
 
 def align_lyrics(
@@ -275,7 +424,7 @@ def align_lyrics(
     lines: list[LyricLine],
     *,
     language: str = "ca",
-    model_size: str = DEFAULT_MODEL_SIZE,
+    model_size: str | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> list[LyricLine]:
     """Align known lyric lines to the audio with faster-whisper word timestamps."""
@@ -329,4 +478,4 @@ def align_lyrics(
             line_time = line.time
             words = estimate_words(line.time, next_time, line.text)
         aligned_lines.append(LyricLine(time=line_time, text=line.text, words=words))
-    return aligned_lines
+    return _enforce_monotonic(aligned_lines)

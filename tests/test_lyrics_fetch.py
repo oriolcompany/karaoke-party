@@ -11,6 +11,8 @@ from karaoke_party import lyrics as lyrics_mod
 from karaoke_party.lyrics import (
     LyricsUnavailable,
     cache_key,
+    clear_lyrics_cache,
+    clear_lyrics_keys,
     clear_probe_errors,
     fetch_lyrics,
     load_cached,
@@ -113,6 +115,31 @@ def test_clear_probe_errors_only_removes_error_entries(tmp_path: Path) -> None:
         "A", "NoLyrics", None, lyrics_cache=tmp_path, aligned_cache=None
     )
     assert status is False and source == "none"
+
+
+def test_clear_lyrics_cache_removes_all_entries(tmp_path: Path) -> None:
+    save_cached(
+        tmp_path,
+        cache_key("A", "Hit", None),
+        LyricsPayload(synced=True, source="lrclib", lines=[], plain="hi"),
+    )
+    save_cached(
+        tmp_path,
+        cache_key("A", "Miss", None),
+        LyricsPayload(synced=False, source="none", lines=[], plain=""),
+    )
+    assert clear_lyrics_cache(tmp_path) == 2
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_clear_lyrics_keys_removes_only_selected(tmp_path: Path) -> None:
+    hit = cache_key("A", "Hit", None)
+    miss = cache_key("A", "Miss", None)
+    save_cached(tmp_path, hit, LyricsPayload(synced=True, source="lrclib", lines=[], plain="hi"))
+    save_cached(tmp_path, miss, LyricsPayload(synced=False, source="none", lines=[], plain=""))
+    assert clear_lyrics_keys(tmp_path, [miss]) == 1
+    assert (tmp_path / f"{hit}.json").is_file()
+    assert not (tmp_path / f"{miss}.json").exists()
 
 
 @pytest.fixture

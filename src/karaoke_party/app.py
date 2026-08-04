@@ -19,6 +19,7 @@ from . import __version__
 from .align import align_lyrics, alignment_available
 from .config import DEFAULT_PORT, aligned_cache_dir, cache_dir, default_music_root
 from .covers import covers_cache_dir, migrate_cached_covers_into_audio, resolve_cover
+from .folder_picker import pick_music_folder
 from .library import TrackInfo, _sort_key, scan_library
 from .lyrics import (
     PROBE_ERROR_SOURCE,
@@ -26,6 +27,8 @@ from .lyrics import (
     LyricsPayload,
     LyricsUnavailable,
     cache_key,
+    clear_lyrics_cache,
+    clear_lyrics_keys,
     clear_probe_errors,
     fetch_lyrics,
     load_aligned_cached,
@@ -85,6 +88,10 @@ class SetRootBody(BaseModel):
     path: str
 
 
+class BrowseFolderBody(BaseModel):
+    initial: str | None = None
+
+
 class AlignBody(BaseModel):
     track_id: str
     language: str = "ca"
@@ -92,6 +99,12 @@ class AlignBody(BaseModel):
 
 class ResyncCoverBody(BaseModel):
     track_id: str
+
+
+class ResyncLyricsBody(BaseModel):
+    """scope: all = every track; missing = only songs without lyrics now."""
+
+    scope: str = "all"
 
 
 def _reset_probe_state() -> None:
@@ -255,6 +268,7 @@ def _library_snapshot() -> dict:
             "root": None,
             "tracks": [],
             "hidden_tracks": [],
+            "pending_tracks": [],
             "total": 0,
             "with_lyrics": 0,
             "pending": 0,
@@ -269,6 +283,7 @@ def _library_snapshot() -> dict:
     aligned_path = aligned_cache_dir()
     playable_tracks: list[TrackInfo] = []
     hidden_tracks: list[TrackInfo] = []
+    pending_tracks: list[TrackInfo] = []
     pending = 0
     hidden = 0
     errors = 0
@@ -294,9 +309,11 @@ def _library_snapshot() -> dict:
             errors += 1
         else:
             pending += 1
+            pending_tracks.append(track)
 
     playable_tracks.sort(key=_sort_key)
     hidden_tracks.sort(key=_sort_key)
+    pending_tracks.sort(key=_sort_key)
     playable: list[dict] = []
     for track in playable_tracks:
         item = asdict(track)
@@ -312,6 +329,14 @@ def _library_snapshot() -> dict:
         item["has_lyrics"] = False
         hidden_items.append(item)
 
+    pending_items: list[dict] = []
+    for track in pending_tracks:
+        item = asdict(track)
+        item["whisper_aligned"] = False
+        item["has_lyrics"] = False
+        item["lyrics_pending"] = True
+        pending_items.append(item)
+
     with _probe_lock:
         probe = dict(_probe_state)
     with _cover_resync_lock:
@@ -320,6 +345,7 @@ def _library_snapshot() -> dict:
         "root": str(_music_root),
         "tracks": playable,
         "hidden_tracks": hidden_items,
+        "pending_tracks": pending_items,
         "total": len(_tracks),
         "with_lyrics": len(playable),
         "pending": pending,
@@ -407,7 +433,11 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
                 _probe_pass_complete = True
 
 
-def _ensure_lyrics_probe() -> None:
+def _ensure_lyrics_probe(
+    *,
+    force_all: bool = False,
+    track_ids: list[str] | None = None,
+) -> None:
     global _probe_pass_complete, _probe_thread
     if _music_root is None:
         return
@@ -423,21 +453,35 @@ def _ensure_lyrics_probe() -> None:
         if _probe_thread is not None and _probe_thread.is_alive():
             return
         # One pass per root: finishing must not restart from 0/N.
-        if _probe_pass_complete:
+        forced = force_all or track_ids is not None
+        if _probe_pass_complete and not forced:
             return
-        unknown = [
-            track.id
-            for track in _tracks.values()
-            if track.id not in _probe_attempted
-            and lyrics_status_and_source(
-                track.artist,
-                track.title,
-                track.duration,
-                lyrics_cache=lyrics_path,
-                aligned_cache=aligned_path,
-            )[0]
-            is None
-        ]
+        if track_ids is not None:
+            unknown = [
+                tid
+                for tid in track_ids
+                if tid in _tracks and tid not in _probe_attempted
+            ]
+        elif force_all:
+            unknown = [
+                track.id
+                for track in _tracks.values()
+                if track.id not in _probe_attempted
+            ]
+        else:
+            unknown = [
+                track.id
+                for track in _tracks.values()
+                if track.id not in _probe_attempted
+                and lyrics_status_and_source(
+                    track.artist,
+                    track.title,
+                    track.duration,
+                    lyrics_cache=lyrics_path,
+                    aligned_cache=aligned_path,
+                )[0]
+                is None
+            ]
         if not unknown:
             _probe_pass_complete = True
             return
@@ -494,6 +538,16 @@ def set_root(body: SetRootBody) -> dict:
     return {"root": str(root), "tracks": len(tracks)}
 
 
+@app.post("/api/library/browse")
+async def browse_library_folder(body: BrowseFolderBody | None = None) -> dict:
+    """Open the native OS folder picker (local app only) and return the path."""
+    initial = body.initial if body else None
+    if not initial and _music_root is not None:
+        initial = str(_music_root)
+    path = await asyncio.to_thread(pick_music_folder, initial)
+    return {"path": path, "cancelled": path is None}
+
+
 @app.post("/api/library/retry")
 def retry_failed_lyrics() -> dict:
     """User-triggered retry for songs whose lookup failed (never automatic)."""
@@ -503,6 +557,64 @@ def retry_failed_lyrics() -> dict:
     _reset_probe_state()
     _ensure_lyrics_probe()
     return {"cleared": cleared}
+
+
+def _wait_for_probe_idle() -> None:
+    with _probe_lock:
+        previous = _probe_thread
+    if previous is not None and previous.is_alive():
+        previous.join(timeout=60.0)
+
+
+@app.post("/api/library/lyrics/resync")
+def resync_basic_lyrics(body: ResyncLyricsBody | None = None) -> dict:
+    """Force re-fetch of basic LRCLIB lyrics.
+
+    scope=all: every scanned track.
+    scope=missing: only tracks that currently have no lyrics.
+    """
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta carregada")
+    if not _tracks:
+        _reload_library(_music_root, reset_probe=False)
+
+    scope = (body.scope if body else "all") or "all"
+    if scope not in {"all", "missing"}:
+        raise HTTPException(status_code=400, detail="scope ha de ser 'all' o 'missing'")
+
+    lyrics_path = cache_dir()
+    aligned_path = aligned_cache_dir()
+
+    if scope == "missing":
+        targets: list[TrackInfo] = []
+        keys: list[str] = []
+        for track in _tracks.values():
+            status, _source = lyrics_status_and_source(
+                track.artist,
+                track.title,
+                track.duration,
+                lyrics_cache=lyrics_path,
+                aligned_cache=aligned_path,
+            )
+            if status is True:
+                continue
+            targets.append(track)
+            keys.append(cache_key(track.artist, track.title, track.duration))
+        cleared = clear_lyrics_keys(lyrics_path, keys)
+        _reset_probe_state()
+        _wait_for_probe_idle()
+        _ensure_lyrics_probe(track_ids=[track.id for track in targets])
+    else:
+        cleared = clear_lyrics_cache(lyrics_path)
+        _reset_probe_state()
+        # Let an in-flight probe wind down after generation bump before forcing a
+        # full pass; otherwise _ensure_lyrics_probe would no-op while it is alive.
+        _wait_for_probe_idle()
+        _ensure_lyrics_probe(force_all=True)
+
+    with _probe_lock:
+        probe = dict(_probe_state)
+    return {"cleared": cleared, "scope": scope, "probe": probe}
 
 
 def _generic_cover_path() -> Path:

@@ -10,17 +10,50 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=11" />
+    <link rel="stylesheet" href="/styles.css?v=15" />
   </head>
-  <body>
+  <body class="mode-title">
     <div class="fx" aria-hidden="true">
       <div class="fx-glow fx-glow-a"></div>
       <div class="fx-glow fx-glow-b"></div>
       <div class="fx-scan"></div>
     </div>
 
+    <!-- Portada / title screen -->
+    <section id="view-title" class="view view-title" aria-labelledby="titleBrand">
+      <div class="title-stage">
+        <p class="title-kicker">Nit local</p>
+        <h1 id="titleBrand" class="title-brand">Karaoke Party</h1>
+        <p class="title-tagline">Tria la carpeta i puja a l’escenari.</p>
+        <form id="titleStartForm" class="title-cta" autocomplete="off">
+          <label class="title-path-label" for="titleRootInput">Carpeta de música</label>
+          <div class="title-path-row">
+            <input
+              id="titleRootInput"
+              type="text"
+              placeholder="C:\Users\…\Songs"
+              spellcheck="false"
+              required
+            />
+            <button
+              id="titleBrowseBtn"
+              class="title-browse-btn"
+              type="button"
+              title="Seleccionar carpeta"
+            >
+              Seleccionar
+            </button>
+          </div>
+          <button id="titleStartBtn" class="title-start-btn" type="submit">
+            Començar la nit
+          </button>
+          <p id="titleStatus" class="title-status" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+
     <!-- Selecció de cançons -->
-    <section id="view-menu" class="view view-menu">
+    <section id="view-menu" class="view view-menu hidden">
       <header class="menu-hero">
         <p class="menu-kicker">Nit local</p>
         <h1 class="menu-brand">Karaoke Party</h1>
@@ -166,19 +199,52 @@
               <div class="settings-block">
                 <h4 class="settings-block-title">Biblioteca</h4>
                 <p class="settings-help">Carpeta on hi ha els MP3s etiquetats.</p>
-                <div class="settings-field-row">
+                <div class="settings-field-row settings-field-row-path">
                   <input
                     id="rootInput"
                     type="text"
                     placeholder="Carpeta de música"
                     spellcheck="false"
                   />
+                  <button id="browseRootBtn" class="settings-secondary-btn" type="button">
+                    Seleccionar
+                  </button>
                   <button id="loadBtn" type="button">Recarregar biblioteca</button>
                 </div>
                 <button id="retryLyricsBtn" class="settings-secondary-btn" type="button" hidden>
                   Reintentar lletres
                 </button>
                 <p id="librarySettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Lletres</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Torna a descarregar les lletres bàsiques (LRCLIB).
+                  </p>
+                  <div
+                    class="settings-toggle"
+                    role="group"
+                    aria-label="Resincronitzar lletres bàsiques"
+                  >
+                    <button id="resyncLyricsAllBtn" type="button" class="settings-toggle-btn">
+                      Totes
+                    </button>
+                    <button id="resyncLyricsMissingBtn" type="button" class="settings-toggle-btn">
+                      Sense lletra
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Encua l’alineació Whisper de les cançons amb lletra encara no sincronitzades.
+                  </p>
+                  <button id="syncLyricsWhisperBtn" type="button">
+                    Sincronitzar lletres Whisper
+                  </button>
+                </div>
+                <p id="lyricsSyncSettingsStatus" class="settings-status" aria-live="polite"></p>
               </div>
 
               <div class="settings-block">
@@ -208,11 +274,11 @@
                 </div>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Mostra només les cançons amagades perquè no tenen lletra a LRCLIB.
+                    Filtra per cançons amb lletra, només les ocultes, o totes.
                   </p>
-                  <div class="settings-toggle" role="group" aria-label="Filtre de cançons ocultes">
+                  <div class="settings-toggle" role="group" aria-label="Filtre de cançons">
                     <button
-                      id="hiddenOnlyOffBtn"
+                      id="lyricsFilterLyricsBtn"
                       type="button"
                       class="settings-toggle-btn is-active"
                       aria-pressed="true"
@@ -220,27 +286,52 @@
                       Amb lletra
                     </button>
                     <button
-                      id="hiddenOnlyOnBtn"
+                      id="lyricsFilterHiddenBtn"
                       type="button"
                       class="settings-toggle-btn"
                       aria-pressed="false"
                     >
                       Només ocultes
                     </button>
+                    <button
+                      id="lyricsFilterAllBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Totes
+                    </button>
                   </div>
                 </div>
               </div>
 
               <div class="settings-block">
-                <h4 class="settings-block-title">Portades</h4>
+                <h4 class="settings-block-title">Àudio</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Torna a buscar i incrustar les imatges de totes les cançons.
+                    Silencia la previsualització del menú i la reproducció a l’escenari.
                   </p>
-                  <button id="resyncCoversBtn" type="button">Resincronitzar portades</button>
+                  <div class="settings-toggle" role="group" aria-label="So de l’aplicació">
+                    <button
+                      id="muteOffBtn"
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      aria-pressed="true"
+                    >
+                      So
+                    </button>
+                    <button
+                      id="muteOnBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Mut
+                    </button>
+                  </div>
                 </div>
-                <p id="coversSettingsStatus" class="settings-status" aria-live="polite"></p>
               </div>
+
             </section>
           </div>
         </div>
@@ -287,6 +378,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=9"></script>
+    <script src="/app.js?v=15"></script>
   </body>
 </html>

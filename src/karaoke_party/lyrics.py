@@ -21,6 +21,9 @@ MAX_RETRY_DELAY = 8.0
 DEFAULT_TIMEOUT = 20.0
 PROBE_TIMEOUT = 8.0
 PROBE_ERROR_SOURCE = "probe-error"
+# Bump when the aligner changes so old, less precise timings are recomputed
+# instead of being served forever from disk.
+ALIGNED_CACHE_VERSION = 2
 
 
 @dataclass
@@ -158,6 +161,12 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        version = int(data.get("align_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version < ALIGNED_CACHE_VERSION:
+        return None
     lines: list[LyricLine] = []
     for row in data.get("lines") or []:
         words = [LyricWord(**word) for word in row.get("words") or []]
@@ -174,25 +183,29 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
     )
 
 
-def save_cached(cache_dir: Path, key: str, payload: LyricsPayload) -> None:
+def save_cached(
+    cache_dir: Path,
+    key: str,
+    payload: LyricsPayload,
+    extra: dict[str, Any] | None = None,
+) -> None:
     path = cache_dir / f"{key}.json"
+    data: dict[str, Any] = {
+        "synced": payload.synced,
+        "source": payload.source,
+        "plain": payload.plain,
+        "lines": [asdict(line) for line in payload.lines],
+    }
+    if extra:
+        data.update(extra)
     path.write_text(
-        json.dumps(
-            {
-                "synced": payload.synced,
-                "source": payload.source,
-                "plain": payload.plain,
-                "lines": [asdict(line) for line in payload.lines],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
 
 def save_aligned_cached(cache_dir: Path, key: str, payload: LyricsPayload) -> None:
-    save_cached(cache_dir, key, payload)
+    save_cached(cache_dir, key, payload, extra={"align_version": ALIGNED_CACHE_VERSION})
 
 
 def _from_lrclib_record(record: dict[str, Any], source: str) -> LyricsPayload | None:
@@ -395,6 +408,37 @@ def clear_probe_errors(lyrics_cache: Path) -> int:
         except (OSError, ValueError):
             continue
         if str(data.get("source") or "") != PROBE_ERROR_SOURCE:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def clear_lyrics_cache(lyrics_cache: Path) -> int:
+    """Remove all cached LRCLIB results so the next probe re-fetches."""
+    if not lyrics_cache.is_dir():
+        return 0
+    removed = 0
+    for path in lyrics_cache.glob("*.json"):
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def clear_lyrics_keys(lyrics_cache: Path, keys: list[str]) -> int:
+    """Remove specific cached LRCLIB entries by cache key."""
+    if not lyrics_cache.is_dir():
+        return 0
+    removed = 0
+    for key in keys:
+        path = lyrics_cache / f"{key}.json"
+        if not path.is_file():
             continue
         try:
             path.unlink()
