@@ -1816,6 +1816,24 @@ button:hover {
   display: none;
 }
 
+.stage-toggle {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.stage-toggle[hidden] {
+  display: none !important;
+}
+
+.stage-substatus {
+  min-height: 1.1em;
+  font-size: 0.85rem;
+  color: var(--cyan);
+}
+
+.stage-substatus:empty {
+  display: none;
+}
+
 .play-btn {
   min-width: 10rem;
   border: 0;

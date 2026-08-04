@@ -84,3 +84,14 @@ def cache_dir(root: Path | None = None) -> Path:
 
 def aligned_cache_dir(root: Path | None = None) -> Path:
     return _resolve_cache_dir("aligned", root)
+
+
+def stems_cache_dir() -> Path:
+    """Generated instrumental/vocal tracks. Always in the app cache: these files are big."""
+    return _resolve_cache_dir("stems", None)
+
+
+def stem_models_dir() -> Path:
+    path = app_cache_root() / "stem-models"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

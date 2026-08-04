@@ -14,14 +14,17 @@ from .lyrics import LyricLine, LyricWord, estimate_words
 _model = None
 _model_lock = threading.Lock()
 _model_name: str | None = None
-
-# Whisper knobs. Bigger models transcribe sung Catalan noticeably better but cost
-# CPU time, so the default stays usable and the upgrade is opt-in via env.
-DEFAULT_MODEL_SIZE = (os.environ.get("KARAOKE_WHISPER_MODEL") or "").strip() or "small"
-WHISPER_DEVICE = (os.environ.get("KARAOKE_WHISPER_DEVICE") or "").strip() or "cpu"
-WHISPER_COMPUTE_TYPE = (os.environ.get("KARAOKE_WHISPER_COMPUTE") or "").strip() or (
-    "int8" if WHISPER_DEVICE == "cpu" else "float16"
-)
+_model_device: str | None = None
+_model_compute: str | None = None
+_preload_started = False
+_model_state: dict = {
+    "ready": False,
+    "loading": False,
+    "error": "",
+    "model": "",
+    "device": "",
+    "compute": "",
+}
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -31,7 +34,70 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
-WHISPER_BEAM_SIZE = _env_int("KARAOKE_WHISPER_BEAM", 1)
+def _add_torch_cuda_dll_dir() -> None:
+    """On Windows, let ctranslate2 see the CUDA DLLs shipped with torch."""
+    if os.name != "nt":
+        return
+    try:
+        import torch
+
+        lib = Path(torch.__file__).resolve().parent / "lib"
+        if lib.is_dir():
+            os.add_dll_directory(str(lib))
+    except Exception:  # noqa: BLE001 — optional path hint only
+        pass
+
+
+def _cublas12_loadable() -> bool:
+    """faster-whisper/ctranslate2 CUDA builds need cuBLAS 12, not only a GPU."""
+    if os.name != "nt":
+        return True
+    _add_torch_cuda_dll_dir()
+    try:
+        import ctypes
+
+        ctypes.WinDLL("cublas64_12.dll")
+        return True
+    except OSError:
+        return False
+
+
+def _cuda_available() -> bool:
+    """True only when ctranslate2 sees a GPU *and* its CUDA 12 runtime can load."""
+    try:
+        import ctranslate2
+
+        if int(ctranslate2.get_cuda_device_count()) <= 0:
+            return False
+    except Exception:  # noqa: BLE001 — missing CUDA build must fall back to CPU
+        return False
+    return _cublas12_loadable()
+
+
+def _default_device() -> str:
+    env = (os.environ.get("KARAOKE_WHISPER_DEVICE") or "").strip().lower()
+    if env in {"cpu", "cuda", "auto"}:
+        if env == "auto":
+            return "cuda" if _cuda_available() else "cpu"
+        if env == "cuda" and not _cuda_available():
+            return "cpu"
+        return env
+    return "cuda" if _cuda_available() else "cpu"
+
+
+def _compute_for(device: str) -> str:
+    env = (os.environ.get("KARAOKE_WHISPER_COMPUTE") or "").strip()
+    if env:
+        return env
+    return "int8" if device == "cpu" else "float16"
+
+
+# Whisper knobs. medium + CUDA (when present) is the sweet spot for sung Catalan
+# on a laptop GPU; override via env if you need speed over accuracy.
+DEFAULT_MODEL_SIZE = (os.environ.get("KARAOKE_WHISPER_MODEL") or "").strip() or "medium"
+WHISPER_DEVICE = _default_device()
+WHISPER_COMPUTE_TYPE = _compute_for(WHISPER_DEVICE)
+WHISPER_BEAM_SIZE = _env_int("KARAOKE_WHISPER_BEAM", 3)
 
 # Matching thresholds. A token pair below MATCH_MIN is never linked: leaving a
 # hole for interpolation beats pinning a word onto the wrong audio position.
@@ -86,6 +152,11 @@ def alignment_available() -> bool:
         return False
 
 
+def whisper_model_status() -> dict:
+    with _model_lock:
+        return dict(_model_state)
+
+
 def _normalize(token: str) -> str:
     # Apostrophes vanish here on purpose: "l'amor" becomes "lamor", which is what
     # Whisper's "l'" + "amor" split collapses to once the two words are merged.
@@ -117,17 +188,112 @@ def _split_tokens(text: str) -> list[str]:
     return [part for part in re.split(r"(\s+)", text) if part and not part.isspace()]
 
 
+def _load_whisper_model(size: str, device: str, compute: str):
+    from faster_whisper import WhisperModel
+
+    _add_torch_cuda_dll_dir()
+    return WhisperModel(size, device=device, compute_type=compute)
+
+
 def _get_model(model_size: str | None = None):
-    global _model, _model_name
+    """Load (and cache) the Whisper model. Falls back to CPU if CUDA libs mismatch."""
+    global _model, _model_name, _model_device, _model_compute, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     size = model_size or DEFAULT_MODEL_SIZE
     with _model_lock:
         if _model is not None and _model_name == size:
             return _model
-        from faster_whisper import WhisperModel
 
-        _model = WhisperModel(size, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-        _model_name = size
-        return _model
+        _model_state.update(
+            {
+                "ready": False,
+                "loading": True,
+                "error": "",
+                "model": size,
+                "device": WHISPER_DEVICE,
+                "compute": WHISPER_COMPUTE_TYPE,
+            }
+        )
+        preferred = WHISPER_DEVICE
+        devices = [preferred]
+        if preferred == "cuda":
+            devices.append("cpu")
+
+        last_error: Exception | None = None
+        for device in devices:
+            compute = WHISPER_COMPUTE_TYPE if device == preferred else _compute_for(device)
+            try:
+                model = _load_whisper_model(size, device, compute)
+                _model = model
+                _model_name = size
+                _model_device = device
+                _model_compute = compute
+                WHISPER_DEVICE = device
+                WHISPER_COMPUTE_TYPE = compute
+                _model_state.update(
+                    {
+                        "ready": True,
+                        "loading": False,
+                        "error": "",
+                        "model": size,
+                        "device": device,
+                        "compute": compute,
+                    }
+                )
+                return _model
+            except Exception as exc:  # noqa: BLE001 — try next device
+                last_error = exc
+                continue
+
+        _model_state.update(
+            {
+                "ready": False,
+                "loading": False,
+                "error": str(last_error or "No s’ha pogut carregar Whisper"),
+                "model": size,
+                "device": preferred,
+                "compute": WHISPER_COMPUTE_TYPE,
+            }
+        )
+        raise RuntimeError(_model_state["error"]) from last_error
+
+
+def preload_whisper_model() -> None:
+    """Download/load the default model in a background thread at server start."""
+    global _preload_started
+    if not alignment_available():
+        return
+    with _model_lock:
+        if _preload_started or _model is not None:
+            return
+        _preload_started = True
+        _model_state.update(
+            {
+                "ready": False,
+                "loading": True,
+                "error": "",
+                "model": DEFAULT_MODEL_SIZE,
+                "device": WHISPER_DEVICE,
+                "compute": WHISPER_COMPUTE_TYPE,
+            }
+        )
+
+    def _run() -> None:
+        try:
+            _get_model(DEFAULT_MODEL_SIZE)
+        except Exception:  # noqa: BLE001 — status already recorded for /api/health
+            pass
+
+    threading.Thread(target=_run, name="whisper-preload", daemon=True).start()
+
+
+def _reset_model_cache() -> None:
+    global _model, _model_name, _model_device, _model_compute
+    with _model_lock:
+        _model = None
+        _model_name = None
+        _model_device = None
+        _model_compute = None
+        _model_state.update({"ready": False, "loading": False})
 
 
 def transcribe_words(
@@ -137,19 +303,39 @@ def transcribe_words(
     initial_prompt: str | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> list[AsrWord]:
+    global WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     model = _get_model(model_size)
     # VAD often deletes sung vocals as "non-speech"; keep it off for karaoke.
-    # beam_size defaults to 1 to keep CPU sync usable for background queue jobs.
-    segments, info = model.transcribe(
-        str(audio_path),
-        language=language,
-        word_timestamps=True,
-        vad_filter=False,
-        beam_size=WHISPER_BEAM_SIZE,
-        best_of=WHISPER_BEAM_SIZE,
-        condition_on_previous_text=False,
-        initial_prompt=initial_prompt,
-    )
+    try:
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            word_timestamps=True,
+            vad_filter=False,
+            beam_size=WHISPER_BEAM_SIZE,
+            best_of=WHISPER_BEAM_SIZE,
+            condition_on_previous_text=False,
+            initial_prompt=initial_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 — CUDA runtime gaps show up at transcribe time
+        message = str(exc).lower()
+        if WHISPER_DEVICE == "cuda" and ("cublas" in message or "cuda" in message):
+            _reset_model_cache()
+            WHISPER_DEVICE = "cpu"
+            WHISPER_COMPUTE_TYPE = _compute_for("cpu")
+            model = _get_model(model_size)
+            segments, info = model.transcribe(
+                str(audio_path),
+                language=language,
+                word_timestamps=True,
+                vad_filter=False,
+                beam_size=WHISPER_BEAM_SIZE,
+                best_of=WHISPER_BEAM_SIZE,
+                condition_on_previous_text=False,
+                initial_prompt=initial_prompt,
+            )
+        else:
+            raise
     duration = float(getattr(info, "duration", 0) or 0)
     words: list[AsrWord] = []
     for segment in segments:

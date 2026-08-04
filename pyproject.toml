@@ -19,6 +19,12 @@ dependencies = [
 align = [
     "faster-whisper>=1.0.0",
 ]
+stems = [
+    "audio-separator[gpu]>=0.24",
+]
+stems-cpu = [
+    "audio-separator[cpu]>=0.24",
+]
 
 [project.scripts]
 karaoke-party = "karaoke_party.app:main"

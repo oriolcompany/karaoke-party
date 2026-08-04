@@ -23,7 +23,7 @@ PROBE_TIMEOUT = 8.0
 PROBE_ERROR_SOURCE = "probe-error"
 # Bump when the aligner changes so old, less precise timings are recomputed
 # instead of being served forever from disk.
-ALIGNED_CACHE_VERSION = 2
+ALIGNED_CACHE_VERSION = 3
 
 
 @dataclass

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=21" />
+    <link rel="stylesheet" href="/styles.css?v=22" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -297,6 +297,19 @@
               </div>
 
               <div class="settings-block">
+                <h4 class="settings-block-title">Pista instrumental</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help" id="stemsHelp">
+                    Genera la versió sense veu de cada cançó per poder cantar-la en mode karaoke.
+                  </p>
+                  <button id="generateStemsBtn" type="button">
+                    Generar instrumentals
+                  </button>
+                </div>
+                <p id="stemsSettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+
+              <div class="settings-block">
                 <h4 class="settings-block-title">Escenari</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
@@ -394,10 +407,29 @@
       <div class="stage-dock">
         <audio id="player" preload="metadata"></audio>
         <button id="playBtn" class="play-btn" type="button" aria-label="Reproduir">Inicia</button>
+        <div id="audioModeToggle" class="settings-toggle stage-toggle" role="group" aria-label="Pista d’àudio" hidden>
+          <button
+            id="audioModeOriginalBtn"
+            type="button"
+            class="settings-toggle-btn is-active"
+            aria-pressed="true"
+          >
+            Amb veu
+          </button>
+          <button
+            id="audioModeInstrumentalBtn"
+            type="button"
+            class="settings-toggle-btn"
+            aria-pressed="false"
+          >
+            Karaoke
+          </button>
+        </div>
         <p id="lyricsStatus" class="status">Preparat</p>
+        <p id="audioModeStatus" class="status stage-substatus" aria-live="polite"></p>
       </div>
     </section>
 
-    <script src="/app.js?v=21"></script>
+    <script src="/app.js?v=26"></script>
   </body>
 </html>

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 import threading
 import uuid
 import webbrowser
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -16,8 +18,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__
-from .align import align_lyrics, alignment_available
-from .config import DEFAULT_PORT, aligned_cache_dir, cache_dir, default_music_root
+from .align import (
+    align_lyrics,
+    alignment_available,
+    preload_whisper_model,
+    whisper_model_status,
+)
+from .config import (
+    DEFAULT_PORT,
+    aligned_cache_dir,
+    cache_dir,
+    default_music_root,
+    stems_cache_dir,
+)
 from .covers import covers_cache_dir, migrate_cached_covers_into_audio, resolve_cover
 from .folder_picker import pick_music_folder
 from .library import TrackInfo, _sort_key, scan_library
@@ -36,6 +49,18 @@ from .lyrics import (
     save_aligned_cached,
     save_cached,
 )
+from .stems import (
+    has_instrumental,
+    has_vocals,
+    instrumental_path,
+    model_name,
+    separate_track,
+    separation_available,
+    vocals_path,
+)
+
+
+log = logging.getLogger("karaoke_party")
 
 
 def _project_root() -> Path:
@@ -46,7 +71,15 @@ def _project_root() -> Path:
 
 WEB_DIR = _project_root() / "web"
 
-app = FastAPI(title="Karaoke Party")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Download/load Whisper as soon as the server starts so the first song does
+    # not stall the align queue on a multi-GB HuggingFace fetch.
+    preload_whisper_model()
+    yield
+
+
+app = FastAPI(title="Karaoke Party", lifespan=_lifespan)
 _music_root: Path | None = default_music_root()
 _tracks: dict[str, TrackInfo] = {}
 _align_jobs: dict[str, dict] = {}
@@ -82,6 +115,20 @@ _cover_resync_state: dict = {
 }
 _cover_resync_thread: threading.Thread | None = None
 COVER_RESYNC_CONCURRENCY = 3
+_stem_jobs: dict[str, dict] = {}
+_stem_lock = threading.Lock()
+# (job_id or None, track). Bulk items carry no job id and only move the counters.
+_stem_queue: list[tuple[str | None, TrackInfo]] = []
+_stem_worker_started = False
+_stem_wake = threading.Event()
+_stem_bulk_state: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "failed": 0,
+    "current": "",
+    "error": "",
+}
 
 
 class SetRootBody(BaseModel):
@@ -105,6 +152,10 @@ class ResyncLyricsBody(BaseModel):
     """scope: all = every track; missing = only songs without lyrics now."""
 
     scope: str = "all"
+
+
+class StemsBody(BaseModel):
+    track_id: str
 
 
 def _reset_probe_state() -> None:
@@ -208,9 +259,28 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
         def on_progress(ratio: float) -> None:
             _set_align_job(job_id, status="running", progress=round(float(ratio), 3), phase="whisper")
 
-        _set_align_job(job_id, status="running", progress=0.0, phase="whisper")
+        # Whisper hears sung lyrics much better on an isolated vocal stem than on
+        # the full mix. Generate stems on demand when the separator is installed;
+        # if separation fails, fall back to the original track rather than abort.
+        source_audio = Path(track.path)
+        if has_vocals(stems_cache_dir(), key):
+            source_audio = vocals_path(stems_cache_dir(), key)
+        elif separation_available():
+            _set_align_job(job_id, status="running", progress=0.0, phase="stems")
+            try:
+                _, vocals = separate_track(Path(track.path), key, stems_cache_dir())
+                if vocals is not None and vocals.is_file():
+                    source_audio = vocals
+            except Exception:  # noqa: BLE001 — alignment can still run on the mix
+                log.warning("No s’ha pogut aïllar la veu abans d’alinear «%s»", track.id)
+
+        whisper = whisper_model_status()
+        if whisper.get("loading") or not whisper.get("ready"):
+            _set_align_job(job_id, status="running", progress=0.0, phase="model")
+        else:
+            _set_align_job(job_id, status="running", progress=0.0, phase="whisper")
         aligned_lines = align_lyrics(
-            Path(track.path),
+            source_audio,
             payload.lines,
             language=language,
             on_progress=on_progress,
@@ -260,6 +330,100 @@ def _enqueue_align_job(job_id: str, track: TrackInfo, language: str) -> None:
         }
         _align_queue.append((job_id, track, language))
     _align_wake.set()
+
+
+def _set_stem_job(job_id: str, **fields) -> None:
+    with _stem_lock:
+        current = dict(_stem_jobs.get(job_id) or {})
+        current.update(fields)
+        _stem_jobs[job_id] = current
+
+
+def _run_stem_job(job_id: str | None, track: TrackInfo) -> None:
+    key = cache_key(track.artist, track.title, track.duration)
+    label = f"{track.artist} — {track.title}".strip(" —")
+    bulk = job_id is None
+    with _stem_lock:
+        if bulk:
+            _stem_bulk_state["current"] = label
+    error = ""
+    try:
+        def on_progress(ratio: float, phase: str) -> None:
+            if job_id:
+                _set_stem_job(
+                    job_id, status="running", progress=round(float(ratio), 3), phase=phase
+                )
+
+        if job_id:
+            _set_stem_job(job_id, status="running", progress=0.0, phase="model")
+        separate_track(Path(track.path), key, stems_cache_dir(), on_progress=on_progress)
+        if job_id:
+            _set_stem_job(job_id, status="done", progress=1.0, phase="done", ready=True)
+        ok = True
+    except Exception as exc:  # noqa: BLE001 — surface to client poll
+        error = str(exc) or exc.__class__.__name__
+        if job_id:
+            _set_stem_job(job_id, status="error", error=error, progress=0.0)
+        ok = False
+    if not ok:
+        log.warning("Separació fallida per «%s»: %s", label, error)
+    if bulk:
+        with _stem_lock:
+            _stem_bulk_state["done"] += 1
+            if not ok:
+                _stem_bulk_state["failed"] += 1
+                _stem_bulk_state["error"] = error
+            if _stem_bulk_state["done"] >= _stem_bulk_state["total"]:
+                _stem_bulk_state.update({"running": False, "current": ""})
+
+
+def _stem_worker_loop() -> None:
+    while True:
+        _stem_wake.wait(timeout=1.0)
+        while True:
+            with _stem_lock:
+                if not _stem_queue:
+                    _stem_wake.clear()
+                    break
+                job_id, track = _stem_queue.pop(0)
+            _run_stem_job(job_id, track)
+
+
+def _ensure_stem_worker() -> None:
+    global _stem_worker_started
+    with _stem_lock:
+        if _stem_worker_started:
+            return
+        _stem_worker_started = True
+    threading.Thread(target=_stem_worker_loop, name="stem-worker", daemon=True).start()
+
+
+def _enqueue_stem_job(job_id: str | None, track: TrackInfo, *, front: bool = False) -> None:
+    _ensure_stem_worker()
+    with _stem_lock:
+        if job_id:
+            _stem_jobs[job_id] = {
+                "status": "queued",
+                "progress": 0.0,
+                "phase": "queued",
+                "track_id": track.id,
+                "ready": False,
+            }
+        if front:
+            _stem_queue.insert(0, (job_id, track))
+        else:
+            _stem_queue.append((job_id, track))
+    _stem_wake.set()
+
+
+def _active_stem_job(track_id: str) -> tuple[str, dict] | None:
+    with _stem_lock:
+        for existing_id, job in _stem_jobs.items():
+            if job.get("track_id") != track_id:
+                continue
+            if job.get("status") in {"queued", "running"}:
+                return existing_id, dict(job)
+    return None
 
 
 def _library_snapshot() -> dict:
@@ -314,12 +478,14 @@ def _library_snapshot() -> dict:
     playable_tracks.sort(key=_sort_key)
     hidden_tracks.sort(key=_sort_key)
     pending_tracks.sort(key=_sort_key)
+    stems_path = stems_cache_dir()
     playable: list[dict] = []
     for track in playable_tracks:
         item = asdict(track)
         key = cache_key(track.artist, track.title, track.duration)
         item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
         item["has_lyrics"] = True
+        item["has_instrumental"] = has_instrumental(stems_path, key)
         playable.append(item)
 
     hidden_items: list[dict] = []
@@ -341,6 +507,9 @@ def _library_snapshot() -> dict:
         probe = dict(_probe_state)
     with _cover_resync_lock:
         covers_resync = dict(_cover_resync_state)
+    with _stem_lock:
+        stems_state = dict(_stem_bulk_state)
+        stems_state["queued"] = len(_stem_queue)
     return {
         "root": str(_music_root),
         "tracks": playable,
@@ -353,6 +522,8 @@ def _library_snapshot() -> dict:
         "errors": errors,
         "probe": probe,
         "covers_resync": covers_resync,
+        "stems": stems_state,
+        "stems_available": separation_available(),
     }
 
 
@@ -516,6 +687,8 @@ def health() -> dict:
         "tracks": len(_tracks),
         "cache": str(cache_dir()),
         "alignment": alignment_available(),
+        "stems": separation_available(),
+        "whisper": whisper_model_status(),
     }
 
 
@@ -715,12 +888,128 @@ async def resync_cover(body: ResyncCoverBody) -> dict:
 
 
 @app.get("/api/audio/{track_id:path}")
-def audio(track_id: str):
+def audio(track_id: str, mode: str = Query("original")):
     track = _resolve_track(track_id)
+    if mode == "instrumental":
+        key = cache_key(track.artist, track.title, track.duration)
+        path = instrumental_path(stems_cache_dir(), key)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Encara no hi ha pista instrumental")
+        return FileResponse(path, filename=path.name, media_type="audio/mpeg")
     path = Path(track.path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Falta el fitxer d’àudio")
     return FileResponse(path, filename=path.name, media_type="audio/mpeg")
+
+
+def _stem_state_payload(track: TrackInfo) -> dict:
+    key = cache_key(track.artist, track.title, track.duration)
+    return {
+        "track_id": track.id,
+        "ready": has_instrumental(stems_cache_dir(), key),
+        "available": separation_available(),
+        "model": model_name(),
+    }
+
+
+@app.get("/api/stems")
+def stems_state(track_id: str = Query(...)) -> dict:
+    track = _resolve_track(track_id)
+    payload = _stem_state_payload(track)
+    active = _active_stem_job(track.id)
+    if active is not None:
+        job_id, job = active
+        payload.update({"job_id": job_id, **job})
+    return payload
+
+
+@app.post("/api/stems")
+def start_stems(body: StemsBody) -> dict:
+    track = _resolve_track(body.track_id)
+    payload = _stem_state_payload(track)
+    if payload["ready"]:
+        return {"job_id": None, "status": "done", **payload}
+    if not separation_available():
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": 'Instal·la la separació amb: pip install -e ".[stems]"',
+            **payload,
+        }
+
+    active = _active_stem_job(track.id)
+    if active is not None:
+        job_id, job = active
+        return {"job_id": job_id, **payload, **job}
+
+    job_id = uuid.uuid4().hex
+    # A song someone is waiting on jumps ahead of any bulk batch.
+    _enqueue_stem_job(job_id, track, front=True)
+    return {"job_id": job_id, "status": "queued", "progress": 0.0, "phase": "queued", **payload}
+
+
+@app.get("/api/stems/{job_id}")
+def stems_status(job_id: str) -> dict:
+    with _stem_lock:
+        job = _stem_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Treball de separació no trobat")
+    return {"job_id": job_id, **job}
+
+
+@app.post("/api/library/stems/generate")
+def generate_library_stems() -> dict:
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta de música seleccionada")
+    if not separation_available():
+        raise HTTPException(
+            status_code=400,
+            detail='Instal·la la separació amb: pip install -e ".[stems]"',
+        )
+    snapshot = _library_snapshot()
+    stems_path = stems_cache_dir()
+    pending: list[TrackInfo] = []
+    for item in snapshot.get("tracks") or []:
+        track = _tracks.get(item["id"])
+        if track is None:
+            continue
+        key = cache_key(track.artist, track.title, track.duration)
+        if has_instrumental(stems_path, key):
+            continue
+        if _active_stem_job(track.id) is not None:
+            continue
+        pending.append(track)
+
+    if not pending:
+        return {"queued": 0, "running": False}
+
+    with _stem_lock:
+        if _stem_bulk_state["running"]:
+            _stem_bulk_state["total"] += len(pending)
+        else:
+            _stem_bulk_state.update(
+                {
+                    "running": True,
+                    "done": 0,
+                    "total": len(pending),
+                    "failed": 0,
+                    "current": "",
+                    "error": "",
+                }
+            )
+    for track in pending:
+        _enqueue_stem_job(None, track)
+    return {"queued": len(pending), "running": True}
+
+
+@app.get("/api/library/stems")
+def library_stems_state() -> dict:
+    with _stem_lock:
+        state = dict(_stem_bulk_state)
+        state["queued"] = len(_stem_queue)
+    state["available"] = separation_available()
+    state["model"] = model_name()
+    return state
 
 
 @app.get("/api/cover/{track_id:path}")
@@ -774,6 +1063,14 @@ def start_align(body: AlignBody) -> dict:
             "job_id": None,
             "status": "unavailable",
             "error": 'Instal·la l’alineació amb: pip install -e ".[align]"',
+        }
+
+    whisper = whisper_model_status()
+    if whisper.get("error") and not whisper.get("ready") and not whisper.get("loading"):
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": whisper.get("error") or "El model Whisper no s’ha pogut carregar",
         }
 
     # Reuse an in-flight / queued job for the same track.

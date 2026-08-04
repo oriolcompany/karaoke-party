@@ -57,6 +57,12 @@ const muteOffBtn = document.getElementById("muteOffBtn");
 const muteOnBtn = document.getElementById("muteOnBtn");
 const lyricsLayoutStackBtn = document.getElementById("lyricsLayoutStackBtn");
 const lyricsLayoutDualBtn = document.getElementById("lyricsLayoutDualBtn");
+const audioModeToggle = document.getElementById("audioModeToggle");
+const audioModeOriginalBtn = document.getElementById("audioModeOriginalBtn");
+const audioModeInstrumentalBtn = document.getElementById("audioModeInstrumentalBtn");
+const audioModeStatus = document.getElementById("audioModeStatus");
+const generateStemsBtn = document.getElementById("generateStemsBtn");
+const stemsSettingsStatus = document.getElementById("stemsSettingsStatus");
 const albumBackBtn = document.getElementById("albumBackBtn");
 
 const GENERIC_COVER = "/album-generic.png";
@@ -66,12 +72,17 @@ const ALIGN_MODE_KEY = "karaoke-align-mode";
 const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
 const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
+const AUDIO_MODE_KEY = "karaoke-audio-mode";
 const MUTE_KEY = "karaoke-muted";
 let coverBust = 0;
 
 function loadLyricsLayout() {
   const stored = localStorage.getItem(LYRICS_LAYOUT_KEY);
   return stored === "dual" ? "dual" : "stack";
+}
+
+function loadAudioMode() {
+  return localStorage.getItem(AUDIO_MODE_KEY) === "instrumental" ? "instrumental" : "original";
 }
 
 function loadLyricsFilterMode() {
@@ -120,6 +131,10 @@ let libraryBrowseMode =
 let lyricsFilterMode = loadLyricsFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
+let audioMode = loadAudioMode();
+let stemsAvailable = false;
+let stemsJobTimer = 0;
+let stemsBulkTimer = 0;
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
@@ -142,6 +157,9 @@ let syncActiveId = null;
 let syncRunning = false;
 let syncLastError = "";
 let syncProgress = 0;
+let syncPhase = "";
+let syncTotalQueued = 0;
+let syncCompleted = 0;
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -260,6 +278,214 @@ function setLyricsLayout(mode) {
     activeLineIndex = -1;
     setActiveLine(index);
   }
+}
+
+function audioUrlFor(trackId, mode) {
+  const base = `/api/audio/${encodeURI(trackId)}`;
+  return mode === "instrumental" ? `${base}?mode=instrumental` : base;
+}
+
+function setStemStatus(text) {
+  if (audioModeStatus) audioModeStatus.textContent = text || "";
+}
+
+function applyAudioModeButtons() {
+  const instrumental = audioMode === "instrumental";
+  audioModeOriginalBtn?.classList.toggle("is-active", !instrumental);
+  audioModeInstrumentalBtn?.classList.toggle("is-active", instrumental);
+  audioModeOriginalBtn?.setAttribute("aria-pressed", instrumental ? "false" : "true");
+  audioModeInstrumentalBtn?.setAttribute("aria-pressed", instrumental ? "true" : "false");
+  if (audioModeToggle) audioModeToggle.hidden = !stemsAvailable;
+}
+
+function applyStemsAvailability(data) {
+  stemsAvailable = !!data.stems_available;
+  applyAudioModeButtons();
+  if (!generateStemsBtn) return;
+  const bulk = data.stems || {};
+  if (!stemsAvailable) {
+    generateStemsBtn.disabled = true;
+    setSettingsStatus(
+      stemsSettingsStatus,
+      'Separació no instal·lada · pip install -e ".[stems]"',
+      "error"
+    );
+    return;
+  }
+  if (bulk.running) {
+    generateStemsBtn.disabled = true;
+    pollStemsBulk();
+  } else {
+    generateStemsBtn.disabled = !data.root || !playableTracks.length;
+  }
+}
+
+function markTrackInstrumental(trackId) {
+  const track = tracks.find((t) => t.id === trackId);
+  if (track) track.has_instrumental = true;
+  const playable = playableTracks.find((t) => t.id === trackId);
+  if (playable) playable.has_instrumental = true;
+}
+
+function stopStemPoll() {
+  if (stemsJobTimer) {
+    clearInterval(stemsJobTimer);
+    stemsJobTimer = 0;
+  }
+}
+
+async function swapAudioSource(mode) {
+  if (!currentId) return;
+  const wasPlaying = !player.paused && !player.ended;
+  const at = player.currentTime;
+  player.src = audioUrlFor(currentId, mode);
+  const restore = () => {
+    player.removeEventListener("loadedmetadata", restore);
+    if (at > 0.15) {
+      try {
+        player.currentTime = at;
+      } catch {
+        /* seeking before metadata is ready is not fatal */
+      }
+    }
+  };
+  player.addEventListener("loadedmetadata", restore);
+  if (wasPlaying) await player.play().catch(() => {});
+  updatePlayButton();
+}
+
+function pollStemJob(jobId, trackId) {
+  stopStemPoll();
+  stemsJobTimer = setInterval(async () => {
+    try {
+      const job = await api(`/api/stems/${encodeURIComponent(jobId)}`);
+      if (currentId !== trackId) {
+        stopStemPoll();
+        return;
+      }
+      if (job.status === "done") {
+        stopStemPoll();
+        markTrackInstrumental(trackId);
+        setStemStatus("");
+        if (audioMode === "instrumental") await swapAudioSource("instrumental");
+        return;
+      }
+      if (job.status === "error") {
+        stopStemPoll();
+        setStemStatus(job.error || "No s’ha pogut generar la pista instrumental");
+        return;
+      }
+      const pct = Math.round((job.progress || 0) * 100);
+      const phase = job.phase === "queued" ? "a la cua" : job.phase || "";
+      setStemStatus(`Generant pista instrumental… ${pct}% ${phase}`.trim());
+    } catch {
+      stopStemPoll();
+    }
+  }, 1200);
+}
+
+async function requestInstrumental(trackId) {
+  setStemStatus("Preparant la pista instrumental…");
+  try {
+    const job = await api("/api/stems", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: trackId }),
+    });
+    if (job.status === "unavailable") {
+      setStemStatus(job.error || "Separació no disponible");
+      return;
+    }
+    if (job.ready || job.status === "done") {
+      markTrackInstrumental(trackId);
+      setStemStatus("");
+      if (audioMode === "instrumental") await swapAudioSource("instrumental");
+      return;
+    }
+    if (job.job_id) pollStemJob(job.job_id, trackId);
+  } catch (err) {
+    setStemStatus(err.message || "Error en generar la pista instrumental");
+  }
+}
+
+async function setAudioMode(mode, { persist = true } = {}) {
+  audioMode = mode === "instrumental" ? "instrumental" : "original";
+  if (persist) localStorage.setItem(AUDIO_MODE_KEY, audioMode);
+  applyAudioModeButtons();
+  if (!currentId) return;
+  if (audioMode === "original") {
+    stopStemPoll();
+    setStemStatus("");
+    await swapAudioSource("original");
+    return;
+  }
+  const track = tracks.find((t) => t.id === currentId);
+  if (track?.has_instrumental) {
+    setStemStatus("");
+    await swapAudioSource("instrumental");
+    return;
+  }
+  await requestInstrumental(currentId);
+}
+
+function startStemsGeneration() {
+  if (!generateStemsBtn) return;
+  generateStemsBtn.disabled = true;
+  setSettingsStatus(stemsSettingsStatus, "Encuant la generació d’instrumentals…", "running");
+  api("/api/library/stems/generate", { method: "POST" })
+    .then((res) => {
+      if (!res.queued) {
+        setSettingsStatus(
+          stemsSettingsStatus,
+          "Totes les cançons ja tenen pista instrumental",
+          "ok"
+        );
+        generateStemsBtn.disabled = false;
+        return;
+      }
+      pollStemsBulk();
+    })
+    .catch((err) => {
+      setSettingsStatus(stemsSettingsStatus, err.message || "Error en generar", "error");
+      generateStemsBtn.disabled = false;
+    });
+}
+
+function pollStemsBulk() {
+  if (stemsBulkTimer) return;
+  stemsBulkTimer = setInterval(async () => {
+    try {
+      const state = await api("/api/library/stems");
+      const done = state.done || 0;
+      const total = state.total || 0;
+      if (!state.running) {
+        clearInterval(stemsBulkTimer);
+        stemsBulkTimer = 0;
+        if (generateStemsBtn) generateStemsBtn.disabled = false;
+        const failed = state.failed || 0;
+        const reason = failed && state.error ? ` · ${state.error}` : "";
+        setSettingsStatus(
+          stemsSettingsStatus,
+          failed
+            ? `Instrumentals generats · ${done - failed}/${total} (${failed} amb error)${reason}`
+            : `Instrumentals generats · ${done}/${total}`,
+          failed ? "error" : "ok"
+        );
+        loadLibrary().catch(() => {});
+        return;
+      }
+      const current = state.current ? ` · ${state.current}` : "";
+      setSettingsStatus(
+        stemsSettingsStatus,
+        `Generant instrumentals… ${done}/${total}${current}`,
+        "running"
+      );
+    } catch {
+      clearInterval(stemsBulkTimer);
+      stemsBulkTimer = 0;
+      if (generateStemsBtn) generateStemsBtn.disabled = false;
+    }
+  }, 2000);
 }
 
 function applyAudioMute() {
@@ -895,25 +1121,57 @@ function trackLabel(track) {
   return `${track.artist || "Artista"} — ${track.title || track.relpath}`;
 }
 
+function syncPhaseLabel(phase) {
+  if (phase === "model") return "carregant model Whisper";
+  if (phase === "stems") return "aïllant veu";
+  if (phase === "lyrics") return "carregant lletra";
+  if (phase === "queued") return "a la cua";
+  if (phase === "whisper" || phase === "running") return "alineant";
+  return "";
+}
+
+function syncProgressText(track) {
+  const title = trackLabel(track) || "cançó";
+  const phase = syncPhaseLabel(syncPhase);
+  const pct =
+    typeof syncProgress === "number" && syncProgress > 0
+      ? `${Math.round(syncProgress * 100)}%`
+      : "";
+  const detail = [phase, pct].filter(Boolean).join(" · ");
+  const rest = syncQueue.length;
+  const batch =
+    syncTotalQueued > 1
+      ? `${Math.min(syncCompleted + 1, syncTotalQueued)}/${syncTotalQueued}`
+      : "";
+  let text = batch ? `Whisper ${batch} · ${title}` : `Whisper · ${title}`;
+  if (detail) text += ` · ${detail}`;
+  if (rest) text += ` · ${rest} més a la cua`;
+  return text;
+}
+
 function updateSyncQueueMeta() {
   const pending = syncQueue.length + (syncActiveId ? 1 : 0);
   if (!pending && !syncLastError) {
-    syncQueueMeta.hidden = true;
-    syncQueueMeta.textContent = "";
+    if (syncQueueMeta) {
+      syncQueueMeta.hidden = true;
+      syncQueueMeta.textContent = "";
+    }
     return;
   }
-  syncQueueMeta.hidden = false;
   if (syncActiveId) {
-    const active = tracks.find((t) => t.id === syncActiveId);
-    const rest = syncQueue.length;
-    const pct =
-      syncProgress > 0 ? ` · ${Math.round(syncProgress * 100)}%` : "";
-    syncQueueMeta.textContent = rest
-      ? `Sincronitzant: ${trackLabel(active)}${pct} · ${rest} més a la cua`
-      : `Sincronitzant: ${trackLabel(active)}${pct}`;
+    const active =
+      tracks.find((t) => t.id === syncActiveId) ||
+      playableTracks.find((t) => t.id === syncActiveId);
+    const text = syncProgressText(active);
+    if (syncQueueMeta) {
+      syncQueueMeta.hidden = false;
+      syncQueueMeta.textContent = text.replace(/^Whisper/, "Sincronitzant");
+    }
+    setSettingsStatus(lyricsSyncSettingsStatus, text, "running");
     return;
   }
-  if (syncLastError) {
+  if (syncLastError && syncQueueMeta) {
+    syncQueueMeta.hidden = false;
     syncQueueMeta.textContent = syncLastError;
   }
 }
@@ -1042,10 +1300,19 @@ async function waitAlignJob(jobId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 1200));
     const job = await api(`/api/align/${encodeURIComponent(jobId)}`);
-    if (typeof job.progress === "number") {
+    let changed = false;
+    if (typeof job.progress === "number" && job.progress !== syncProgress) {
       syncProgress = job.progress;
-      updateSyncQueueMeta();
+      changed = true;
     }
+    if (job.phase && job.phase !== syncPhase) {
+      syncPhase = job.phase;
+      changed = true;
+    } else if (job.status === "queued" && syncPhase !== "queued") {
+      syncPhase = "queued";
+      changed = true;
+    }
+    if (changed) updateSyncQueueMeta();
     if (job.status === "done") return job;
     if (job.status === "error") {
       throw new Error(job.error || "Alineació fallida");
@@ -1074,12 +1341,17 @@ async function processSyncQueue() {
   if (syncRunning) return;
   syncRunning = true;
   if (syncLyricsWhisperBtn) syncLyricsWhisperBtn.disabled = true;
+  if (!syncTotalQueued) {
+    syncTotalQueued = syncQueue.length;
+    syncCompleted = 0;
+  }
   while (syncQueue.length) {
     const trackId = syncQueue.shift();
     syncQueuedIds.delete(trackId);
     const track =
       playableTracks.find((t) => t.id === trackId) || tracks.find((t) => t.id === trackId);
     if (!track || track.whisper_aligned) {
+      syncCompleted += 1;
       refreshAlignBadges();
       updatePrimaryAction();
       continue;
@@ -1087,26 +1359,28 @@ async function processSyncQueue() {
     syncActiveId = trackId;
     syncLastError = "";
     syncProgress = 0;
+    syncPhase = "queued";
     refreshAlignBadges();
     updatePrimaryAction();
-    setSettingsStatus(
-      lyricsSyncSettingsStatus,
-      `Whisper · ${track.title || trackId}`,
-      "running"
-    );
+    updateSyncQueueMeta();
     try {
       await runQueuedAlign(trackId);
       markTrackAligned(trackId);
+      syncCompleted += 1;
     } catch (err) {
       syncLastError = err.message || "Error de sincronització";
+      syncCompleted += 1;
     } finally {
       syncActiveId = null;
       syncProgress = 0;
+      syncPhase = "";
       refreshAlignBadges();
       updatePrimaryAction();
     }
   }
   syncRunning = false;
+  syncTotalQueued = 0;
+  syncCompleted = 0;
   if (syncLyricsWhisperBtn) {
     syncLyricsWhisperBtn.disabled = !playableTracks.length;
   }
@@ -1358,12 +1632,17 @@ async function pollAlignJob(jobId, trackId, token) {
       lyricsStatus.textContent = `Alineació fallida · ${job.error || "error desconegut"}`;
       return;
     }
-    if (typeof job.progress === "number" && job.progress > 0) {
-      const pct = Math.round(job.progress * 100);
-      const phase = job.status === "queued" ? "A la cua" : "Alineant";
-      lyricsStatus.textContent = `${phase} la lletra amb l’àudio… ${pct}%`;
-    } else if (job.status === "queued") {
+    if (job.status === "queued") {
       lyricsStatus.textContent = "Alineació a la cua del servidor…";
+    } else if (job.phase === "model") {
+      lyricsStatus.textContent = "Carregant el model Whisper…";
+    } else if (job.phase === "stems") {
+      lyricsStatus.textContent = "Aïllant la veu abans d’alinear…";
+    } else if (typeof job.progress === "number" && job.progress > 0) {
+      const pct = Math.round(job.progress * 100);
+      lyricsStatus.textContent = `Alineant la lletra amb l’àudio… ${pct}%`;
+    } else if (job.phase === "lyrics") {
+      lyricsStatus.textContent = "Carregant la lletra…";
     }
   } catch (err) {
     if (token !== alignToken || currentId !== trackId) return;
@@ -1879,8 +2158,9 @@ function updateLibraryMeta(data) {
   if (syncLyricsWhisperBtn) {
     syncLyricsWhisperBtn.disabled = !data.root || !playableTracks.length || syncRunning;
   }
+  applyStemsAvailability(data);
 
-  if (probe.running) {
+  if (probe.running && !syncRunning) {
     const done = probe.done || 0;
     const probeTotal = probe.total || 0;
     setSettingsStatus(
@@ -1888,6 +2168,8 @@ function updateLibraryMeta(data) {
       `Buscant lletres bàsiques… ${done}/${probeTotal}`,
       "running"
     );
+  } else if (syncRunning) {
+    updateSyncQueueMeta();
   }
   refreshLibraryMetaLabel();
 
@@ -1950,12 +2232,14 @@ function enqueueWhisperForLibrary() {
     syncQueue.push(track.id);
     syncQueuedIds.add(track.id);
   }
+  syncTotalQueued = syncQueue.length + (syncActiveId ? 1 : 0);
+  syncCompleted = 0;
   refreshAlignBadges();
   updatePrimaryAction();
-  processSyncQueue();
   const msg = `Encades ${pending.length} cançons a Whisper`;
   libraryMeta.textContent = msg;
   setSettingsStatus(lyricsSyncSettingsStatus, msg, "running");
+  processSyncQueue();
   return pending.length;
 }
 
@@ -2115,11 +2399,18 @@ async function openSong(trackId) {
   const track = tracks.find((t) => t.id === trackId);
   if (!track) return;
   stopAlignPoll();
+  stopStemPoll();
   currentId = trackId;
   showStage();
   songTitle.textContent = track.title;
   songArtist.textContent = track.artist || "Artista desconegut";
-  player.src = `/api/audio/${encodeURI(trackId)}`;
+  // Fall back to the original mix while the instrumental is still cooking.
+  const wantsInstrumental = audioMode === "instrumental" && stemsAvailable;
+  const useInstrumental = wantsInstrumental && !!track.has_instrumental;
+  player.src = audioUrlFor(trackId, useInstrumental ? "instrumental" : "original");
+  applyAudioModeButtons();
+  setStemStatus("");
+  if (wantsInstrumental && !useInstrumental) requestInstrumental(trackId);
   lyricsStatus.textContent = "Obtenint la lletra…";
   try {
     const payload = await api(`/api/lyrics?track_id=${encodeURIComponent(trackId)}`);
@@ -2281,11 +2572,15 @@ muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
 muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
 lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
 lyricsLayoutDualBtn?.addEventListener("click", () => setLyricsLayout("dual"));
+audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
+audioModeInstrumentalBtn?.addEventListener("click", () => setAudioMode("instrumental"));
+generateStemsBtn?.addEventListener("click", () => startStemsGeneration());
 albumBackBtn?.addEventListener("click", () => closeAlbum());
 applyLyricsFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
 applyLyricsLayout();
+applyAudioModeButtons();
 
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
