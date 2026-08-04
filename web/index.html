@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=22" />
+    <link rel="stylesheet" href="/styles.css?v=24" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -187,6 +187,14 @@
             >
               General
             </button>
+            <button
+              type="button"
+              class="settings-nav-btn"
+              data-settings-section="cache"
+              aria-controls="settingsSectionCache"
+            >
+              Memòria cau
+            </button>
           </nav>
           <div id="settingsBody" class="settings-body">
             <section
@@ -221,7 +229,8 @@
                 <h4 class="settings-block-title">Lletres</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Torna a descarregar les lletres bàsiques (LRCLIB) de les cançons que encara no en tenen.
+                    Descarrega només les lletres bàsiques (LRCLIB) de les cançons que encara no en
+                    tenen. No s’executa en obrir el programa.
                   </p>
                   <button id="resyncLyricsMissingBtn" type="button">
                     Resincronitzar sense lletra
@@ -229,7 +238,7 @@
                 </div>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Encua l’alineació Whisper de les cançons amb lletra encara no sincronitzades.
+                    Per cada cançó: lletres bàsiques → separació de pistes → alineació Whisper.
                   </p>
                   <button id="syncLyricsWhisperBtn" type="button">
                     Sincronitzar lletres Whisper
@@ -364,6 +373,104 @@
               </div>
 
             </section>
+
+            <section
+              id="settingsSectionCache"
+              class="settings-section"
+              data-settings-section-panel="cache"
+            >
+              <h3 class="settings-section-title">Memòria cau</h3>
+              <p class="settings-help">
+                Cada cançó guarda la cau en una carpeta
+                (<code>tracks/&lt;clau&gt;/</code>): lletres, Whisper, stems i portada.
+                Pots esborrar-la, resincronitzar-la o exportar/importar el zip entre PCs.
+              </p>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Cançó</h4>
+                <div class="cache-song-picker">
+                  <input
+                    id="cacheSongSearch"
+                    type="search"
+                    placeholder="Cerca per títol o artista…"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <select id="cacheSongSelect" size="8" aria-label="Cançons de la biblioteca">
+                  </select>
+                </div>
+                <div id="cacheSongMeta" class="cache-song-meta" hidden></div>
+                <div id="cacheFlags" class="cache-flags" hidden aria-live="polite"></div>
+              </div>
+
+              <div class="settings-block">
+                <h4 class="settings-block-title">Què afectar</h4>
+                <div class="cache-scopes" role="group" aria-label="Parts de la memòria cau">
+                  <label class="cache-scope">
+                    <input id="cacheScopeLyrics" type="checkbox" checked />
+                    <span>Lletres</span>
+                  </label>
+                  <label class="cache-scope">
+                    <input id="cacheScopeAligned" type="checkbox" checked />
+                    <span>Whisper</span>
+                  </label>
+                  <label class="cache-scope">
+                    <input id="cacheScopeStems" type="checkbox" checked />
+                    <span>Stems</span>
+                  </label>
+                  <label class="cache-scope">
+                    <input id="cacheScopeCover" type="checkbox" checked />
+                    <span>Portada</span>
+                  </label>
+                </div>
+                <div class="settings-inline-row cache-actions">
+                  <p class="settings-help">
+                    Esborrar només neteja la cau. Resincronitzar esborra el seleccionat i torna a
+                    baixar lletres + Whisper.
+                  </p>
+                  <div class="cache-action-btns">
+                    <button id="cacheClearBtn" class="settings-secondary-btn" type="button" disabled>
+                      Esborrar cau
+                    </button>
+                    <button id="cacheResyncBtn" type="button" disabled>
+                      Resincronitzar
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row cache-actions">
+                  <p class="settings-help">
+                    Buida la memòria cau de <strong>totes</strong> les cançons (segons les caselles
+                    de dalt). No esborra els models Whisper/Demucs descarregats.
+                  </p>
+                  <div class="cache-action-btns">
+                    <button id="cacheClearAllBtn" class="settings-secondary-btn" type="button">
+                      Esborrar tota la cau
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row cache-actions">
+                  <p class="settings-help">
+                    Exporta la cau de la cançó seleccionada com a zip, o importa’n una d’un altre
+                    ordinador (substitueix la carpeta d’aquella clau).
+                  </p>
+                  <div class="cache-action-btns">
+                    <button id="cacheExportBtn" class="settings-secondary-btn" type="button" disabled>
+                      Exportar zip
+                    </button>
+                    <button id="cacheImportBtn" class="settings-secondary-btn" type="button">
+                      Importar zip
+                    </button>
+                    <input
+                      id="cacheImportFile"
+                      type="file"
+                      accept=".zip,application/zip"
+                      hidden
+                    />
+                  </div>
+                </div>
+                <p id="cacheSettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+            </section>
           </div>
         </div>
       </div>
@@ -430,6 +537,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=26"></script>
+    <script src="/app.js?v=30"></script>
   </body>
 </html>

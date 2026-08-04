@@ -753,6 +753,106 @@ button:hover {
   color: var(--muted);
 }
 
+.cache-song-picker {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.cache-song-picker input[type="search"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+  padding: 0.7rem 1.05rem;
+}
+
+.cache-song-picker select {
+  width: 100%;
+  min-height: 11rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--ink);
+  padding: 0.35rem;
+  font: inherit;
+}
+
+.cache-song-picker select option {
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.55rem;
+}
+
+.cache-song-picker select option:checked {
+  background: rgba(244, 196, 48, 0.22);
+  color: var(--ink);
+}
+
+.cache-song-meta {
+  margin-top: 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.cache-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.cache-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 246, 234, 0.05);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.cache-flag.is-on {
+  border-color: rgba(244, 196, 48, 0.45);
+  background: rgba(244, 196, 48, 0.12);
+  color: var(--ink);
+}
+
+.cache-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+}
+
+.cache-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cache-scope input {
+  accent-color: #f4c430;
+}
+
+.cache-actions {
+  margin-top: 0.9rem;
+  align-items: flex-start;
+}
+
+.cache-action-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
 .settings-status:empty {
   display: none;
 }

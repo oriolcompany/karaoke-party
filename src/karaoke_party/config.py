@@ -78,17 +78,28 @@ def _resolve_cache_dir(name: str, root: Path | None) -> Path:
     return path
 
 
+def tracks_cache_dir() -> Path:
+    """Per-song cache root: ``tracks/<key>/{lyrics,aligned,stems,cover}``."""
+    from .track_cache import tracks_cache_dir as _tracks
+
+    return _tracks()
+
+
 def cache_dir(root: Path | None = None) -> Path:
-    return _resolve_cache_dir("lyrics", root)
+    """Tracks root used for lyrics.json (``root`` kept for call-site compat)."""
+    del root  # song cache is always under the app cache, not the music folder
+    return tracks_cache_dir()
 
 
 def aligned_cache_dir(root: Path | None = None) -> Path:
-    return _resolve_cache_dir("aligned", root)
+    """Same tracks root; aligned.json lives next to lyrics.json."""
+    del root
+    return tracks_cache_dir()
 
 
 def stems_cache_dir() -> Path:
-    """Generated instrumental/vocal tracks. Always in the app cache: these files are big."""
-    return _resolve_cache_dir("stems", None)
+    """Same tracks root; instrumental/vocals live inside each song folder."""
+    return tracks_cache_dir()
 
 
 def stem_models_dir() -> Path:

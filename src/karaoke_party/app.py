@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import sys
 import threading
 import uuid
@@ -12,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -27,11 +28,16 @@ from .align import (
 from .config import (
     DEFAULT_PORT,
     aligned_cache_dir,
+    app_cache_root,
     cache_dir,
     default_music_root,
     stems_cache_dir,
 )
-from .covers import covers_cache_dir, migrate_cached_covers_into_audio, resolve_cover
+from .covers import (
+    covers_cache_dir,
+    migrate_cached_covers_into_audio,
+    resolve_cover,
+)
 from .folder_picker import pick_music_folder
 from .library import TrackInfo, _sort_key, scan_library
 from .lyrics import (
@@ -45,18 +51,19 @@ from .lyrics import (
     clear_probe_errors,
     fetch_lyrics,
     load_aligned_cached,
+    load_cached,
     lyrics_status_and_source,
     save_aligned_cached,
     save_cached,
 )
 from .stems import (
+    SeparationError,
+    ensure_vocals,
     has_instrumental,
-    has_vocals,
     instrumental_path,
     model_name,
     separate_track,
     separation_available,
-    vocals_path,
 )
 
 
@@ -158,6 +165,78 @@ class StemsBody(BaseModel):
     track_id: str
 
 
+class TrackCacheBody(BaseModel):
+    track_id: str = ""
+    # Empty = every song-related cache bucket.
+    scopes: list[str] | None = None
+    language: str = "ca"
+
+
+_CACHE_SCOPES = frozenset({"lyrics", "aligned", "stems", "cover"})
+
+
+def _normalize_cache_scopes(scopes: list[str] | None) -> set[str]:
+    if not scopes:
+        return set(_CACHE_SCOPES)
+    chosen = {str(item).strip().lower() for item in scopes if str(item).strip()}
+    unknown = chosen - _CACHE_SCOPES
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"scopes desconeguts: {', '.join(sorted(unknown))}",
+        )
+    if not chosen:
+        raise HTTPException(status_code=400, detail="Cal almenys un scope")
+    return chosen
+
+
+def _track_cache_status(track: TrackInfo) -> dict:
+    from .track_cache import aligned_path as aligned_file_path
+    from .track_cache import track_status
+
+    key = cache_key(track.artist, track.title, track.duration)
+    root = cache_dir()
+    files = track_status(root, key)
+    lyrics = load_cached(root, key)
+    aligned = load_aligned_cached(root, key)
+    return {
+        "track_id": track.id,
+        "title": track.title,
+        "artist": track.artist,
+        "key": key,
+        "dir": files.get("dir") or "",
+        "lyrics": bool(lyrics and lyrics.lines),
+        "lyrics_source": (lyrics.source if lyrics else ""),
+        "aligned": aligned is not None,
+        "aligned_file": aligned_file_path(root, key).is_file(),
+        "instrumental": files["instrumental"],
+        "vocals": files["vocals"],
+        "cover": files["cover"],
+        "whisper_aligned": aligned is not None,
+    }
+
+
+def _clear_track_cache(track: TrackInfo, scopes: set[str]) -> dict[str, int]:
+    from .track_cache import clear_track_files
+
+    key = cache_key(track.artist, track.title, track.duration)
+    removed = clear_track_files(cache_dir(), key, scopes)
+    if "lyrics" in scopes:
+        with _probe_lock:
+            _probe_attempted.discard(track.id)
+    if "aligned" in scopes:
+        with _align_lock:
+            for job_id, job in list(_align_jobs.items()):
+                if job.get("track_id") == track.id and job.get("status") in {
+                    "queued",
+                    "running",
+                    "done",
+                }:
+                    if job.get("status") != "running":
+                        _align_jobs.pop(job_id, None)
+    return removed
+
+
 def _reset_probe_state() -> None:
     global _probe_pass_complete, _probe_generation
     with _probe_lock:
@@ -256,23 +335,31 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             _set_align_job(job_id, status="error", error="No hi ha lletra per alinear", progress=0.0)
             return
 
-        def on_progress(ratio: float) -> None:
+        def on_whisper_progress(ratio: float) -> None:
             _set_align_job(job_id, status="running", progress=round(float(ratio), 3), phase="whisper")
 
-        # Whisper hears sung lyrics much better on an isolated vocal stem than on
-        # the full mix. Generate stems on demand when the separator is installed;
-        # if separation fails, fall back to the original track rather than abort.
-        source_audio = Path(track.path)
-        if has_vocals(stems_cache_dir(), key):
-            source_audio = vocals_path(stems_cache_dir(), key)
-        elif separation_available():
-            _set_align_job(job_id, status="running", progress=0.0, phase="stems")
-            try:
-                _, vocals = separate_track(Path(track.path), key, stems_cache_dir())
-                if vocals is not None and vocals.is_file():
-                    source_audio = vocals
-            except Exception:  # noqa: BLE001 — alignment can still run on the mix
-                log.warning("No s’ha pogut aïllar la veu abans d’alinear «%s»", track.id)
+        def on_stem_progress(ratio: float, phase: str) -> None:
+            _set_align_job(
+                job_id,
+                status="running",
+                progress=round(float(ratio), 3),
+                phase="stems",
+                stem_phase=phase,
+            )
+
+        # Always isolate vocals before Whisper. Cached stems are reused; otherwise
+        # separation runs here so no code path can transcribe the full mix.
+        _set_align_job(job_id, status="running", progress=0.0, phase="stems")
+        try:
+            source_audio = ensure_vocals(
+                Path(track.path),
+                key,
+                stems_cache_dir(),
+                on_progress=on_stem_progress,
+            )
+        except SeparationError as exc:
+            _set_align_job(job_id, status="error", error=str(exc), progress=0.0, phase="stems")
+            return
 
         whisper = whisper_model_status()
         if whisper.get("loading") or not whisper.get("ready"):
@@ -283,7 +370,7 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             source_audio,
             payload.lines,
             language=language,
-            on_progress=on_progress,
+            on_progress=on_whisper_progress,
         )
         aligned_payload = LyricsPayload(
             synced=True,
@@ -291,7 +378,15 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             lines=aligned_lines,
             plain=payload.plain,
         )
-        save_aligned_cached(aligned_cache_dir(), key, aligned_payload)
+        save_aligned_cached(
+            aligned_cache_dir(),
+            key,
+            aligned_payload,
+            artist=track.artist,
+            title=track.title,
+            duration=track.duration,
+            album=track.album,
+        )
         _set_align_job(job_id, **_align_done_payload(aligned_payload), progress=1.0, phase="done")
     except Exception as exc:  # noqa: BLE001 — surface to client poll
         _set_align_job(job_id, status="error", error=str(exc), progress=0.0)
@@ -694,8 +789,8 @@ def health() -> dict:
 
 @app.get("/api/library")
 def library() -> dict:
-    if _library_snapshot().get("pending"):
-        _ensure_lyrics_probe()
+    # Basic LRCLIB sync is manual (settings) or the first step of Whisper align —
+    # never kicked off just by opening the library.
     return _library_snapshot()
 
 
@@ -707,7 +802,6 @@ def set_root(body: SetRootBody) -> dict:
     # Only reset the probe when the folder actually changes (same path must not
     # kill an in-flight pass and start another from 0/N).
     tracks = _reload_library(root)
-    _ensure_lyrics_probe()
     return {"root": str(root), "tracks": len(tracks)}
 
 
@@ -802,6 +896,7 @@ async def _resync_cover_track(track: TrackInfo) -> bool:
         artist=track.artist,
         title=track.title,
         album=track.album,
+        duration=track.duration,
         cache_dir=covers_cache_dir(),
         generic_path=_generic_cover_path(),
         force=True,
@@ -876,6 +971,7 @@ async def resync_cover(body: ResyncCoverBody) -> dict:
         artist=track.artist,
         title=track.title,
         album=track.album,
+        duration=track.duration,
         cache_dir=covers_cache_dir(),
         generic_path=_generic_cover_path(),
         force=True,
@@ -884,6 +980,156 @@ async def resync_cover(body: ResyncCoverBody) -> dict:
         "track_id": body.track_id,
         "source": result.source,
         "updated": result.source.startswith("remote"),
+    }
+
+
+@app.get("/api/cache")
+def track_cache_status(track_id: str = Query(...)) -> dict:
+    track = _resolve_track(track_id)
+    return _track_cache_status(track)
+
+
+@app.post("/api/cache/clear")
+def clear_track_cache(body: TrackCacheBody) -> dict:
+    track = _resolve_track(body.track_id)
+    scopes = _normalize_cache_scopes(body.scopes)
+    removed = _clear_track_cache(track, scopes)
+    return {
+        "track_id": track.id,
+        "cleared": removed,
+        "total": sum(removed.values()),
+        "cache": _track_cache_status(track),
+    }
+
+
+def _clear_cache_tree(path: Path) -> int:
+    """Delete every file under a cache directory. Returns how many were removed."""
+    if not path.is_dir():
+        return 0
+    removed = 0
+    for child in path.rglob("*"):
+        if not child.is_file():
+            continue
+        try:
+            child.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+@app.post("/api/cache/clear-all")
+def clear_all_cache(body: TrackCacheBody | None = None) -> dict:
+    """Wipe lyrics / Whisper / stems / cover caches for the whole library."""
+    from .track_cache import clear_all_tracks, stems_work_dir
+
+    scopes = _normalize_cache_scopes(body.scopes if body else None)
+    removed = clear_all_tracks(cache_dir(), scopes)
+    if "lyrics" in scopes:
+        _reset_probe_state()
+    if "aligned" in scopes:
+        with _align_lock:
+            _align_jobs.clear()
+            _align_queue.clear()
+    if "stems" in scopes:
+        # Scratch leftovers from Demucs live outside track folders.
+        _clear_cache_tree(stems_work_dir())
+        with _stem_lock:
+            _stem_jobs.clear()
+            _stem_queue.clear()
+            _stem_bulk_state.update(
+                {
+                    "running": False,
+                    "done": 0,
+                    "total": 0,
+                    "failed": 0,
+                    "current": "",
+                    "error": "",
+                }
+            )
+    return {"cleared": removed, "total": sum(removed.values())}
+
+
+@app.get("/api/cache/export")
+def export_track_cache(track_id: str = Query(...)):
+    """Download one song's cache folder as a zip (copy/paste between PCs)."""
+    from .track_cache import export_track_zip, track_dir
+
+    track = _resolve_track(track_id)
+    key = cache_key(track.artist, track.title, track.duration)
+    folder = track_dir(cache_dir(), key)
+    if not folder.is_dir():
+        raise HTTPException(status_code=404, detail="Aquesta cançó no té memòria cau")
+    export_root = app_cache_root() / "exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^\w\-]+", "_", f"{track.artist}-{track.title}")[:80] or key[:12]
+    destination = export_root / f"{safe_name}-{key[:10]}.zip"
+    export_track_zip(cache_dir(), key, destination)
+    return FileResponse(
+        destination,
+        filename=destination.name,
+        media_type="application/zip",
+    )
+
+
+@app.post("/api/cache/import")
+async def import_track_cache(file: UploadFile = File(...)) -> dict:
+    """Import a previously exported song-cache zip into tracks/<key>/."""
+    from .track_cache import import_track_zip, read_meta
+
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Cal un fitxer .zip de cau")
+    imports_root = app_cache_root() / "imports"
+    imports_root.mkdir(parents=True, exist_ok=True)
+    temp_path = imports_root / f"upload-{uuid.uuid4().hex}.zip"
+    try:
+        temp_path.write_bytes(await file.read())
+        key = import_track_zip(cache_dir(), temp_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+    meta = read_meta(cache_dir(), key) or {}
+    return {"key": key, "meta": meta, "cache": track_status_for_key(key)}
+
+
+def track_status_for_key(key: str) -> dict:
+    from .track_cache import track_status
+
+    return track_status(cache_dir(), key)
+
+
+@app.post("/api/cache/resync")
+def resync_track_cache(body: TrackCacheBody) -> dict:
+    """Wipe song caches related to lyrics sync, then re-fetch and re-align."""
+    track = _resolve_track(body.track_id)
+    scopes = _normalize_cache_scopes(body.scopes)
+    # Resync always refreshes lyrics + whisper path; keep optional cover/stems
+    # when the client asked for a narrower wipe.
+    scopes |= {"lyrics", "aligned"}
+    removed = _clear_track_cache(track, scopes)
+
+    align_job: dict | None = None
+    if alignment_available() and separation_available():
+        job_id = uuid.uuid4().hex
+        _enqueue_align_job(job_id, track, body.language or "ca")
+        align_job = {"job_id": job_id, "status": "queued", "progress": 0.0, "phase": "queued"}
+    else:
+        with _probe_lock:
+            _probe_attempted.discard(track.id)
+        _ensure_lyrics_probe(track_ids=[track.id])
+
+    return {
+        "track_id": track.id,
+        "cleared": removed,
+        "total": sum(removed.values()),
+        "align": align_job,
+        "cache": _track_cache_status(track),
     }
 
 
@@ -1020,6 +1266,7 @@ async def cover(track_id: str):
         artist=track.artist,
         title=track.title,
         album=track.album,
+        duration=track.duration,
         cache_dir=covers_cache_dir(),
         generic_path=_generic_cover_path(),
     )
@@ -1063,6 +1310,13 @@ def start_align(body: AlignBody) -> dict:
             "job_id": None,
             "status": "unavailable",
             "error": 'Instal·la l’alineació amb: pip install -e ".[align]"',
+        }
+
+    if not separation_available():
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": 'Whisper necessita la separació de pistes · pip install -e ".[stems]"',
         }
 
     whisper = whisper_model_status()

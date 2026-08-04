@@ -63,6 +63,21 @@ const audioModeInstrumentalBtn = document.getElementById("audioModeInstrumentalB
 const audioModeStatus = document.getElementById("audioModeStatus");
 const generateStemsBtn = document.getElementById("generateStemsBtn");
 const stemsSettingsStatus = document.getElementById("stemsSettingsStatus");
+const cacheSongSearch = document.getElementById("cacheSongSearch");
+const cacheSongSelect = document.getElementById("cacheSongSelect");
+const cacheSongMeta = document.getElementById("cacheSongMeta");
+const cacheFlags = document.getElementById("cacheFlags");
+const cacheScopeLyrics = document.getElementById("cacheScopeLyrics");
+const cacheScopeAligned = document.getElementById("cacheScopeAligned");
+const cacheScopeStems = document.getElementById("cacheScopeStems");
+const cacheScopeCover = document.getElementById("cacheScopeCover");
+const cacheClearBtn = document.getElementById("cacheClearBtn");
+const cacheResyncBtn = document.getElementById("cacheResyncBtn");
+const cacheClearAllBtn = document.getElementById("cacheClearAllBtn");
+const cacheExportBtn = document.getElementById("cacheExportBtn");
+const cacheImportBtn = document.getElementById("cacheImportBtn");
+const cacheImportFile = document.getElementById("cacheImportFile");
+const cacheSettingsStatus = document.getElementById("cacheSettingsStatus");
 const albumBackBtn = document.getElementById("albumBackBtn");
 
 const GENERIC_COVER = "/album-generic.png";
@@ -923,7 +938,8 @@ function tracksForLyricsFilter() {
   if (lyricsFilterMode === "all") {
     return [...playableTracks, ...hiddenTracks, ...pendingTracks].sort(compareTracks);
   }
-  return playableTracks;
+  // "Amb lletra": known lyrics + not-yet-checked (pending). Known misses stay in "Sense lletra".
+  return [...playableTracks, ...pendingTracks].sort(compareTracks);
 }
 
 function applyLyricsFilterMode() {
@@ -1201,9 +1217,11 @@ function updatePrimaryAction() {
     updateSyncQueueMeta();
     return;
   }
-  if (track.has_lyrics === false) {
+  // Known miss (LRCLIB none / probe-error): not singable. Pending = not checked yet —
+  // opening fetches basic lyrics on demand; Whisper sync does the full chain.
+  if (track.has_lyrics === false && !track.lyrics_pending) {
     singBtn.disabled = true;
-    singBtn.textContent = track.lyrics_pending ? "Pendent" : "Sense lletra";
+    singBtn.textContent = "Sense lletra";
     updateSyncQueueMeta();
     return;
   }
@@ -1266,7 +1284,7 @@ function activateSelectedTrack() {
     openAlbum(item);
     return;
   }
-  if (item.has_lyrics === false) return;
+  if (item.has_lyrics === false && !item.lyrics_pending) return;
   if (isSyncActionMode()) {
     enqueueSync(item);
     return;
@@ -1337,6 +1355,20 @@ async function runQueuedAlign(trackId) {
   throw new Error(job.error || "L’alineació no s’ha iniciat");
 }
 
+function whisperSyncCandidates() {
+  // Whisper job always fetches basic lyrics first, then stems, then align —
+  // so pending tracks (not yet probed) are valid candidates.
+  const seen = new Set();
+  const out = [];
+  for (const track of [...playableTracks, ...pendingTracks]) {
+    if (!track?.id || seen.has(track.id)) continue;
+    seen.add(track.id);
+    if (track.whisper_aligned) continue;
+    out.push(track);
+  }
+  return out;
+}
+
 async function processSyncQueue() {
   if (syncRunning) return;
   syncRunning = true;
@@ -1349,7 +1381,7 @@ async function processSyncQueue() {
     const trackId = syncQueue.shift();
     syncQueuedIds.delete(trackId);
     const track =
-      playableTracks.find((t) => t.id === trackId) || tracks.find((t) => t.id === trackId);
+      allLibraryTracks().find((t) => t.id === trackId) || tracks.find((t) => t.id === trackId);
     if (!track || track.whisper_aligned) {
       syncCompleted += 1;
       refreshAlignBadges();
@@ -1382,7 +1414,7 @@ async function processSyncQueue() {
   syncTotalQueued = 0;
   syncCompleted = 0;
   if (syncLyricsWhisperBtn) {
-    syncLyricsWhisperBtn.disabled = !playableTracks.length;
+    syncLyricsWhisperBtn.disabled = !whisperSyncCandidates().length;
   }
   updatePrimaryAction();
   if (syncLastError) {
@@ -1390,6 +1422,7 @@ async function processSyncQueue() {
   } else {
     setSettingsStatus(lyricsSyncSettingsStatus, "Sincronització Whisper enllestida", "ok");
   }
+  loadLibrary().catch(() => {});
 }
 
 function layoutCovers() {
@@ -2098,14 +2131,12 @@ function refreshLibraryMetaLabel() {
   }
   if (lyricsFilterMode === "hidden") {
     const count = hiddenTracks.length;
-    if (!count && pending) {
-      libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
-    } else if (!count) {
+    if (!count) {
       libraryMeta.textContent = `Cap cançó oculta (de ${total} al disc)`;
     } else {
       const bits = [`${count} cançons ocultes sense lletra`];
       if (errors) bits.push(`${errors} amb error de connexió`);
-      if (pending) bits.push(`${pending} pendents`);
+      if (pending) bits.push(`${pending} sense comprovar`);
       libraryMeta.textContent = bits.join(" · ");
     }
     return;
@@ -2118,13 +2149,14 @@ function refreshLibraryMetaLabel() {
       const bits = [`${count} cançons`];
       if (playableTracks.length) bits.push(`${playableTracks.length} amb lletra`);
       if (hiddenTracks.length) bits.push(`${hiddenTracks.length} sense lletra`);
-      if (pendingTracks.length) bits.push(`${pendingTracks.length} pendents`);
+      if (pendingTracks.length) bits.push(`${pendingTracks.length} sense comprovar`);
       libraryMeta.textContent = bits.join(" · ");
     }
     return;
   }
   if (!playableTracks.length && pending) {
-    libraryMeta.textContent = `Comprovant lletres de ${pending} cançons…`;
+    libraryMeta.textContent =
+      `${pending} cançons sense lletres bàsiques · Configuració → Resincronitzar o Whisper`;
   } else if (!playableTracks.length && errors) {
     libraryMeta.textContent = `No s’ha pogut connectar a LRCLIB per ${errors} cançons · Configuració → Reintentar lletres`;
   } else if (!playableTracks.length) {
@@ -2133,7 +2165,7 @@ function refreshLibraryMetaLabel() {
     const bits = [`${playableTracks.length} cançons amb lletra`];
     if (hidden - errors > 0) bits.push(`${hidden - errors} amagades sense lletra`);
     if (errors) bits.push(`${errors} amb error de connexió`);
-    if (pending) bits.push(`${pending} pendents`);
+    if (pending) bits.push(`${pending} sense comprovar`);
     libraryMeta.textContent = bits.join(" · ");
   } else {
     libraryMeta.textContent = `${playableTracks.length} cançons a punt · tria’n una per cantar`;
@@ -2156,9 +2188,15 @@ function updateLibraryMeta(data) {
   const resyncBusy = !data.root || !total || !!probe.running;
   if (resyncLyricsMissingBtn) resyncLyricsMissingBtn.disabled = resyncBusy;
   if (syncLyricsWhisperBtn) {
-    syncLyricsWhisperBtn.disabled = !data.root || !playableTracks.length || syncRunning;
+    syncLyricsWhisperBtn.disabled =
+      !data.root || !whisperSyncCandidates().length || syncRunning;
   }
   applyStemsAvailability(data);
+  const cacheSectionOpen =
+    isSettingsOpen() &&
+    settingsModal?.querySelector(".settings-nav-btn.is-active")?.dataset?.settingsSection ===
+      "cache";
+  if (cacheSectionOpen) fillCacheSongSelect();
 
   if (probe.running && !syncRunning) {
     const done = probe.done || 0;
@@ -2213,19 +2251,16 @@ async function pollBasicLyricsResync() {
 }
 
 function enqueueWhisperForLibrary() {
-  const pending = playableTracks.filter(
-    (track) =>
-      track &&
-      !track.whisper_aligned &&
-      syncActiveId !== track.id &&
-      !syncQueuedIds.has(track.id)
+  const pending = whisperSyncCandidates().filter(
+    (track) => syncActiveId !== track.id && !syncQueuedIds.has(track.id)
   );
   if (!pending.length) {
-    const msg = playableTracks.length
-      ? "Totes les cançons amb lletra ja tenen Whisper"
-      : "No hi ha cançons amb lletra per sincronitzar";
+    const known = playableTracks.length + pendingTracks.length;
+    const msg = known
+      ? "Totes les cançons candidates ja tenen Whisper"
+      : "No hi ha cançons per sincronitzar · fes Resincronitzar lletres o canvia el filtre";
     libraryMeta.textContent = msg;
-    setSettingsStatus(lyricsSyncSettingsStatus, msg, playableTracks.length ? "ok" : "error");
+    setSettingsStatus(lyricsSyncSettingsStatus, msg, known ? "ok" : "error");
     return 0;
   }
   for (const track of pending) {
@@ -2236,7 +2271,7 @@ function enqueueWhisperForLibrary() {
   syncCompleted = 0;
   refreshAlignBadges();
   updatePrimaryAction();
-  const msg = `Encades ${pending.length} cançons a Whisper`;
+  const msg = `Encades ${pending.length} cançons (lletres → stems → Whisper)`;
   libraryMeta.textContent = msg;
   setSettingsStatus(lyricsSyncSettingsStatus, msg, "running");
   processSyncQueue();
@@ -2254,7 +2289,7 @@ async function loadLibrary({ onProgress } = {}) {
   rootInput.disabled = true;
   try {
     let data = await api("/api/library");
-    // Wait for the single in-flight probe pass (no perpetual 2s refresh after it ends).
+    // Only wait when a manual basic-lyrics resync/retry is already running.
     while (data.probe && data.probe.running) {
       const total = data.probe.total || data.pending || 0;
       const done = Math.min(data.probe.done || 0, total || 0);
@@ -2269,9 +2304,12 @@ async function loadLibrary({ onProgress } = {}) {
     updateLibraryMeta(data);
     const total = data.total || 0;
     const withLyrics = (data.tracks || []).length;
+    const unchecked = (data.pending_tracks || []).length;
+    const bits = [`${withLyrics} amb lletra`];
+    if (unchecked) bits.push(`${unchecked} sense comprovar`);
     setSettingsStatus(
       librarySettingsStatus,
-      `Fet · ${withLyrics} cançons amb lletra (de ${total} al disc)`,
+      `Fet · ${bits.join(" · ")} (de ${total} al disc)`,
       "ok"
     );
     return data;
@@ -2534,6 +2572,305 @@ function showSettingsSection(sectionId) {
   settingsModal?.querySelectorAll("[data-settings-section-panel]").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.settingsSectionPanel === id);
   });
+  if (id === "cache") {
+    fillCacheSongSelect();
+    refreshSelectedCacheStatus();
+  }
+}
+
+function allLibraryTracks() {
+  const seen = new Set();
+  const out = [];
+  for (const list of [playableTracks, hiddenTracks, pendingTracks, tracks]) {
+    for (const track of list || []) {
+      if (!track?.id || seen.has(track.id)) continue;
+      seen.add(track.id);
+      out.push(track);
+    }
+  }
+  return out.sort((a, b) =>
+    `${a.artist || ""} ${a.title || ""}`.localeCompare(
+      `${b.artist || ""} ${b.title || ""}`,
+      "ca",
+      { sensitivity: "base" }
+    )
+  );
+}
+
+function fillCacheSongSelect() {
+  if (!cacheSongSelect) return;
+  const query = (cacheSongSearch?.value || "").trim().toLowerCase();
+  const previous = cacheSongSelect.value;
+  const items = allLibraryTracks().filter((track) => {
+    if (!query) return true;
+    const hay = `${track.artist || ""} ${track.title || ""} ${track.album || ""}`.toLowerCase();
+    return hay.includes(query);
+  });
+  cacheSongSelect.innerHTML = "";
+  for (const track of items) {
+    const opt = document.createElement("option");
+    opt.value = track.id;
+    opt.textContent = `${track.artist || "Desconegut"} — ${track.title || track.id}`;
+    cacheSongSelect.appendChild(opt);
+  }
+  if (previous && [...cacheSongSelect.options].some((opt) => opt.value === previous)) {
+    cacheSongSelect.value = previous;
+  } else if (cacheSongSelect.options.length) {
+    cacheSongSelect.selectedIndex = 0;
+  }
+  const has = !!cacheSongSelect.value;
+  if (cacheClearBtn) cacheClearBtn.disabled = !has;
+  if (cacheResyncBtn) cacheResyncBtn.disabled = !has;
+  if (cacheExportBtn) cacheExportBtn.disabled = !has;
+}
+
+function selectedCacheScopes() {
+  const scopes = [];
+  if (cacheScopeLyrics?.checked) scopes.push("lyrics");
+  if (cacheScopeAligned?.checked) scopes.push("aligned");
+  if (cacheScopeStems?.checked) scopes.push("stems");
+  if (cacheScopeCover?.checked) scopes.push("cover");
+  return scopes;
+}
+
+function renderCacheFlags(cache) {
+  if (!cacheFlags) return;
+  if (!cache) {
+    cacheFlags.hidden = true;
+    cacheFlags.innerHTML = "";
+    return;
+  }
+  const flags = [
+    ["Lletres", cache.lyrics],
+    ["Whisper", cache.aligned || cache.aligned_file],
+    ["Instrumental", cache.instrumental],
+    ["Veu", cache.vocals],
+    ["Portada", cache.cover],
+  ];
+  cacheFlags.hidden = false;
+  cacheFlags.innerHTML = "";
+  for (const [label, on] of flags) {
+    const el = document.createElement("span");
+    el.className = `cache-flag${on ? " is-on" : ""}`;
+    el.textContent = `${label}${on ? "" : " · no"}`;
+    cacheFlags.appendChild(el);
+  }
+}
+
+async function refreshSelectedCacheStatus() {
+  const trackId = cacheSongSelect?.value;
+  if (!trackId) {
+    if (cacheSongMeta) {
+      cacheSongMeta.hidden = true;
+      cacheSongMeta.textContent = "";
+    }
+    renderCacheFlags(null);
+    return;
+  }
+  const track =
+    allLibraryTracks().find((item) => item.id === trackId) ||
+    playableTracks.find((item) => item.id === trackId);
+  if (cacheSongMeta) {
+    cacheSongMeta.hidden = false;
+    cacheSongMeta.textContent = track
+      ? `${track.artist || "Desconegut"} — ${track.title || trackId}`
+      : trackId;
+  }
+  try {
+    const cache = await api(`/api/cache?track_id=${encodeURIComponent(trackId)}`);
+    renderCacheFlags(cache);
+  } catch (err) {
+    renderCacheFlags(null);
+    setSettingsStatus(cacheSettingsStatus, err.message || "No s’ha pogut llegir la cau", "error");
+  }
+}
+
+async function clearAllCache() {
+  const scopes = selectedCacheScopes();
+  if (!scopes.length) {
+    setSettingsStatus(cacheSettingsStatus, "Selecciona almenys una part de la cau", "error");
+    return;
+  }
+  const ok = window.confirm(
+    `Segur que vols esborrar la memòria cau de TOTES les cançons?\n(${scopes.join(", ")})`
+  );
+  if (!ok) return;
+  if (cacheClearAllBtn) cacheClearAllBtn.disabled = true;
+  if (cacheClearBtn) cacheClearBtn.disabled = true;
+  if (cacheResyncBtn) cacheResyncBtn.disabled = true;
+  if (cacheExportBtn) cacheExportBtn.disabled = true;
+  setSettingsStatus(cacheSettingsStatus, "Esborrant tota la memòria cau…", "running");
+  try {
+    const result = await api("/api/cache/clear-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: "", scopes }),
+    });
+    const total = result.total || 0;
+    for (const track of allLibraryTracks()) {
+      if (scopes.includes("aligned")) track.whisper_aligned = false;
+    }
+    setSettingsStatus(
+      cacheSettingsStatus,
+      total ? `S’ha buidat la cau · ${total} fitxers` : "La cau ja era buida",
+      total ? "ok" : ""
+    );
+    await refreshSelectedCacheStatus();
+    loadLibrary().catch(() => {});
+  } catch (err) {
+    setSettingsStatus(cacheSettingsStatus, err.message || "Error esborrant la cau", "error");
+  } finally {
+    if (cacheClearAllBtn) cacheClearAllBtn.disabled = false;
+    const has = !!cacheSongSelect?.value;
+    if (cacheClearBtn) cacheClearBtn.disabled = !has;
+    if (cacheResyncBtn) cacheResyncBtn.disabled = !has;
+    if (cacheExportBtn) cacheExportBtn.disabled = !has;
+  }
+}
+
+async function exportSelectedCache() {
+  const trackId = cacheSongSelect?.value;
+  if (!trackId) return;
+  if (cacheExportBtn) cacheExportBtn.disabled = true;
+  setSettingsStatus(cacheSettingsStatus, "Exportant la memòria cau…", "running");
+  try {
+    const response = await fetch(`/api/cache/export?track_id=${encodeURIComponent(trackId)}`);
+    if (!response.ok) {
+      let detail = "Error exportant la cau";
+      try {
+        const payload = await response.json();
+        if (payload?.detail) detail = payload.detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(disposition);
+    const name = match ? decodeURIComponent(match[1].replace(/"/g, "")) : "karaoke-cache.zip";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setSettingsStatus(cacheSettingsStatus, `Zip descarregat · ${name}`, "ok");
+  } catch (err) {
+    setSettingsStatus(cacheSettingsStatus, err.message || "Error exportant la cau", "error");
+  } finally {
+    if (cacheExportBtn) cacheExportBtn.disabled = !cacheSongSelect?.value;
+  }
+}
+
+async function importCacheZip(file) {
+  if (!file) return;
+  if (cacheImportBtn) cacheImportBtn.disabled = true;
+  setSettingsStatus(cacheSettingsStatus, "Important la memòria cau…", "running");
+  try {
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch("/api/cache/import", { method: "POST", body });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Error important la cau");
+    }
+    const meta = payload.meta || {};
+    const label = [meta.artist, meta.title].filter(Boolean).join(" — ") || payload.key || "cançó";
+    setSettingsStatus(cacheSettingsStatus, `Importat · ${label}`, "ok");
+    await refreshSelectedCacheStatus();
+    loadLibrary().catch(() => {});
+  } catch (err) {
+    setSettingsStatus(cacheSettingsStatus, err.message || "Error important la cau", "error");
+  } finally {
+    if (cacheImportBtn) cacheImportBtn.disabled = false;
+    if (cacheImportFile) cacheImportFile.value = "";
+  }
+}
+
+async function runCacheAction(kind) {
+  const trackId = cacheSongSelect?.value;
+  if (!trackId) return;
+  const scopes = selectedCacheScopes();
+  if (!scopes.length) {
+    setSettingsStatus(cacheSettingsStatus, "Selecciona almenys una part de la cau", "error");
+    return;
+  }
+  if (cacheClearBtn) cacheClearBtn.disabled = true;
+  if (cacheResyncBtn) cacheResyncBtn.disabled = true;
+  if (cacheExportBtn) cacheExportBtn.disabled = true;
+  const label =
+    kind === "resync"
+      ? "Resincronitzant la memòria cau…"
+      : "Esborrant la memòria cau…";
+  setSettingsStatus(cacheSettingsStatus, label, "running");
+  try {
+    const path = kind === "resync" ? "/api/cache/resync" : "/api/cache/clear";
+    const result = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: trackId, scopes, language: "ca" }),
+    });
+    renderCacheFlags(result.cache);
+    const total = result.total || 0;
+    if (kind === "resync") {
+      const jobId = result.align?.job_id;
+      const track = allLibraryTracks().find((item) => item.id === trackId);
+      if (track) track.whisper_aligned = false;
+      if (jobId) {
+        setSettingsStatus(
+          cacheSettingsStatus,
+          `Cau netejada (${total}) · resincronitzant amb Whisper…`,
+          "running"
+        );
+        syncActiveId = trackId;
+        syncProgress = 0;
+        syncPhase = "queued";
+        updateSyncQueueMeta();
+        try {
+          await waitAlignJob(jobId);
+          markTrackAligned(trackId);
+          setSettingsStatus(cacheSettingsStatus, "Resincronització Whisper enllestida", "ok");
+          await refreshSelectedCacheStatus();
+        } catch (err) {
+          setSettingsStatus(
+            cacheSettingsStatus,
+            err.message || "Resincronització Whisper fallida",
+            "error"
+          );
+        } finally {
+          syncActiveId = null;
+          syncProgress = 0;
+          syncPhase = "";
+          updateSyncQueueMeta();
+        }
+      } else {
+        setSettingsStatus(
+          cacheSettingsStatus,
+          `Cau netejada (${total}) · tornant a buscar lletres`,
+          "ok"
+        );
+      }
+    } else {
+      setSettingsStatus(
+        cacheSettingsStatus,
+        total ? `S’han esborrat ${total} fitxers de cau` : "No hi havia res a la cau",
+        total ? "ok" : ""
+      );
+      const track = allLibraryTracks().find((item) => item.id === trackId);
+      if (track && scopes.includes("aligned")) track.whisper_aligned = false;
+    }
+    loadLibrary().catch(() => {});
+  } catch (err) {
+    setSettingsStatus(cacheSettingsStatus, err.message || "Error amb la memòria cau", "error");
+  } finally {
+    const has = !!cacheSongSelect?.value;
+    if (cacheClearBtn) cacheClearBtn.disabled = !has;
+    if (cacheResyncBtn) cacheResyncBtn.disabled = !has;
+    if (cacheExportBtn) cacheExportBtn.disabled = !has;
+  }
 }
 
 function openSettings(sectionId = "general") {
@@ -2562,6 +2899,20 @@ settingsModal?.addEventListener("click", (event) => {
 });
 settingsModal?.querySelectorAll(".settings-nav-btn").forEach((btn) => {
   btn.addEventListener("click", () => showSettingsSection(btn.dataset.settingsSection));
+});
+cacheSongSearch?.addEventListener("input", () => {
+  fillCacheSongSelect();
+  refreshSelectedCacheStatus();
+});
+cacheSongSelect?.addEventListener("change", () => refreshSelectedCacheStatus());
+cacheClearBtn?.addEventListener("click", () => runCacheAction("clear"));
+cacheResyncBtn?.addEventListener("click", () => runCacheAction("resync"));
+cacheClearAllBtn?.addEventListener("click", () => clearAllCache());
+cacheExportBtn?.addEventListener("click", () => exportSelectedCache());
+cacheImportBtn?.addEventListener("click", () => cacheImportFile?.click());
+cacheImportFile?.addEventListener("change", () => {
+  const file = cacheImportFile.files?.[0];
+  if (file) importCacheZip(file);
 });
 libraryBrowseSongBtn?.addEventListener("click", () => setLibraryBrowseMode("song"));
 libraryBrowseAlbumBtn?.addEventListener("click", () => setLibraryBrowseMode("album"));

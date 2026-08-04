@@ -32,9 +32,10 @@ pip install -e ".[align]"
 The `[align]` extra installs `faster-whisper`. Defaults to Whisper `medium` on
 CUDA when a GPU is available, otherwise CPU. The model is downloaded/loaded in
 the background when the server starts (not on the first song). Results are
-cached under `.cache/aligned`. When stem separation is installed, alignment
-isolates the vocal track first for better accuracy. If CUDA libraries do not
-match, Whisper falls back to CPU automatically.
+cached per song under `tracks/<key>/aligned.json`. Alignment always isolates the
+vocal track first (generating stems on demand when missing); the `[stems]` extra
+is required for Whisper. If CUDA libraries do not match, Whisper falls back to CPU
+automatically.
 
 ### Karaoke (instrumental) tracks
 
@@ -45,8 +46,9 @@ pip install -e ".[stems-cpu]"  # CPU only
 
 This installs [`audio-separator`](https://github.com/nomadkaraoke/python-audio-separator),
 which wraps the UVR model zoo (Demucs, MDX-Net, RoFormer). Model weights download on
-first use. Generated tracks are cached as MP3 under the app cache in `stems/`, and the
-vocal stem is reused to make Whisper alignment more accurate. **ffmpeg must be on PATH.**
+first use. Generated tracks are cached as MP3 inside each song folder
+(`tracks/<key>/instrumental.mp3` and `vocals.mp3`); the vocal stem is reused to make
+Whisper alignment more accurate. **ffmpeg must be on PATH.**
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -84,13 +86,30 @@ For full Whisper alignment support, prefer `KaraokeParty.bat`.
 
 ## How it works
 
-1. The server scans the music folder and reads title/artist/album/duration from tags.
-2. Synced lyrics (LRC) are fetched from LRCLIB and cached under `.cache/lyrics`.
-3. On song open, estimated word timings play immediately; in the background Whisper word timestamps are matched to the known lyric text and cached under `.cache/aligned`.
-   If stem separation is available, the vocal track is isolated first. Matching walks a single monotonic best path over the whole song, so repeated choruses cannot steal each other's timings, and it can merge tokens in both directions (`l'amor` vs `l'` + `amor`).
+1. The server scans the music folder and reads title/artist/album/duration from tags. Basic LRCLIB sync does **not** run on startup.
+2. Synced lyrics (LRC) are fetched from LRCLIB when you open a song, run Whisper sync, or use Settings → “Resincronitzar sense lletra”, and cached under `tracks/<key>/lyrics.json`.
+3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper**. Word timings are cached under `tracks/<key>/aligned.json`. Matching walks a single monotonic best path over the whole song, so repeated choruses cannot steal each other's timings, and it can merge tokens in both directions (`l'amor` vs `l'` + `amor`).
 4. When alignment finishes (or is already cached), the stage swaps to word-accurate timings.
-5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file).
-6. On request (or as part of Whisper align), the song is split into vocal and instrumental stems so it can be sung karaoke style; both are cached.
+5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file); a copy also lives at `tracks/<key>/cover.<ext>`.
+6. Stems are also generated on demand from the instrumental toggle / bulk settings action; Whisper reuses the same cache.
+7. Settings → Memòria cau can clear/resync one song, wipe all caches, or export/import a per-song zip between PCs.
+
+### Per-song cache layout
+
+App cache root (Windows: `%LOCALAPPDATA%\KaraokeParty`, override with `KARAOKE_CACHE_DIR`):
+
+```text
+tracks/<key>/
+  meta.json
+  lyrics.json
+  aligned.json
+  instrumental.mp3
+  vocals.mp3
+  cover.<ext>
+```
+
+`key` is `sha1(artist.lower|title.lower|int(duration))`. Demucs scratch files go to
+`stems-work/`; downloaded models stay in `stem-models/` and `whisper` caches.
 
 ## Notes
 

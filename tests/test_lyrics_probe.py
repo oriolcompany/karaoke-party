@@ -105,6 +105,32 @@ def test_ensure_claims_running_under_lock(tmp_path: Path, monkeypatch) -> None:
     assert len(started) == 1
 
 
+def test_library_and_set_root_do_not_auto_start_probe(tmp_path: Path, monkeypatch) -> None:
+    lyrics = tmp_path / "lyrics"
+    aligned = tmp_path / "aligned"
+    lyrics.mkdir()
+    aligned.mkdir()
+    root = tmp_path / "music"
+    root.mkdir()
+    monkeypatch.setattr(party_app, "cache_dir", lambda _root=None: lyrics)
+    monkeypatch.setattr(party_app, "aligned_cache_dir", lambda _root=None: aligned)
+    monkeypatch.setattr(party_app, "stems_cache_dir", lambda: tmp_path / "stems")
+    monkeypatch.setattr(party_app, "scan_library", lambda _root: [_track("a"), _track("b")])
+    calls = {"n": 0}
+
+    def fake_ensure(**_kwargs):
+        calls["n"] += 1
+
+    monkeypatch.setattr(party_app, "_ensure_lyrics_probe", fake_ensure)
+
+    snap = party_app.library()
+    assert snap["pending"] == 2
+    assert calls["n"] == 0
+
+    party_app.set_root(party_app.SetRootBody(path=str(root)))
+    assert calls["n"] == 0
+
+
 def test_rescan_without_root_change_keeps_probe_progress(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "music"
     root.mkdir()

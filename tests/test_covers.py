@@ -89,26 +89,36 @@ def test_folder_cover_used_for_album_folder(tmp_path: Path) -> None:
 
 
 def test_clear_cover_cache_removes_digest_files(tmp_path: Path) -> None:
-    audio = tmp_path / "song.mp3"
-    audio.write_bytes(b"\x00")
+    key = "abc123deadbeef"
     cache = tmp_path / "cache"
     cache.mkdir()
 
-    cached = _cache_path_for_embedded(audio, "image/jpeg", cache)
+    cached = _cache_path_for_embedded(key, "image/jpeg", cache)
     cached.write_bytes(b"old")
     (cache / "other.jpg").write_bytes(b"keep")
-    assert clear_cover_cache(audio, cache) == 1
+    assert clear_cover_cache(key, cache) == 1
     assert not cached.exists()
     assert (cache / "other.jpg").is_file()
 
 
 def test_migrate_embeds_cached_cover_when_missing(tmp_path: Path, monkeypatch) -> None:
+    from karaoke_party.lyrics import cache_key
+
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"\x00")
     cache = tmp_path / "cache"
     cache.mkdir()
-    cached = _cache_path_for_embedded(audio, "image/jpeg", cache)
+    key = cache_key("Artist", "Song", 180.0)
+    cached = _cache_path_for_embedded(key, "image/jpeg", cache)
     cached.write_bytes(b"cover-bytes")
+
+    class Item:
+        def __init__(self, path: Path):
+            self.path = path
+            self.artist = "Artist"
+            self.title = "Song"
+            self.album = "Album"
+            self.duration = 180.0
 
     calls: list[tuple] = []
 
@@ -119,11 +129,10 @@ def test_migrate_embeds_cached_cover_when_missing(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("karaoke_party.covers.extract_embedded_cover", lambda path: None)
     monkeypatch.setattr("karaoke_party.covers.embed_cover_in_audio", fake_embed)
 
-    result = migrate_cached_covers_into_audio([audio], cache)
-    assert result["embedded"] == 1
+    result = migrate_cached_covers_into_audio([Item(audio)], cache)
     assert result["from_cache"] == 1
     assert calls == [(audio, b"cover-bytes", "image/jpeg")]
-    assert find_cached_cover(audio, cache) == cached
+    assert find_cached_cover(key, cache) == cached
 
 
 def test_migrate_copies_cover_from_album_mate(tmp_path: Path, monkeypatch) -> None:
@@ -161,12 +170,23 @@ def test_migrate_copies_cover_from_album_mate(tmp_path: Path, monkeypatch) -> No
 
 
 def test_migrate_skips_when_already_embedded(tmp_path: Path, monkeypatch) -> None:
+    from karaoke_party.lyrics import cache_key
+
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"\x00")
     cache = tmp_path / "cache"
     cache.mkdir()
-    cached = _cache_path_for_embedded(audio, "image/jpeg", cache)
+    key = cache_key("Artist", "Song", 180.0)
+    cached = _cache_path_for_embedded(key, "image/jpeg", cache)
     cached.write_bytes(b"cover-bytes")
+
+    class Item:
+        def __init__(self, path: Path):
+            self.path = path
+            self.artist = "Artist"
+            self.title = "Song"
+            self.album = "Album"
+            self.duration = 180.0
 
     monkeypatch.setattr(
         "karaoke_party.covers.extract_embedded_cover",
@@ -177,8 +197,8 @@ def test_migrate_skips_when_already_embedded(tmp_path: Path, monkeypatch) -> Non
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed")),
     )
 
-    result = migrate_cached_covers_into_audio([audio], cache)
-    assert result["embedded"] == 0
+    result = migrate_cached_covers_into_audio([Item(audio)], cache)
+    assert result["from_cache"] == 0
     assert result["skipped"] == 1
 
 
@@ -189,13 +209,16 @@ def anyio_backend():
 
 @pytest.mark.anyio
 async def test_force_overwrites_embedded_when_remote_hits(tmp_path: Path, monkeypatch) -> None:
+    from karaoke_party.lyrics import cache_key
+
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"\x00")
     cache = tmp_path / "cache"
     cache.mkdir()
     generic = tmp_path / "generic.png"
     generic.write_bytes(b"generic")
-    stale = _cache_path_for_embedded(audio, "image/jpeg", cache)
+    key = cache_key("Artist", "Song", None)
+    stale = _cache_path_for_embedded(key, "image/jpeg", cache)
     stale.write_bytes(b"stale")
 
     async def fake_remote(artist: str, title: str, album: str = ""):
@@ -219,13 +242,16 @@ async def test_force_overwrites_embedded_when_remote_hits(tmp_path: Path, monkey
 
 @pytest.mark.anyio
 async def test_resolve_embeds_from_cache_when_tags_empty(tmp_path: Path, monkeypatch) -> None:
+    from karaoke_party.lyrics import cache_key
+
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"\x00")
     cache = tmp_path / "cache"
     cache.mkdir()
     generic = tmp_path / "generic.png"
     generic.write_bytes(b"generic")
-    cached = _cache_path_for_embedded(audio, "image/jpeg", cache)
+    key = cache_key("Artist", "Song", None)
+    cached = _cache_path_for_embedded(key, "image/jpeg", cache)
     cached.write_bytes(b"from-cache")
 
     monkeypatch.setattr("karaoke_party.covers.extract_embedded_cover", lambda path: None)

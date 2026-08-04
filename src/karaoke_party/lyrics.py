@@ -138,7 +138,9 @@ def cache_key(artist: str, title: str, duration: float | None) -> str:
 
 
 def load_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
-    path = cache_dir / f"{key}.json"
+    from .track_cache import lyrics_path
+
+    path = lyrics_path(cache_dir, key)
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -157,7 +159,9 @@ def load_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
 
 
 def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
-    path = cache_dir / f"{key}.json"
+    from .track_cache import aligned_path
+
+    path = aligned_path(cache_dir, key)
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -188,8 +192,25 @@ def save_cached(
     key: str,
     payload: LyricsPayload,
     extra: dict[str, Any] | None = None,
+    *,
+    artist: str = "",
+    title: str = "",
+    duration: float | None = None,
+    album: str = "",
 ) -> None:
-    path = cache_dir / f"{key}.json"
+    from .track_cache import ensure_track_dir, lyrics_path, write_meta
+
+    ensure_track_dir(cache_dir, key)
+    if artist or title:
+        write_meta(
+            cache_dir,
+            key,
+            artist=artist,
+            title=title,
+            duration=duration,
+            album=album,
+        )
+    path = lyrics_path(cache_dir, key)
     data: dict[str, Any] = {
         "synced": payload.synced,
         "source": payload.source,
@@ -204,8 +225,40 @@ def save_cached(
     )
 
 
-def save_aligned_cached(cache_dir: Path, key: str, payload: LyricsPayload) -> None:
-    save_cached(cache_dir, key, payload, extra={"align_version": ALIGNED_CACHE_VERSION})
+def save_aligned_cached(
+    cache_dir: Path,
+    key: str,
+    payload: LyricsPayload,
+    *,
+    artist: str = "",
+    title: str = "",
+    duration: float | None = None,
+    album: str = "",
+) -> None:
+    from .track_cache import aligned_path, ensure_track_dir, write_meta
+
+    ensure_track_dir(cache_dir, key)
+    if artist or title:
+        write_meta(
+            cache_dir,
+            key,
+            artist=artist,
+            title=title,
+            duration=duration,
+            album=album,
+        )
+    path = aligned_path(cache_dir, key)
+    data: dict[str, Any] = {
+        "synced": payload.synced,
+        "source": payload.source,
+        "plain": payload.plain,
+        "lines": [asdict(line) for line in payload.lines],
+        "align_version": ALIGNED_CACHE_VERSION,
+    }
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _from_lrclib_record(record: dict[str, Any], source: str) -> LyricsPayload | None:
@@ -324,7 +377,15 @@ async def fetch_lyrics(
         payload = LyricsPayload(synced=False, source="none", lines=[], plain="")
 
     if cache_dir:
-        save_cached(cache_dir, key, payload)
+        save_cached(
+            cache_dir,
+            key,
+            payload,
+            artist=artist,
+            title=title,
+            duration=duration,
+            album=album,
+        )
     return payload
 
 
@@ -399,10 +460,15 @@ def lyrics_status_and_source(
 
 def clear_probe_errors(lyrics_cache: Path) -> int:
     """Drop cached entries that only failed because LRCLIB was unreachable."""
+    from .track_cache import iter_track_keys, lyrics_path
+
     if not lyrics_cache.is_dir():
         return 0
     removed = 0
-    for path in lyrics_cache.glob("*.json"):
+    for key in iter_track_keys(lyrics_cache):
+        path = lyrics_path(lyrics_cache, key)
+        if not path.is_file():
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -411,38 +477,34 @@ def clear_probe_errors(lyrics_cache: Path) -> int:
             continue
         try:
             path.unlink()
+            removed += 1
         except OSError:
             continue
-        removed += 1
     return removed
 
 
 def clear_lyrics_cache(lyrics_cache: Path) -> int:
     """Remove all cached LRCLIB results so the next probe re-fetches."""
-    if not lyrics_cache.is_dir():
-        return 0
-    removed = 0
-    for path in lyrics_cache.glob("*.json"):
-        try:
-            path.unlink()
-        except OSError:
-            continue
-        removed += 1
-    return removed
+    from .track_cache import clear_all_tracks
+
+    return clear_all_tracks(lyrics_cache, {"lyrics"})["lyrics"]
 
 
 def clear_lyrics_keys(lyrics_cache: Path, keys: list[str]) -> int:
     """Remove specific cached LRCLIB entries by cache key."""
-    if not lyrics_cache.is_dir():
-        return 0
+    from .track_cache import clear_track_files
+
     removed = 0
     for key in keys:
-        path = lyrics_cache / f"{key}.json"
-        if not path.is_file():
-            continue
-        try:
-            path.unlink()
-        except OSError:
-            continue
-        removed += 1
+        removed += clear_track_files(lyrics_cache, key, {"lyrics"})["lyrics"]
+    return removed
+
+
+def clear_aligned_keys(aligned_cache: Path, keys: list[str]) -> int:
+    """Remove Whisper alignment cache files by key (any version)."""
+    from .track_cache import clear_track_files
+
+    removed = 0
+    for key in keys:
+        removed += clear_track_files(aligned_cache, key, {"aligned"})["aligned"]
     return removed

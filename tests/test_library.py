@@ -74,9 +74,9 @@ def test_cover_hash_uses_embedded_bytes(tmp_path, monkeypatch) -> None:
         "karaoke_party.library.extract_embedded_cover",
         lambda path: (b"same-cover-bytes", "image/jpeg"),
     )
-    monkeypatch.setattr("karaoke_party.library.find_cached_cover", lambda path, cache: None)
-    h1 = _cover_hash_for(audio)
-    h2 = _cover_hash_for(audio)
+    monkeypatch.setattr("karaoke_party.library.find_cached_cover", lambda key, cache: None)
+    h1 = _cover_hash_for(audio, "Artist", "Song", 180.0)
+    h2 = _cover_hash_for(audio, "Artist", "Song", 180.0)
     assert h1
     assert h1 == h2
     assert len(h1) == 40

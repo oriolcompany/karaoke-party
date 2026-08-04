@@ -129,7 +129,7 @@ def test_clear_lyrics_cache_removes_all_entries(tmp_path: Path) -> None:
         LyricsPayload(synced=False, source="none", lines=[], plain=""),
     )
     assert clear_lyrics_cache(tmp_path) == 2
-    assert list(tmp_path.glob("*.json")) == []
+    assert list(tmp_path.rglob("lyrics.json")) == []
 
 
 def test_clear_lyrics_keys_removes_only_selected(tmp_path: Path) -> None:
@@ -138,8 +138,8 @@ def test_clear_lyrics_keys_removes_only_selected(tmp_path: Path) -> None:
     save_cached(tmp_path, hit, LyricsPayload(synced=True, source="lrclib", lines=[], plain="hi"))
     save_cached(tmp_path, miss, LyricsPayload(synced=False, source="none", lines=[], plain=""))
     assert clear_lyrics_keys(tmp_path, [miss]) == 1
-    assert (tmp_path / f"{hit}.json").is_file()
-    assert not (tmp_path / f"{miss}.json").exists()
+    assert (tmp_path / hit / "lyrics.json").is_file()
+    assert not (tmp_path / miss / "lyrics.json").exists()
 
 
 @pytest.fixture

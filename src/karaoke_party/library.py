@@ -8,6 +8,7 @@ from mutagen import File as MutagenFile
 
 from .config import AUDIO_EXTENSIONS
 from .covers import covers_cache_dir, extract_embedded_cover, find_cached_cover
+from .lyrics import cache_key
 
 
 @dataclass
@@ -25,13 +26,13 @@ class TrackInfo:
     cover_hash: str = ""
 
 
-def _cover_hash_for(path: Path) -> str:
+def _cover_hash_for(path: Path, artist: str, title: str, duration: float) -> str:
     """Fingerprint of the cover image used for this track (embedded or cache)."""
     try:
         embedded = extract_embedded_cover(path)
         if embedded and embedded[0]:
             return hashlib.sha1(embedded[0]).hexdigest()
-        cached = find_cached_cover(path, covers_cache_dir())
+        cached = find_cached_cover(cache_key(artist, title, duration), covers_cache_dir())
         if cached is not None and cached.is_file():
             data = cached.read_bytes()
             if data:
@@ -139,7 +140,7 @@ def scan_library(root: Path) -> list[TrackInfo]:
                 track=track_no,
                 disc=disc_no,
                 year=year,
-                cover_hash=_cover_hash_for(path),
+                cover_hash=_cover_hash_for(path, artist, title, duration),
             )
         )
     # Use the best year seen on any track of the album so mates stay together.

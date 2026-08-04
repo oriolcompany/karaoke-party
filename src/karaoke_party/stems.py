@@ -23,9 +23,6 @@ DEFAULT_MODEL = (os.environ.get("KARAOKE_STEMS_MODEL") or "").strip() or "htdemu
 OUTPUT_BITRATE = (os.environ.get("KARAOKE_STEMS_BITRATE") or "").strip() or "192k"
 USE_AUTOCAST = (os.environ.get("KARAOKE_STEMS_AUTOCAST") or "").strip() not in {"", "0", "false"}
 
-INSTRUMENTAL_SUFFIX = ".instrumental.mp3"
-VOCALS_SUFFIX = ".vocals.mp3"
-
 _VOCAL_TAG = "(vocals)"
 _INSTRUMENTAL_TAG = "(instrumental)"
 
@@ -59,11 +56,15 @@ def model_name() -> str:
 
 
 def instrumental_path(cache_dir: Path, key: str) -> Path:
-    return cache_dir / f"{key}{INSTRUMENTAL_SUFFIX}"
+    from .track_cache import instrumental_path as _path
+
+    return _path(cache_dir, key)
 
 
 def vocals_path(cache_dir: Path, key: str) -> Path:
-    return cache_dir / f"{key}{VOCALS_SUFFIX}"
+    from .track_cache import vocals_path as _path
+
+    return _path(cache_dir, key)
 
 
 def has_instrumental(cache_dir: Path, key: str) -> bool:
@@ -77,23 +78,16 @@ def has_vocals(cache_dir: Path, key: str) -> bool:
 
 
 def clear_stems(cache_dir: Path, key: str) -> int:
-    removed = 0
-    for path in (instrumental_path(cache_dir, key), vocals_path(cache_dir, key)):
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
+    from .track_cache import clear_track_files
+
+    return clear_track_files(cache_dir, key, {"stems"})["stems"]
 
 
 def work_dir() -> Path:
     """Scratch space for raw stems, shared by every separation."""
-    from .config import stems_cache_dir
+    from .track_cache import stems_work_dir
 
-    path = stems_cache_dir() / "work"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return stems_work_dir()
 
 
 def _clear_work_dir() -> None:
@@ -192,8 +186,23 @@ def separate_track(
 
     target_instrumental = instrumental_path(cache_dir, key)
     target_vocals = vocals_path(cache_dir, key)
-    if target_instrumental.is_file() and target_instrumental.stat().st_size > 0:
-        return target_instrumental, (target_vocals if target_vocals.is_file() else None)
+    # Both stems are required: Whisper needs the vocal track, karaoke needs the
+    # instrumental. A lone instrumental (e.g. vocals encode failed once) must
+    # not short-circuit a later separation.
+    if (
+        target_instrumental.is_file()
+        and target_instrumental.stat().st_size > 0
+        and target_vocals.is_file()
+        and target_vocals.stat().st_size > 0
+    ):
+        return target_instrumental, target_vocals
+    if target_instrumental.is_file() and not (
+        target_vocals.is_file() and target_vocals.stat().st_size > 0
+    ):
+        try:
+            target_instrumental.unlink()
+        except OSError:
+            pass
 
     def report(ratio: float, phase: str) -> None:
         if on_progress is None:
@@ -203,7 +212,9 @@ def separate_track(
         except Exception:  # noqa: BLE001 — progress must never abort separation
             pass
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    from .track_cache import ensure_track_dir
+
+    ensure_track_dir(cache_dir, key)
     scratch = work_dir()
     try:
         report(0.05, "model")
@@ -237,3 +248,26 @@ def separate_track(
 
     report(1.0, "fet")
     return target_instrumental, (target_vocals if target_vocals and target_vocals.is_file() else None)
+
+
+def ensure_vocals(
+    audio_path: Path,
+    key: str,
+    cache_dir: Path,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> Path:
+    """Return the vocal stem, running separation first when it is not cached yet.
+
+    This is the single entry point Whisper alignment must use so every path in
+    the project isolates vocals before transcription.
+    """
+    if has_vocals(cache_dir, key):
+        return vocals_path(cache_dir, key)
+    if not separation_available():
+        raise SeparationError(
+            'Cal la separació de pistes abans de Whisper · pip install -e ".[stems]"'
+        )
+    _, vocals = separate_track(audio_path, key, cache_dir, on_progress=on_progress)
+    if vocals is None or not vocals.is_file():
+        raise SeparationError("No s’ha pogut generar la pista de veu per a Whisper")
+    return vocals
