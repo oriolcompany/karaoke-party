@@ -14,9 +14,10 @@ KaraokeParty.bat
 This will:
 
 1. Create `.venv` if needed
-2. Install dependencies (including Whisper alignment when possible)
-3. Start the server at http://127.0.0.1:8765
-4. Open the browser
+2. Install required dependencies (base + Whisper + stems) and verify `ffmpeg` is on PATH
+3. Abort with a clear error if anything required is missing
+4. Start the server at http://127.0.0.1:8765
+5. Open the browser
 
 Close the console window to stop the app.
 
@@ -27,7 +28,11 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -e .
 pip install -e ".[align]"
+pip install -e ".[stems]"      # or ".[stems-cpu]" without NVIDIA GPU
 ```
+
+`ffmpeg` must also be on PATH. On start, `karaoke-party` checks base packages, Whisper,
+stems, and ffmpeg, and exits if any are missing (use `--skip-deps` only for development).
 
 The `[align]` extra installs `faster-whisper`. Defaults to Whisper `medium` on
 CUDA when a GPU is available, otherwise CPU. The model is downloaded/loaded in

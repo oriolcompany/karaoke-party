@@ -23,7 +23,7 @@ if %errorlevel%==0 (
 )
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [1/3] Creant entorn virtual...
+  echo [1/4] Creant entorn virtual...
   %PYTHON% -m venv .venv
   if errorlevel 1 (
     echo [ERROR] No s'ha pogut crear el venv.
@@ -31,7 +31,7 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
   )
 ) else (
-  echo [1/3] Entorn virtual OK
+  echo [1/4] Entorn virtual OK
 )
 
 call ".venv\Scripts\activate.bat"
@@ -41,8 +41,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/3] Comprovant dependències...
-python -c "import fastapi, uvicorn, mutagen, httpx" 1>nul 2>nul
+echo [2/4] Comprovant dependències Python...
+python -c "import fastapi, uvicorn, mutagen, httpx, multipart" 1>nul 2>nul
 if errorlevel 1 (
   echo       Instal·lant paquet base...
   python -m pip install -q --upgrade pip
@@ -59,17 +59,52 @@ if errorlevel 1 (
 python -c "import faster_whisper" 1>nul 2>nul
 if errorlevel 1 (
   echo       Instal·lant Whisper ^(alineacio^)...
-  pip install -q "faster-whisper>=1.0.0"
+  pip install -q -e ".[align]"
   if errorlevel 1 (
-    echo [AVIS] No s'ha pogut instal·lar Whisper. Continuo sense alineacio avançada.
-  ) else (
-    echo       Whisper OK
+    echo [ERROR] No s'ha pogut instal·lar Whisper ^(faster-whisper^).
+    pause
+    exit /b 1
   )
 ) else (
   echo       Whisper OK
 )
 
-echo [3/3] Arrencant servidor a http://127.0.0.1:8765
+python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('audio_separator') else 1)" 1>nul 2>nul
+if errorlevel 1 (
+  echo       Instal·lant separacio de pistes ^(stems^)...
+  where nvidia-smi >nul 2>&1
+  if errorlevel 1 (
+    pip install -q -e ".[stems-cpu]"
+  ) else (
+    pip install -q -e ".[stems]"
+    if errorlevel 1 (
+      echo       GPU fallida · provant stems-cpu...
+      pip install -q -e ".[stems-cpu]"
+    )
+  )
+  if errorlevel 1 (
+    echo [ERROR] No s'ha pogut instal·lar audio-separator.
+    echo         Prova manualment: pip install -e ".[stems]"  o  ".[stems-cpu]"
+    pause
+    exit /b 1
+  )
+) else (
+  echo       Stems OK
+)
+
+echo [3/4] Comprovant ffmpeg...
+where ffmpeg >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] Cal ffmpeg al PATH per generar pistes instrumental/veu.
+  echo         Descarrega'l des de https://ffmpeg.org/download.html
+  echo         i reinicia la consola despres d'afegir-lo al PATH.
+  pause
+  exit /b 1
+) else (
+  echo       ffmpeg OK
+)
+
+echo [4/4] Arrencant servidor a http://127.0.0.1:8765
 echo         Tanca aquesta finestra per aturar Karaoke Party.
 echo.
 

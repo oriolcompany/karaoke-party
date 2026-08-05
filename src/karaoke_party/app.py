@@ -33,6 +33,7 @@ from .config import (
     default_music_root,
     stems_cache_dir,
 )
+from .deps import check_dependencies, require_dependencies
 from .covers import (
     covers_cache_dir,
     migrate_cached_covers_into_audio,
@@ -775,8 +776,9 @@ def _ensure_lyrics_probe(
 
 @app.get("/api/health")
 def health() -> dict:
+    dep_issues = check_dependencies()
     return {
-        "ok": True,
+        "ok": not dep_issues,
         "version": __version__,
         "music_root": str(_music_root) if _music_root else None,
         "tracks": len(_tracks),
@@ -784,6 +786,13 @@ def health() -> dict:
         "alignment": alignment_available(),
         "stems": separation_available(),
         "whisper": whisper_model_status(),
+        "dependencies": {
+            "ok": not dep_issues,
+            "missing": [
+                {"name": issue.name, "detail": issue.detail, "fix": issue.fix}
+                for issue in dep_issues
+            ],
+        },
     }
 
 
@@ -1378,7 +1387,14 @@ def main() -> None:
         action="store_true",
         help="Open the app in the default browser",
     )
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="Do not abort when Whisper/stems/ffmpeg are missing (dev only)",
+    )
     args = parser.parse_args()
+    if not args.skip_deps:
+        require_dependencies()
     if args.music:
         _reload_library(args.music)
     elif _music_root is not None:
