@@ -15,9 +15,11 @@ This will:
 
 1. Create `.venv` if needed
 2. Install required dependencies (base + Whisper + stems) and verify `ffmpeg` is on PATH
-3. Abort with a clear error if anything required is missing
-4. Start the server at http://127.0.0.1:8765
-5. Open the browser
+3. If an NVIDIA GPU is present, verify PyTorch CUDA + CUDA 12 libs for Whisper and
+   install/repair them automatically when needed
+4. Abort with a clear error if anything required is missing
+5. Start the server at http://127.0.0.1:8765
+6. Open the browser
 
 Close the console window to stop the app.
 
@@ -33,6 +35,9 @@ pip install -e ".[stems]"      # or ".[stems-cpu]" without NVIDIA GPU
 
 `ffmpeg` must also be on PATH. On start, `karaoke-party` checks base packages, Whisper,
 stems, and ffmpeg, and exits if any are missing (use `--skip-deps` only for development).
+With an NVIDIA GPU, `KaraokeParty.bat` (and `python -m karaoke_party`) also runs
+`python -m karaoke_party.gpu_setup`, which installs a CUDA PyTorch wheel matching the
+driver and the CUDA 12 libraries Whisper needs when they are missing.
 
 The `[align]` extra installs `faster-whisper`. Defaults to Whisper `medium` on
 CUDA when a GPU is available, otherwise CPU. The model is downloaded/loaded in
@@ -65,10 +70,14 @@ Whisper alignment more accurate. **ffmpeg must be on PATH.**
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `KARAOKE_WHISPER_MODEL` | `medium` | `small` is faster; `large-v3` is slower and heavier on VRAM |
-| `KARAOKE_WHISPER_BEAM` | `3` | Higher (up to `5`) can help a bit more; `1` is fastest |
+| `KARAOKE_WHISPER_MODEL` | `large-v3` on CUDA, else `medium` | `small` is faster; override if VRAM is tight |
+| `KARAOKE_WHISPER_BEAM` | `5` on CUDA, else `3` | Higher can help a bit more; `1` is fastest |
 | `KARAOKE_WHISPER_DEVICE` | auto (`cuda` if available, else `cpu`) | Force with `cpu` / `cuda` |
 | `KARAOKE_WHISPER_COMPUTE` | `float16` on CUDA, `int8` on CPU | CTranslate2 compute type |
+
+When LRCLIB already provides synced line times, word alignment is anchored to those
+cues (so choruses do not steal each other’s timings). Without LRC times it falls
+back to a whole-song match that can absorb a long instrumental intro.
 
 ## Run
 

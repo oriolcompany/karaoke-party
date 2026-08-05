@@ -48,6 +48,7 @@ const settingsModal = document.getElementById("settingsModal");
 const settingsCloseBtn = document.getElementById("settingsCloseBtn");
 const librarySettingsStatus = document.getElementById("librarySettingsStatus");
 const lyricsSyncSettingsStatus = document.getElementById("lyricsSyncSettingsStatus");
+const whisperModelStatus = document.getElementById("whisperModelStatus");
 const libraryBrowseSongBtn = document.getElementById("libraryBrowseSongBtn");
 const libraryBrowseAlbumBtn = document.getElementById("libraryBrowseAlbumBtn");
 const lyricsFilterLyricsBtn = document.getElementById("lyricsFilterLyricsBtn");
@@ -173,6 +174,7 @@ let syncRunning = false;
 let syncLastError = "";
 let syncProgress = 0;
 let syncPhase = "";
+let syncStemPhase = "";
 let syncTotalQueued = 0;
 let syncCompleted = 0;
 
@@ -1137,9 +1139,14 @@ function trackLabel(track) {
   return `${track.artist || "Artista"} — ${track.title || track.relpath}`;
 }
 
-function syncPhaseLabel(phase) {
+function syncPhaseLabel(phase, stemPhase) {
   if (phase === "model") return "carregant model Whisper";
-  if (phase === "stems") return "aïllant veu";
+  if (phase === "stems") {
+    if (stemPhase === "codificant") return "codificant pistes";
+    if (stemPhase === "model") return "carregant model de separació";
+    if (stemPhase === "fet") return "pistes aïllades";
+    return "aïllant veu";
+  }
   if (phase === "lyrics") return "carregant lletra";
   if (phase === "queued") return "a la cua";
   if (phase === "whisper" || phase === "running") return "alineant";
@@ -1148,7 +1155,7 @@ function syncPhaseLabel(phase) {
 
 function syncProgressText(track) {
   const title = trackLabel(track) || "cançó";
-  const phase = syncPhaseLabel(syncPhase);
+  const phase = syncPhaseLabel(syncPhase, syncStemPhase);
   const pct =
     typeof syncProgress === "number" && syncProgress > 0
       ? `${Math.round(syncProgress * 100)}%`
@@ -1330,6 +1337,11 @@ async function waitAlignJob(jobId) {
       syncPhase = "queued";
       changed = true;
     }
+    const nextStem = job.stem_phase || "";
+    if (nextStem !== syncStemPhase) {
+      syncStemPhase = nextStem;
+      changed = true;
+    }
     if (changed) updateSyncQueueMeta();
     if (job.status === "done") return job;
     if (job.status === "error") {
@@ -1392,6 +1404,7 @@ async function processSyncQueue() {
     syncLastError = "";
     syncProgress = 0;
     syncPhase = "queued";
+    syncStemPhase = "";
     refreshAlignBadges();
     updatePrimaryAction();
     updateSyncQueueMeta();
@@ -1406,6 +1419,7 @@ async function processSyncQueue() {
       syncActiveId = null;
       syncProgress = 0;
       syncPhase = "";
+      syncStemPhase = "";
       refreshAlignBadges();
       updatePrimaryAction();
     }
@@ -1670,7 +1684,15 @@ async function pollAlignJob(jobId, trackId, token) {
     } else if (job.phase === "model") {
       lyricsStatus.textContent = "Carregant el model Whisper…";
     } else if (job.phase === "stems") {
-      lyricsStatus.textContent = "Aïllant la veu abans d’alinear…";
+      const pct =
+        typeof job.progress === "number" && job.progress > 0
+          ? ` ${Math.round(job.progress * 100)}%`
+          : "";
+      const detail =
+        job.stem_phase === "codificant"
+          ? "Codificant les pistes…"
+          : "Aïllant la veu abans d’alinear…";
+      lyricsStatus.textContent = `${detail}${pct}`;
     } else if (typeof job.progress === "number" && job.progress > 0) {
       const pct = Math.round(job.progress * 100);
       lyricsStatus.textContent = `Alineant la lletra amb l’àudio… ${pct}%`;
@@ -2362,6 +2384,7 @@ async function bootTitleScreen() {
       rootInput.value = health.music_root;
     }
     setTitleStatus("");
+    refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
   } catch (err) {
     setTitleStatus(err.message || "No s’ha pogut contactar amb l’API", "error");
   }
@@ -2873,6 +2896,69 @@ async function runCacheAction(kind) {
   }
 }
 
+function formatWhisperStatus(whisper) {
+  if (!whisper || typeof whisper !== "object") {
+    return { text: "Model Whisper: desconegut", kind: "" };
+  }
+  const model = whisper.model || whisper.configured_model || "?";
+  const device = whisper.device || whisper.configured_device || "?";
+  const compute = whisper.compute || whisper.configured_compute || "";
+  const bits = [`Model Whisper: ${model}`, device];
+  if (compute) bits.push(compute);
+  if (whisper.loading) {
+    return { text: `${bits.join(" · ")} · baixant/carregant…`, kind: "running" };
+  }
+  if (whisper.error && !whisper.ready) {
+    return { text: `${bits.join(" · ")} · error: ${whisper.error}`, kind: "error" };
+  }
+  if (whisper.ready) {
+    return { text: `${bits.join(" · ")} · a punt`, kind: "ok" };
+  }
+  return { text: `${bits.join(" · ")} · pendent de carregar`, kind: "" };
+}
+
+function renderWhisperStatus(whisper) {
+  const el = whisperModelStatus || document.getElementById("whisperModelStatus");
+  if (!el) return;
+  const { text, kind } = formatWhisperStatus(whisper);
+  el.textContent = text;
+  el.classList.toggle("is-ok", kind === "ok");
+  el.classList.toggle("is-running", kind === "running");
+  el.classList.toggle("is-error", kind === "error");
+}
+
+let whisperStatusTimer = null;
+
+async function refreshWhisperStatus({ pollWhileLoading = false } = {}) {
+  const el = whisperModelStatus || document.getElementById("whisperModelStatus");
+  if (!el) return;
+  el.textContent = "Model Whisper: consultant…";
+  el.classList.remove("is-ok", "is-error");
+  el.classList.add("is-running");
+  try {
+    // Dedicated endpoint: /api/health also runs a slow GPU diagnose and used to
+    // leave the label stuck on "comprovant…" for a long time.
+    const whisper = await api("/api/whisper");
+    renderWhisperStatus(whisper || {});
+    if (pollWhileLoading && whisper?.loading) {
+      if (whisperStatusTimer) clearTimeout(whisperStatusTimer);
+      whisperStatusTimer = setTimeout(() => {
+        refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
+      }, 2000);
+    } else if (whisperStatusTimer) {
+      clearTimeout(whisperStatusTimer);
+      whisperStatusTimer = null;
+    }
+  } catch (err) {
+    renderWhisperStatus({
+      ready: false,
+      loading: false,
+      error: err.message || "No s’ha pogut consultar l’estat",
+      model: "?",
+    });
+  }
+}
+
 function openSettings(sectionId = "general") {
   if (!settingsModal) return;
   showSettingsSection(sectionId);
@@ -2880,6 +2966,7 @@ function openSettings(sectionId = "general") {
   settingsModal.classList.remove("hidden");
   settingsBtn?.setAttribute("aria-expanded", "true");
   (settingsCloseBtn || settingsModal).focus();
+  refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
 }
 
 function closeSettings() {

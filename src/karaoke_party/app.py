@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 import threading
+import time
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ from .config import (
     stems_cache_dir,
 )
 from .deps import check_dependencies, require_dependencies
+from .gpu_setup import diagnose as diagnose_gpu
 from .covers import (
     covers_cache_dir,
     migrate_cached_covers_into_audio,
@@ -59,6 +61,7 @@ from .lyrics import (
 )
 from .stems import (
     SeparationError,
+    clear_work_dir,
     ensure_vocals,
     has_instrumental,
     instrumental_path,
@@ -81,6 +84,13 @@ WEB_DIR = _project_root() / "web"
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    # Make sure %LOCALAPPDATA%\KaraokeParty (tracks/, stems-work/, …) exists
+    # before any worker touches the cache — otherwise a failed first run can
+    # look like "the folder was never created".
+    root = app_cache_root()
+    cache_dir()
+    stems_cache_dir()
+    log.info("Cache root: %s", root)
     # Download/load Whisper as soon as the server starts so the first song does
     # not stall the align queue on a multi-GB HuggingFace fetch.
     preload_whisper_model()
@@ -774,6 +784,22 @@ def _ensure_lyrics_probe(
     thread.start()
 
 
+_gpu_status_cache: dict = {"at": 0.0, "payload": None}
+_GPU_STATUS_TTL_SECONDS = 60.0
+
+
+def _cached_gpu_status() -> dict:
+    """Avoid re-running nvidia-smi / torch probes on every /api/health poll."""
+    now = time.time()
+    cached = _gpu_status_cache.get("payload")
+    if cached is not None and now - float(_gpu_status_cache.get("at") or 0) < _GPU_STATUS_TTL_SECONDS:
+        return cached
+    payload = diagnose_gpu().to_dict()
+    _gpu_status_cache["at"] = now
+    _gpu_status_cache["payload"] = payload
+    return payload
+
+
 @app.get("/api/health")
 def health() -> dict:
     dep_issues = check_dependencies()
@@ -786,6 +812,7 @@ def health() -> dict:
         "alignment": alignment_available(),
         "stems": separation_available(),
         "whisper": whisper_model_status(),
+        "gpu": _cached_gpu_status(),
         "dependencies": {
             "ok": not dep_issues,
             "missing": [
@@ -794,6 +821,12 @@ def health() -> dict:
             ],
         },
     }
+
+
+@app.get("/api/whisper")
+def whisper_status() -> dict:
+    """Lightweight Whisper status for the settings UI (no GPU diagnose)."""
+    return whisper_model_status()
 
 
 @app.get("/api/library")
@@ -1030,7 +1063,7 @@ def _clear_cache_tree(path: Path) -> int:
 @app.post("/api/cache/clear-all")
 def clear_all_cache(body: TrackCacheBody | None = None) -> dict:
     """Wipe lyrics / Whisper / stems / cover caches for the whole library."""
-    from .track_cache import clear_all_tracks, stems_work_dir
+    from .track_cache import clear_all_tracks
 
     scopes = _normalize_cache_scopes(body.scopes if body else None)
     removed = clear_all_tracks(cache_dir(), scopes)
@@ -1042,7 +1075,7 @@ def clear_all_cache(body: TrackCacheBody | None = None) -> dict:
             _align_queue.clear()
     if "stems" in scopes:
         # Scratch leftovers from Demucs live outside track folders.
-        _clear_cache_tree(stems_work_dir())
+        clear_work_dir()
         with _stem_lock:
             _stem_jobs.clear()
             _stem_queue.clear()

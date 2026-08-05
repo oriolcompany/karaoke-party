@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -12,7 +13,10 @@ from pathlib import Path
 from .lyrics import LyricLine, LyricWord, estimate_words
 
 _model = None
-_model_lock = threading.Lock()
+# Status reads must never wait on a multi-GB HuggingFace download. Keep a
+# short state lock separate from the load lock that serialises model builds.
+_state_lock = threading.Lock()
+_load_lock = threading.Lock()
 _model_name: str | None = None
 _model_device: str | None = None
 _model_compute: str | None = None
@@ -24,6 +28,9 @@ _model_state: dict = {
     "model": "",
     "device": "",
     "compute": "",
+    "configured_model": "",
+    "configured_device": "",
+    "configured_compute": "",
 }
 
 
@@ -34,25 +41,52 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
-def _add_torch_cuda_dll_dir() -> None:
-    """On Windows, let ctranslate2 see the CUDA DLLs shipped with torch."""
+# CUDA 12 packages Whisper/ctranslate2 may need on Windows. Never add the
+# pip ``nvidia-cudnn-cu12`` folder: mixing those DLLs with torch's CUDA 13
+# cuDNN causes CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH in Demucs.
+_WHISPER_CUDA12_DLL_PACKAGES = frozenset({"cublas", "cuda_runtime", "cuda_nvrtc"})
+
+
+def _add_cuda_dll_dirs() -> None:
+    """On Windows, let ctranslate2 see the CUDA DLLs installed with pip.
+
+    ctranslate2 is built against CUDA 12, while torch may ship CUDA 13 — on
+    recent GPUs that is the only build with matching kernels — so the
+    standalone cuBLAS 12 wheels are added to the search path. cuDNN stays
+    with torch alone.
+    """
     if os.name != "nt":
         return
+    candidates: list[Path] = []
     try:
         import torch
 
-        lib = Path(torch.__file__).resolve().parent / "lib"
-        if lib.is_dir():
-            os.add_dll_directory(str(lib))
+        candidates.append(Path(torch.__file__).resolve().parent / "lib")
     except Exception:  # noqa: BLE001 — optional path hint only
         pass
+    try:
+        import nvidia
+
+        for root in nvidia.__path__:
+            for path in sorted(Path(root).glob("*/bin")):
+                if path.parent.name.lower() in _WHISPER_CUDA12_DLL_PACKAGES:
+                    candidates.append(path)
+    except Exception:  # noqa: BLE001 — optional path hint only
+        pass
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        try:
+            os.add_dll_directory(str(path))
+        except OSError:
+            continue
 
 
 def _cublas12_loadable() -> bool:
     """faster-whisper/ctranslate2 CUDA builds need cuBLAS 12, not only a GPU."""
     if os.name != "nt":
         return True
-    _add_torch_cuda_dll_dir()
+    _add_cuda_dll_dirs()
     try:
         import ctypes
 
@@ -64,6 +98,9 @@ def _cublas12_loadable() -> bool:
 
 def _cuda_available() -> bool:
     """True only when ctranslate2 sees a GPU *and* its CUDA 12 runtime can load."""
+    # Importing ctranslate2 already pulls in its CUDA DLLs, so the search path
+    # has to be set up before the import, not just before the cuBLAS probe.
+    _add_cuda_dll_dirs()
     try:
         import ctranslate2
 
@@ -92,12 +129,23 @@ def _compute_for(device: str) -> str:
     return "int8" if device == "cpu" else "float16"
 
 
-# Whisper knobs. medium + CUDA (when present) is the sweet spot for sung Catalan
-# on a laptop GPU; override via env if you need speed over accuracy.
-DEFAULT_MODEL_SIZE = (os.environ.get("KARAOKE_WHISPER_MODEL") or "").strip() or "medium"
 WHISPER_DEVICE = _default_device()
 WHISPER_COMPUTE_TYPE = _compute_for(WHISPER_DEVICE)
-WHISPER_BEAM_SIZE = _env_int("KARAOKE_WHISPER_BEAM", 3)
+
+
+def _default_model_size() -> str:
+    env = (os.environ.get("KARAOKE_WHISPER_MODEL") or "").strip()
+    if env:
+        return env
+    # large-v3 is noticeably better on sung Catalan; float16 fits an 8 GB GPU.
+    return "large-v3" if WHISPER_DEVICE == "cuda" else "medium"
+
+
+DEFAULT_MODEL_SIZE = _default_model_size()
+WHISPER_BEAM_SIZE = _env_int(
+    "KARAOKE_WHISPER_BEAM",
+    5 if WHISPER_DEVICE == "cuda" else 3,
+)
 
 # Matching thresholds. A token pair below MATCH_MIN is never linked: leaving a
 # hole for interpolation beats pinning a word onto the wrong audio position.
@@ -117,6 +165,10 @@ MERGE_PENALTY = 0.04
 # hallucinated "lalala" outros), which shifts the true path off the diagonal.
 BAND_MIN_RADIUS = 200
 BAND_MAX_CELLS = 8_000_000
+# When LRCLIB already gave line times, keep each line's words near that window
+# so choruses cannot steal timings from another verse.
+ANCHOR_PAD_BEFORE = 1.8
+ANCHOR_PAD_AFTER = 1.2
 
 _PTR_NONE = 0
 _PTR_MATCH = 1
@@ -153,14 +205,41 @@ def alignment_available() -> bool:
 
 
 def whisper_model_status() -> dict:
-    with _model_lock:
-        return dict(_model_state)
+    """Snapshot for /api/health and the settings UI.
+
+    Always includes the configured defaults, even before the first load, so the
+    UI can show ``large-v3 · cuda`` while the model is still downloading.
+    Never waits on ``_load_lock`` — that lock is held for the whole download.
+    """
+    with _state_lock:
+        status = dict(_model_state)
+    status["configured_model"] = DEFAULT_MODEL_SIZE
+    status["configured_device"] = WHISPER_DEVICE
+    status["configured_compute"] = WHISPER_COMPUTE_TYPE
+    if not status.get("model"):
+        status["model"] = DEFAULT_MODEL_SIZE
+    if not status.get("device"):
+        status["device"] = WHISPER_DEVICE
+    if not status.get("compute"):
+        status["compute"] = WHISPER_COMPUTE_TYPE
+    return status
+
+
+def _update_model_state(**fields) -> None:
+    with _state_lock:
+        _model_state.update(fields)
 
 
 def _normalize(token: str) -> str:
-    # Apostrophes vanish here on purpose: "l'amor" becomes "lamor", which is what
-    # Whisper's "l'" + "amor" split collapses to once the two words are merged.
-    return re.sub(r"[^\wÀ-ÿ]+", "", token.lower(), flags=re.UNICODE)
+    # Apostrophes vanish on purpose: "l'amor" → "lamor", matching Whisper's
+    # "l'" + "amor" once those two ASR tokens are merged. Accents are folded so
+    # Catalan lyrics still match when Whisper drifts into Spanish ("destí"/"destino").
+    folded = "".join(
+        char
+        for char in unicodedata.normalize("NFD", token.lower())
+        if unicodedata.category(char) != "Mn"
+    )
+    return re.sub(r"[^\w]+", "", folded, flags=re.UNICODE)
 
 
 @lru_cache(maxsize=200_000)
@@ -191,7 +270,7 @@ def _split_tokens(text: str) -> list[str]:
 def _load_whisper_model(size: str, device: str, compute: str):
     from faster_whisper import WhisperModel
 
-    _add_torch_cuda_dll_dir()
+    _add_cuda_dll_dirs()
     return WhisperModel(size, device=device, compute_type=compute)
 
 
@@ -199,21 +278,20 @@ def _get_model(model_size: str | None = None):
     """Load (and cache) the Whisper model. Falls back to CPU if CUDA libs mismatch."""
     global _model, _model_name, _model_device, _model_compute, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     size = model_size or DEFAULT_MODEL_SIZE
-    with _model_lock:
-        if _model is not None and _model_name == size:
-            return _model
+    with _load_lock:
+        with _state_lock:
+            if _model is not None and _model_name == size:
+                return _model
 
-        _model_state.update(
-            {
-                "ready": False,
-                "loading": True,
-                "error": "",
-                "model": size,
-                "device": WHISPER_DEVICE,
-                "compute": WHISPER_COMPUTE_TYPE,
-            }
-        )
         preferred = WHISPER_DEVICE
+        _update_model_state(
+            ready=False,
+            loading=True,
+            error="",
+            model=size,
+            device=preferred,
+            compute=WHISPER_COMPUTE_TYPE,
+        )
         devices = [preferred]
         if preferred == "cuda":
             devices.append("cpu")
@@ -222,39 +300,40 @@ def _get_model(model_size: str | None = None):
         for device in devices:
             compute = WHISPER_COMPUTE_TYPE if device == preferred else _compute_for(device)
             try:
+                # Download/load happens outside _state_lock so /api/whisper stays responsive.
                 model = _load_whisper_model(size, device, compute)
-                _model = model
-                _model_name = size
-                _model_device = device
-                _model_compute = compute
-                WHISPER_DEVICE = device
-                WHISPER_COMPUTE_TYPE = compute
-                _model_state.update(
-                    {
-                        "ready": True,
-                        "loading": False,
-                        "error": "",
-                        "model": size,
-                        "device": device,
-                        "compute": compute,
-                    }
-                )
-                return _model
+                with _state_lock:
+                    _model = model
+                    _model_name = size
+                    _model_device = device
+                    _model_compute = compute
+                    WHISPER_DEVICE = device
+                    WHISPER_COMPUTE_TYPE = compute
+                    _model_state.update(
+                        {
+                            "ready": True,
+                            "loading": False,
+                            "error": "",
+                            "model": size,
+                            "device": device,
+                            "compute": compute,
+                        }
+                    )
+                    return _model
             except Exception as exc:  # noqa: BLE001 — try next device
                 last_error = exc
                 continue
 
-        _model_state.update(
-            {
-                "ready": False,
-                "loading": False,
-                "error": str(last_error or "No s’ha pogut carregar Whisper"),
-                "model": size,
-                "device": preferred,
-                "compute": WHISPER_COMPUTE_TYPE,
-            }
+        error = str(last_error or "No s’ha pogut carregar Whisper")
+        _update_model_state(
+            ready=False,
+            loading=False,
+            error=error,
+            model=size,
+            device=preferred,
+            compute=WHISPER_COMPUTE_TYPE,
         )
-        raise RuntimeError(_model_state["error"]) from last_error
+        raise RuntimeError(error) from last_error
 
 
 def preload_whisper_model() -> None:
@@ -262,7 +341,7 @@ def preload_whisper_model() -> None:
     global _preload_started
     if not alignment_available():
         return
-    with _model_lock:
+    with _state_lock:
         if _preload_started or _model is not None:
             return
         _preload_started = True
@@ -288,12 +367,30 @@ def preload_whisper_model() -> None:
 
 def _reset_model_cache() -> None:
     global _model, _model_name, _model_device, _model_compute
-    with _model_lock:
-        _model = None
-        _model_name = None
-        _model_device = None
-        _model_compute = None
-        _model_state.update({"ready": False, "loading": False})
+    with _load_lock:
+        with _state_lock:
+            _model = None
+            _model_name = None
+            _model_device = None
+            _model_compute = None
+            _model_state.update({"ready": False, "loading": False})
+
+
+def _transcribe_kwargs(language: str, initial_prompt: str | None) -> dict:
+    return {
+        "language": language,
+        "word_timestamps": True,
+        # VAD often deletes sung vocals as "non-speech".
+        "vad_filter": False,
+        "beam_size": WHISPER_BEAM_SIZE,
+        "best_of": WHISPER_BEAM_SIZE,
+        "temperature": 0.0,
+        "condition_on_previous_text": False,
+        "initial_prompt": initial_prompt,
+        # Tighten hallucination filters a bit for music (Whisper invents outros).
+        "compression_ratio_threshold": 2.2,
+        "log_prob_threshold": -0.9,
+    }
 
 
 def transcribe_words(
@@ -305,18 +402,9 @@ def transcribe_words(
 ) -> list[AsrWord]:
     global WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     model = _get_model(model_size)
-    # VAD often deletes sung vocals as "non-speech"; keep it off for karaoke.
+    kwargs = _transcribe_kwargs(language, initial_prompt)
     try:
-        segments, info = model.transcribe(
-            str(audio_path),
-            language=language,
-            word_timestamps=True,
-            vad_filter=False,
-            beam_size=WHISPER_BEAM_SIZE,
-            best_of=WHISPER_BEAM_SIZE,
-            condition_on_previous_text=False,
-            initial_prompt=initial_prompt,
-        )
+        segments, info = model.transcribe(str(audio_path), **kwargs)
     except Exception as exc:  # noqa: BLE001 — CUDA runtime gaps show up at transcribe time
         message = str(exc).lower()
         if WHISPER_DEVICE == "cuda" and ("cublas" in message or "cuda" in message):
@@ -324,16 +412,7 @@ def transcribe_words(
             WHISPER_DEVICE = "cpu"
             WHISPER_COMPUTE_TYPE = _compute_for("cpu")
             model = _get_model(model_size)
-            segments, info = model.transcribe(
-                str(audio_path),
-                language=language,
-                word_timestamps=True,
-                vad_filter=False,
-                beam_size=WHISPER_BEAM_SIZE,
-                best_of=WHISPER_BEAM_SIZE,
-                condition_on_previous_text=False,
-                initial_prompt=initial_prompt,
-            )
+            segments, info = model.transcribe(str(audio_path), **kwargs)
         else:
             raise
     duration = float(getattr(info, "duration", 0) or 0)
@@ -586,6 +665,51 @@ def align_tokens_globally(
     return placeholders
 
 
+def _has_sync_anchors(lines: list[LyricLine]) -> bool:
+    """True when line times look like real LRC sync, not the plain i*4 fallback."""
+    times = [float(line.time) for line in lines if float(line.time) > 0]
+    if len(times) < max(3, len(lines) // 4):
+        return False
+    if len(times) >= 3:
+        gaps = [times[i + 1] - times[i] for i in range(len(times) - 1)]
+        if gaps and all(abs(gap - 4.0) < 0.051 for gap in gaps):
+            return False
+    return True
+
+
+def align_tokens_with_anchors(
+    lines: list[LyricLine],
+    asr_words: list[AsrWord],
+) -> list[list[LyricWord]]:
+    """Align each line inside a window around its LRCLIB timestamp.
+
+    Global DP is great for plain lyrics with an unknown intro offset, but when
+    we already have synced line times it lets repeated choruses steal each
+    other's matches. Anchoring per line keeps verse N near its LRC cue.
+    """
+    result: list[list[LyricWord]] = []
+    last_end = 0.0
+    for index, line in enumerate(lines):
+        next_time = (
+            float(lines[index + 1].time)
+            if index + 1 < len(lines) and float(lines[index + 1].time) > float(line.time)
+            else float(line.time) + 8.0
+        )
+        window_start = max(0.0, float(line.time) - ANCHOR_PAD_BEFORE)
+        # Do not start before the previous line finished matching when LRC gaps
+        # are tight; that stops adjacent lines from sharing the same ASR words.
+        window_start = max(window_start, last_end - 0.15)
+        window_end = next_time + ANCHOR_PAD_AFTER
+        words = align_line_words(line.text, window_start, window_end, asr_words)
+        known = [word for word in words if word.time >= 0]
+        if known:
+            last_end = max(last_end, known[-1].end)
+        elif float(line.time) > 0:
+            last_end = max(last_end, float(line.time))
+        result.append(words)
+    return result
+
+
 def _enforce_monotonic(lines: list[LyricLine]) -> list[LyricLine]:
     """Never let a word start before the previous one: backwards jumps read as a bug."""
     flat = [word for line in lines for word in line.words]
@@ -619,7 +743,9 @@ def align_lyrics(
     if not audio_path.is_file():
         raise FileNotFoundError(str(audio_path))
 
-    prompt = " ".join(line.text for line in lines[:16]).strip()
+    # Feed as much of the known lyric text as Whisper accepts — this biases
+    # Catalan singing away from Spanish lookalikes.
+    prompt = " ".join(line.text for line in lines).strip()
     asr_words = transcribe_words(
         audio_path,
         language=language,
@@ -641,7 +767,18 @@ def align_lyrics(
             for i, line in enumerate(lines)
         ]
 
-    per_line = align_tokens_globally(lines, asr_words)
+    use_anchors = _has_sync_anchors(lines)
+    if use_anchors:
+        per_line = align_tokens_with_anchors(lines, asr_words)
+        # If anchoring left most of the song unmatched (bad LRC offset), fall
+        # back to the global path that can absorb a large intro shift.
+        matched = sum(1 for row in per_line for word in row if word.time >= 0)
+        total = sum(len(row) for row in per_line) or 1
+        if matched / total < 0.35:
+            per_line = align_tokens_globally(lines, asr_words)
+    else:
+        per_line = align_tokens_globally(lines, asr_words)
+
     aligned_lines: list[LyricLine] = []
     for index, line in enumerate(lines):
         next_time = (

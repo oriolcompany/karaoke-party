@@ -1,4 +1,11 @@
-from karaoke_party.align import AsrWord, align_line_words, align_tokens_globally
+from karaoke_party.align import (
+    AsrWord,
+    _has_sync_anchors,
+    _normalize,
+    align_line_words,
+    align_tokens_globally,
+    align_tokens_with_anchors,
+)
 from karaoke_party.lyrics import LyricLine
 
 
@@ -112,3 +119,40 @@ def test_unmatched_lyrics_stay_unmatched():
     asr = [AsrWord("xylophone", 1.0, 1.5)]
     per_line = align_tokens_globally(lines, asr)
     assert all(word.time < 0 for word in per_line[0])
+
+
+def test_normalize_folds_accents_and_apostrophes():
+    assert _normalize("l'amor") == "lamor"
+    assert _normalize("destí") == "desti"
+    assert _normalize("Àudio") == "audio"
+
+
+def test_has_sync_anchors_rejects_plain_four_second_grid():
+    lines = [LyricLine(time=float(i * 4), text=f"linia {i}") for i in range(6)]
+    assert _has_sync_anchors(lines) is False
+    synced = [
+        LyricLine(time=12.4, text="una"),
+        LyricLine(time=15.1, text="dues"),
+        LyricLine(time=19.8, text="tres"),
+        LyricLine(time=24.0, text="quatre"),
+    ]
+    assert _has_sync_anchors(synced) is True
+
+
+def test_anchored_align_keeps_chorus_near_lrc_times():
+    """With LRC cues, the second chorus must not latch onto the first ASR hit."""
+    lines = [
+        LyricLine(time=10.0, text="canta amb mi"),
+        LyricLine(time=40.0, text="canta amb mi"),
+    ]
+    asr = [
+        AsrWord("canta", 10.1, 10.5),
+        AsrWord("amb", 10.5, 10.7),
+        AsrWord("mi", 10.7, 11.1),
+        AsrWord("canta", 40.2, 40.6),
+        AsrWord("amb", 40.6, 40.8),
+        AsrWord("mi", 40.8, 41.2),
+    ]
+    per_line = align_tokens_with_anchors(lines, asr)
+    assert abs(per_line[0][0].time - 10.1) < 0.01
+    assert abs(per_line[1][0].time - 40.2) < 0.01

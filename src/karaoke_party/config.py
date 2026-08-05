@@ -33,15 +33,15 @@ def app_cache_root() -> Path:
     """
     env = os.environ.get("KARAOKE_CACHE_DIR", "").strip()
     if env:
-        return Path(env)
-    if os.name == "nt":
+        path = Path(env)
+    elif os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if base:
-            return Path(base) / "KaraokeParty"
-    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
-    if xdg:
-        return Path(xdg) / "karaoke-party"
-    return Path.home() / ".cache" / "karaoke-party"
+        path = Path(base) / "KaraokeParty" if base else Path.home() / "KaraokeParty"
+    else:
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+        path = Path(xdg) / "karaoke-party" if xdg else Path.home() / ".cache" / "karaoke-party"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _legacy_cache_dir(name: str) -> Path:
