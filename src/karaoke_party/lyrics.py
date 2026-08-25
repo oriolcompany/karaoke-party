@@ -23,7 +23,7 @@ PROBE_TIMEOUT = 8.0
 PROBE_ERROR_SOURCE = "probe-error"
 # Bump when the aligner changes so old, less precise timings are recomputed
 # instead of being served forever from disk.
-ALIGNED_CACHE_VERSION = 3
+ALIGNED_CACHE_VERSION = 4
 
 
 @dataclass
@@ -81,6 +81,55 @@ def parse_enhanced_words(raw: str) -> tuple[str, list[LyricWord]]:
         words.append(LyricWord(time=start, end=max(end, start + 0.05), text=text))
         plain_parts.append(text)
     return " ".join(plain_parts), words
+
+
+def sung_word_duration(text: str) -> float:
+    """Typical sung length for a token; used to keep pickups from eating pauses."""
+    letters = sum(1 for char in text if char.isalnum()) or 1
+    return max(0.12, min(0.70, 0.08 * letters + 0.10))
+
+
+def tighten_phrase_onsets(lines: list[LyricLine]) -> list[LyricLine]:
+    """Keep the first word of each line from painting through the pre-phrase pause.
+
+    Whisper (and leftover interpolation) often stamps a short pickup like "I" or
+    "Un" from the previous line's end up to the second word. The karaoke fill
+    then crawls through silence before anyone has sung it.
+    """
+    prev_end: float | None = None
+    for line in lines:
+        words = line.words
+        if not words:
+            continue
+        first = words[0]
+        expected = sung_word_duration(first.text)
+        duration = first.end - first.time
+        gap_before = 0.0 if prev_end is None else first.time - prev_end
+        absorbed = gap_before < 0.12
+        letters = sum(1 for char in first.text if char.isalnum()) or 1
+        hold_after_pause = letters >= 4 and gap_before > 0.25 and duration > 0.8
+        if hold_after_pause:
+            prev_end = words[-1].end
+            continue
+        short_pickup = letters <= 3 and duration > expected * 1.5 and (
+            absorbed or prev_end is None or duration > 0.7
+        )
+        long_span = duration > max(1.0, expected * 2.5)
+        absorbed_stretch = absorbed and duration > expected * 1.8
+        if len(words) == 1:
+            if letters <= 3 and duration > 0.8 and absorbed:
+                first.time = max(first.time, first.end - expected)
+                line.time = first.time
+            prev_end = words[-1].end
+            continue
+        if short_pickup or long_span or absorbed_stretch:
+            boundary = min(first.end, words[1].time)
+            first.time = max(first.time, boundary - expected)
+            if first.end < first.time + 0.08:
+                first.end = first.time + 0.08
+            line.time = first.time
+        prev_end = words[-1].end
+    return lines
 
 
 def estimate_words(line_time: float, next_time: float | None, text: str) -> list[LyricWord]:
@@ -182,7 +231,7 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
     return LyricsPayload(
         synced=True,
         source=str(data.get("source") or "aligned"),
-        lines=lines,
+        lines=tighten_phrase_onsets(lines),
         plain=str(data.get("plain") or ""),
     )
 

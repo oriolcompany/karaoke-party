@@ -1,4 +1,12 @@
-from karaoke_party.lyrics import attach_word_timings, estimate_words, parse_enhanced_words, parse_lrc
+from karaoke_party.lyrics import (
+    LyricLine,
+    LyricWord,
+    attach_word_timings,
+    estimate_words,
+    parse_enhanced_words,
+    parse_lrc,
+    tighten_phrase_onsets,
+)
 
 
 def test_parse_lrc_basic() -> None:
@@ -41,3 +49,51 @@ def test_attach_preserves_enhanced() -> None:
     )
     assert lines[0].words[0].text == "One"
     assert lines[0].words[1].time == 1.5
+
+
+def test_tighten_short_first_word_does_not_eat_pause() -> None:
+    lines = [
+        LyricLine(
+            time=10.0,
+            text="hola adéu",
+            words=[
+                LyricWord(time=10.0, end=10.4, text="hola"),
+                LyricWord(time=10.4, end=10.8, text="adéu"),
+            ],
+        ),
+        LyricLine(
+            time=10.8,
+            text="Un heroi",
+            words=[
+                LyricWord(time=10.8, end=14.4, text="Un"),
+                LyricWord(time=14.4, end=14.9, text="heroi"),
+            ],
+        ),
+    ]
+    tighten_phrase_onsets(lines)
+    first = lines[1].words[0]
+    assert first.end - first.time < 0.45
+    assert first.time > 13.9
+    assert abs(lines[1].time - first.time) < 0.001
+
+
+def test_tighten_keeps_held_word_after_a_pause() -> None:
+    lines = [
+        LyricLine(
+            time=10.0,
+            text="canta",
+            words=[LyricWord(time=10.0, end=10.4, text="canta")],
+        ),
+        LyricLine(
+            time=12.0,
+            text="Amor etern",
+            words=[
+                LyricWord(time=12.0, end=14.0, text="Amor"),
+                LyricWord(time=14.0, end=14.5, text="etern"),
+            ],
+        ),
+    ]
+    tighten_phrase_onsets(lines)
+    first = lines[1].words[0]
+    assert abs(first.time - 12.0) < 0.01
+    assert abs(first.end - 14.0) < 0.01

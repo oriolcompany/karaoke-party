@@ -75,9 +75,10 @@ Whisper alignment more accurate. **ffmpeg must be on PATH.**
 | `KARAOKE_WHISPER_DEVICE` | auto (`cuda` if available, else `cpu`) | Force with `cpu` / `cuda` |
 | `KARAOKE_WHISPER_COMPUTE` | `float16` on CUDA, `int8` on CPU | CTranslate2 compute type |
 
-When LRCLIB already provides synced line times, word alignment is anchored to those
-cues (so choruses do not steal each other’s timings). Without LRC times it falls
-back to a whole-song match that can absorb a long instrumental intro.
+When LRCLIB already provides synced line times, each line is located as a
+phrase near those cues (so choruses do not steal each other’s timings). Without
+LRC times it walks phrases through the song and can absorb a long instrumental
+intro; if too little matches it falls back to a whole-song word path.
 
 ## Run
 
@@ -102,7 +103,7 @@ For full Whisper alignment support, prefer `KaraokeParty.bat`.
 
 1. The server scans the music folder and reads title/artist/album/duration from tags. Basic LRCLIB sync does **not** run on startup.
 2. Synced lyrics (LRC) are fetched from LRCLIB when you open a song, run Whisper sync, or use Settings → “Resincronitzar sense lletra”, and cached under `tracks/<key>/lyrics.json`.
-3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper**. Word timings are cached under `tracks/<key>/aligned.json`. Matching walks a single monotonic best path over the whole song, so repeated choruses cannot steal each other's timings, and it can merge tokens in both directions (`l'amor` vs `l'` + `amor`).
+3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper**. Word timings are cached under `tracks/<key>/aligned.json`. Matching locates each lyric line as a phrase in the ASR, then aligns words inside that span, so a misheard word cannot steal the next line. Repeated choruses stay monotonic, and tokens can merge in both directions (`l'amor` vs `l'` + `amor`).
 4. When alignment finishes (or is already cached), the stage swaps to word-accurate timings.
 5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file); a copy also lives at `tracks/<key>/cover.<ext>`.
 6. Stems are also generated on demand from the instrumental toggle / bulk settings action; Whisper reuses the same cache.

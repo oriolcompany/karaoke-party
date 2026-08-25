@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 
-from .lyrics import LyricLine, LyricWord, estimate_words
+from .lyrics import LyricLine, LyricWord, estimate_words, sung_word_duration, tighten_phrase_onsets
 
 _model = None
 # Status reads must never wait on a multi-GB HuggingFace download. Keep a
@@ -165,10 +165,16 @@ MERGE_PENALTY = 0.04
 # hallucinated "lalala" outros), which shifts the true path off the diagonal.
 BAND_MIN_RADIUS = 200
 BAND_MAX_CELLS = 8_000_000
-# When LRCLIB already gave line times, keep each line's words near that window
-# so choruses cannot steal timings from another verse.
-ANCHOR_PAD_BEFORE = 1.8
-ANCHOR_PAD_AFTER = 1.2
+# Phrase search window around an LRC cue. Wider than a single word so a
+# slightly late/early LRCLIB timestamp still finds the sung line. The phrase
+# scorer (not the window edge) is what stops choruses colliding.
+ANCHOR_PAD_BEFORE = 8.0
+ANCHOR_PAD_AFTER = 6.0
+# Among spans that score close to the best, prefer the earliest start so a
+# missing middle word interpolates instead of skipping the first token, and so
+# a misheard last word cannot latch onto the next line.
+PHRASE_EARLY_TAU = 0.12
+SHORT_PHRASE_LOOKAHEAD = 24
 
 _PTR_NONE = 0
 _PTR_MATCH = 1
@@ -450,9 +456,14 @@ def _interpolate_missing(words: list[LyricWord], line_start: float, line_end: fl
         prev_i = max((k for k in known_indexes if k < i), default=None)
         next_i = min((k for k in known_indexes if k > i), default=None)
         if prev_i is None and next_i is not None:
-            span = max(0.12, (filled[next_i].time - line_start) / max(1, next_i))
-            start = line_start + i * span
-            end = start + span
+            # Pack unmatched pickups against the first match. Spreading them from
+            # line_start paints the first word through the pause before the phrase.
+            widths = [
+                max(0.10, min(0.40, sung_word_duration(filled[k].text)))
+                for k in range(next_i)
+            ]
+            start = filled[next_i].time - sum(widths) + sum(widths[:i])
+            end = start + widths[i]
         elif next_i is None and prev_i is not None:
             span = max(0.12, (line_end - filled[prev_i].end) / max(1, len(filled) - prev_i))
             start = filled[prev_i].end + (i - prev_i - 1) * span
@@ -470,6 +481,127 @@ def _interpolate_missing(words: list[LyricWord], line_start: float, line_end: fl
     return filled
 
 
+def _empty_words(tokens: list[str]) -> list[LyricWord]:
+    return [LyricWord(time=-1.0, end=-1.0, text=token) for token in tokens]
+
+
+def _word_from_asr(
+    text: str,
+    asr_words: list[AsrWord],
+    asr_from: int,
+    asr_to: int,
+    share: int,
+) -> LyricWord:
+    start = asr_words[asr_from].start
+    end = max(asr_words[asr_to].end, start + 0.05)
+    if share:
+        middle = start + (end - start) / 2
+        start, end = (start, middle) if share == 1 else (middle, end)
+    return LyricWord(time=start, end=max(end, start + 0.05), text=text)
+
+
+def _phrase_threshold(concat: str) -> float:
+    if len(concat) <= 2:
+        return 0.92
+    if len(concat) <= 5:
+        return 0.70
+    return 0.48
+
+
+def _phrase_similarity(lyric_concat: str, asr_concat: str) -> float:
+    """Length-aware similarity so eating the next phrase scores worse than a fuzzy line."""
+    if not lyric_concat or not asr_concat:
+        return 0.0
+    ratio = _similar(lyric_concat, asr_concat)
+    if ratio < 0.35:
+        return 0.0
+    char_pen = min(len(lyric_concat), len(asr_concat)) / max(len(lyric_concat), len(asr_concat))
+    return ratio * (0.5 + 0.5 * char_pen)
+
+
+def _locate_phrase(
+    lyric_concat: str,
+    n_tokens: int,
+    asr_norms: list[str],
+    asr_starts: list[float],
+    j_min: int,
+    j_max: int,
+    expected_time: float | None,
+) -> tuple[int, int] | None:
+    """Best ASR span [from, to) for a lyric line, or None if nothing is close enough.
+
+    Scores every plausible window, then among spans near the best score picks the
+    earliest start. That keeps a misheard last word from latching onto the next
+    line, and a missing middle word from dropping the first token of the line.
+    """
+    if not lyric_concat or j_min >= j_max or n_tokens < 1:
+        return None
+
+    min_len = max(1, n_tokens - 2)
+    max_len = n_tokens + 3
+    threshold = _phrase_threshold(lyric_concat)
+    scored: list[tuple[float, float, int, int]] = []
+    best_raw = 0.0
+
+    for j in range(j_min, j_max):
+        max_here = min(max_len, j_max - j)
+        for length in range(min_len, max_here + 1):
+            raw = _phrase_similarity(lyric_concat, "".join(asr_norms[j : j + length]))
+            if raw <= 0:
+                continue
+            ranked = raw
+            if expected_time is not None:
+                ranked *= 0.85 + 0.15 / (1.0 + abs(asr_starts[j] - expected_time) / 4.0)
+            scored.append((ranked, raw, j, j + length))
+            if raw > best_raw:
+                best_raw = raw
+
+    if best_raw < threshold or not scored:
+        return None
+
+    near = [row for row in scored if row[1] >= best_raw - PHRASE_EARLY_TAU]
+    near.sort(key=lambda row: (row[2], -row[0]))
+    return near[0][2], near[0][3]
+
+
+def _asr_index_range(
+    asr_words: list[AsrWord],
+    t0: float,
+    t1: float,
+    j_min: int,
+) -> tuple[int, int]:
+    lo: int | None = None
+    hi = j_min
+    for index in range(j_min, len(asr_words)):
+        word = asr_words[index]
+        if word.start >= t1:
+            break
+        if word.end < t0:
+            continue
+        if lo is None:
+            lo = index
+        hi = index + 1
+    if lo is None:
+        return j_min, j_min
+    return lo, hi
+
+
+def _align_tokens_to_asr(tokens: list[str], asr_slice: list[AsrWord]) -> list[LyricWord]:
+    """Word-level DP inside an already-chosen phrase span. Unmatched stay at -1."""
+    words = _empty_words(tokens)
+    if not tokens or not asr_slice:
+        return words
+    pairs = _align_path(
+        [_normalize(token) for token in tokens],
+        [_normalize(word.text) for word in asr_slice],
+    )
+    for lyric_index, asr_from, asr_to, share in pairs:
+        words[lyric_index] = _word_from_asr(
+            tokens[lyric_index], asr_slice, asr_from, asr_to, share
+        )
+    return words
+
+
 def align_line_words(
     line_text: str,
     line_start: float,
@@ -484,36 +616,22 @@ def align_line_words(
     window = [
         word
         for word in asr_words
-        if word.end >= line_start - 0.8 and word.start <= line_end + 0.6
+        if word.end >= line_start - ANCHOR_PAD_BEFORE and word.start <= line_end + ANCHOR_PAD_AFTER
     ]
-    if len(window) < max(1, len(tokens) // 3):
-        window = [
-            word
-            for word in asr_words
-            if word.end >= line_start - 2.5 and word.start <= line_end + 2.0
-        ]
-
-    aligned: list[LyricWord] = []
-    cursor = 0
-    for token in tokens:
-        norm = _normalize(token)
-        match_idx = None
-        match_score = 0.0
-        limit = min(len(window), cursor + 10)
-        for idx in range(cursor, limit):
-            score = _similar(norm, _normalize(window[idx].text))
-            if score > match_score:
-                match_score = score
-                match_idx = idx
-            if score >= 0.92:
-                break
-        if match_idx is not None and match_score >= 0.55:
-            hit = window[match_idx]
-            aligned.append(LyricWord(time=hit.start, end=max(hit.end, hit.start + 0.05), text=token))
-            cursor = match_idx + 1
-        else:
-            aligned.append(LyricWord(time=-1.0, end=-1.0, text=token))
-
+    aligned = _empty_words(tokens)
+    if window:
+        concat = "".join(_normalize(token) for token in tokens)
+        located = _locate_phrase(
+            concat,
+            len(tokens),
+            [_normalize(word.text) for word in window],
+            [word.start for word in window],
+            0,
+            len(window),
+            line_start,
+        )
+        span = window[located[0] : located[1]] if located else window
+        aligned = _align_tokens_to_asr(tokens, span)
     return _interpolate_missing(aligned, line_start, line_end)
 
 
@@ -651,15 +769,8 @@ def align_tokens_globally(
 
     for lyric_index, asr_from, asr_to, share in pairs:
         token = tokens[lyric_index]
-        start = asr_words[asr_from].start
-        end = max(asr_words[asr_to].end, start + 0.05)
-        if share:
-            middle = start + (end - start) / 2
-            start, end = (start, middle) if share == 1 else (middle, end)
-        placeholders[token.line_index][token.token_index] = LyricWord(
-            time=start,
-            end=max(end, start + 0.05),
-            text=token.text,
+        placeholders[token.line_index][token.token_index] = _word_from_asr(
+            token.text, asr_words, asr_from, asr_to, share
         )
 
     return placeholders
@@ -677,37 +788,72 @@ def _has_sync_anchors(lines: list[LyricLine]) -> bool:
     return True
 
 
+def align_tokens_by_phrases(
+    lines: list[LyricLine],
+    asr_words: list[AsrWord],
+    *,
+    use_time_windows: bool,
+) -> list[list[LyricWord]]:
+    """Locate each lyric line in the ASR, then word-align inside that span.
+
+    A whole-line vote stops one misheard word from stealing the next phrase.
+    When ``use_time_windows`` is set, search is biased toward LRCLIB cues so
+    repeated choruses stay on their own verse.
+    """
+    line_tokens = [_split_tokens(line.text) for line in lines]
+    result = [_empty_words(tokens) for tokens in line_tokens]
+    if not asr_words:
+        return result
+
+    asr_norms = [_normalize(word.text) for word in asr_words]
+    asr_starts = [word.start for word in asr_words]
+    last_j = 0
+
+    for index, (line, tokens) in enumerate(zip(lines, line_tokens)):
+        if not tokens:
+            continue
+        concat = "".join(_normalize(token) for token in tokens)
+        if use_time_windows:
+            next_time = (
+                float(lines[index + 1].time)
+                if index + 1 < len(lines) and float(lines[index + 1].time) > float(line.time)
+                else float(line.time) + 8.0
+            )
+            t0 = max(0.0, float(line.time) - ANCHOR_PAD_BEFORE)
+            t1 = next_time + ANCHOR_PAD_AFTER
+            j_min, j_max = _asr_index_range(asr_words, t0, t1, last_j)
+            expected: float | None = float(line.time)
+        else:
+            j_min = last_j
+            if len(concat) <= 6:
+                j_max = min(len(asr_words), last_j + max(SHORT_PHRASE_LOOKAHEAD, len(tokens) * 10))
+            else:
+                j_max = len(asr_words)
+            expected = None
+
+        located = _locate_phrase(
+            concat,
+            len(tokens),
+            asr_norms,
+            asr_starts,
+            j_min,
+            j_max,
+            expected,
+        )
+        if located is None:
+            continue
+        start, end = located
+        result[index] = _align_tokens_to_asr(tokens, asr_words[start:end])
+        last_j = max(last_j, end)
+    return result
+
+
 def align_tokens_with_anchors(
     lines: list[LyricLine],
     asr_words: list[AsrWord],
 ) -> list[list[LyricWord]]:
-    """Align each line inside a window around its LRCLIB timestamp.
-
-    Global DP is great for plain lyrics with an unknown intro offset, but when
-    we already have synced line times it lets repeated choruses steal each
-    other's matches. Anchoring per line keeps verse N near its LRC cue.
-    """
-    result: list[list[LyricWord]] = []
-    last_end = 0.0
-    for index, line in enumerate(lines):
-        next_time = (
-            float(lines[index + 1].time)
-            if index + 1 < len(lines) and float(lines[index + 1].time) > float(line.time)
-            else float(line.time) + 8.0
-        )
-        window_start = max(0.0, float(line.time) - ANCHOR_PAD_BEFORE)
-        # Do not start before the previous line finished matching when LRC gaps
-        # are tight; that stops adjacent lines from sharing the same ASR words.
-        window_start = max(window_start, last_end - 0.15)
-        window_end = next_time + ANCHOR_PAD_AFTER
-        words = align_line_words(line.text, window_start, window_end, asr_words)
-        known = [word for word in words if word.time >= 0]
-        if known:
-            last_end = max(last_end, known[-1].end)
-        elif float(line.time) > 0:
-            last_end = max(last_end, float(line.time))
-        result.append(words)
-    return result
+    """Align each line near its LRCLIB timestamp using phrase-first matching."""
+    return align_tokens_by_phrases(lines, asr_words, use_time_windows=True)
 
 
 def _enforce_monotonic(lines: list[LyricLine]) -> list[LyricLine]:
@@ -768,15 +914,10 @@ def align_lyrics(
         ]
 
     use_anchors = _has_sync_anchors(lines)
-    if use_anchors:
-        per_line = align_tokens_with_anchors(lines, asr_words)
-        # If anchoring left most of the song unmatched (bad LRC offset), fall
-        # back to the global path that can absorb a large intro shift.
-        matched = sum(1 for row in per_line for word in row if word.time >= 0)
-        total = sum(len(row) for row in per_line) or 1
-        if matched / total < 0.35:
-            per_line = align_tokens_globally(lines, asr_words)
-    else:
+    per_line = align_tokens_by_phrases(lines, asr_words, use_time_windows=use_anchors)
+    matched = sum(1 for row in per_line for word in row if word.time >= 0)
+    total = sum(len(row) for row in per_line) or 1
+    if matched / total < 0.35:
         per_line = align_tokens_globally(lines, asr_words)
 
     aligned_lines: list[LyricLine] = []
@@ -791,9 +932,9 @@ def align_lyrics(
         if known:
             line_start = known[0].time
             line_end = known[-1].end + 0.35
-            # Prefer ASR-derived bounds; fall back softly to LRCLIB gap if sparse.
+            # Prefer ASR-derived bounds for the tail; do not pull line_start back
+            # to the LRC cue or unmatched pickups fill the whole pre-phrase pause.
             if len(known) < max(1, len(words) // 3):
-                line_start = min(line.time, line_start) if line.time > 0 else line_start
                 line_end = max(next_time, line_end)
             words = _interpolate_missing(words, line_start, line_end)
             line_time = words[0].time if words else line.time
@@ -801,4 +942,4 @@ def align_lyrics(
             line_time = line.time
             words = estimate_words(line.time, next_time, line.text)
         aligned_lines.append(LyricLine(time=line_time, text=line.text, words=words))
-    return _enforce_monotonic(aligned_lines)
+    return tighten_phrase_onsets(_enforce_monotonic(aligned_lines))
