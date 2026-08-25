@@ -6,12 +6,14 @@ from pathlib import Path
 
 from karaoke_party.lyrics import cache_key
 from karaoke_party.track_cache import (
+    clear_track_files,
     export_track_zip,
     import_track_zip,
     lyrics_path,
     read_meta,
     track_status,
     write_meta,
+    youtube_path,
 )
 
 
@@ -21,6 +23,7 @@ def test_export_import_roundtrip(tmp_path: Path) -> None:
     lyrics_path(tmp_path, key).write_text('{"synced": true, "lines": []}', encoding="utf-8")
     (tmp_path / key / "cover.jpg").write_bytes(b"art")
     (tmp_path / key / "instrumental.mp3").write_bytes(b"inst")
+    youtube_path(tmp_path, key).write_text('{"found": true, "video_id": "dQw4w9WgXcQ"}', encoding="utf-8")
 
     zip_path = tmp_path / "song.zip"
     export_track_zip(tmp_path, key, zip_path)
@@ -38,7 +41,9 @@ def test_export_import_roundtrip(tmp_path: Path) -> None:
     assert status["lyrics"]
     assert status["cover"]
     assert status["instrumental"]
+    assert status["youtube"]
     assert (other / key / "cover.jpg").read_bytes() == b"art"
+    assert (other / key / "youtube.json").is_file()
 
 
 def test_import_accepts_wrapped_folder(tmp_path: Path) -> None:
@@ -61,3 +66,16 @@ def test_import_accepts_wrapped_folder(tmp_path: Path) -> None:
     root.mkdir()
     assert import_track_zip(root, zip_path) == key
     assert (root / key / "lyrics.json").is_file()
+
+
+def test_clear_youtube_scope_only(tmp_path: Path) -> None:
+    key = cache_key("Artist", "Song", 180.0)
+    write_meta(tmp_path, key, artist="Artist", title="Song", duration=180.0)
+    lyrics_path(tmp_path, key).write_text("{}", encoding="utf-8")
+    youtube_path(tmp_path, key).write_text("{}", encoding="utf-8")
+
+    removed = clear_track_files(tmp_path, key, {"youtube"})
+    assert removed["youtube"] == 1
+    assert removed["lyrics"] == 0
+    assert not youtube_path(tmp_path, key).is_file()
+    assert lyrics_path(tmp_path, key).is_file()

@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="origin" />
     <title>Karaoke Party</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -10,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=24" />
+    <link rel="stylesheet" href="/styles.css?v=32" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -133,9 +134,31 @@
 
         <div class="coverflow" id="coverflow">
           <div class="coverflow-stage">
-            <button id="coverPrev" class="cover-nav" type="button" aria-label="Cançó anterior">‹</button>
+            <button id="coverPrev" class="cover-nav" type="button" aria-label="Cançó anterior">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M14.75 4.75 7.5 12l7.25 7.25"
+                />
+              </svg>
+            </button>
             <div id="coverTrack" class="cover-track" tabindex="0"></div>
-            <button id="coverNext" class="cover-nav" type="button" aria-label="Cançó següent">›</button>
+            <button id="coverNext" class="cover-nav" type="button" aria-label="Cançó següent">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M9.25 4.75 16.5 12l-7.25 7.25"
+                />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -322,6 +345,27 @@
               </div>
 
               <div class="settings-block">
+                <h4 class="settings-block-title">Videoclips</h4>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Cerca a YouTube només les cançons que encara no tenen videoclip.
+                  </p>
+                  <button id="searchYoutubeMissingBtn" type="button">
+                    Només sense videoclip
+                  </button>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Torna a cercar-ho tot i substitueix els clips ja desats.
+                  </p>
+                  <button id="searchYoutubeAllBtn" type="button">
+                    Matxacar-ho tot
+                  </button>
+                </div>
+                <p id="youtubeSettingsStatus" class="settings-status" aria-live="polite"></p>
+              </div>
+
+              <div class="settings-block">
                 <h4 class="settings-block-title">Escenari</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
@@ -385,7 +429,7 @@
               <h3 class="settings-section-title">Memòria cau</h3>
               <p class="settings-help">
                 Cada cançó guarda la cau en una carpeta
-                (<code>tracks/&lt;clau&gt;/</code>): lletres, Whisper, stems i portada.
+                (<code>tracks/&lt;clau&gt;/</code>): lletres, Whisper, stems, portada i videoclip.
                 Pots esborrar-la, resincronitzar-la o exportar/importar el zip entre PCs.
               </p>
 
@@ -424,6 +468,10 @@
                   <label class="cache-scope">
                     <input id="cacheScopeCover" type="checkbox" checked />
                     <span>Portada</span>
+                  </label>
+                  <label class="cache-scope">
+                    <input id="cacheScopeYoutube" type="checkbox" checked />
+                    <span>Videoclip</span>
                   </label>
                 </div>
                 <div class="settings-inline-row cache-actions">
@@ -481,6 +529,21 @@
 
     <!-- Escenari de karaoke -->
     <section id="view-stage" class="view view-stage hidden">
+      <div id="stageVideo" class="stage-video" aria-hidden="true">
+        <div class="stage-video-frame">
+          <iframe
+            id="stageVideoHost"
+            title="Videoclip"
+            referrerpolicy="origin"
+            allow="autoplay; encrypted-media; picture-in-picture"
+          ></iframe>
+        </div>
+      </div>
+      <div id="stageCover" class="stage-cover" aria-hidden="true">
+        <img id="stageCoverBlur" class="stage-cover-blur" alt="" draggable="false" />
+        <img id="stageCoverArt" class="stage-cover-art" alt="" draggable="false" />
+      </div>
+      <div id="stageVideoDim" class="stage-video-dim" aria-hidden="true"></div>
       <div class="stage-fx" aria-hidden="true">
         <div class="stage-curtains"></div>
         <div class="stage-spot stage-spot-a"></div>
@@ -514,32 +577,63 @@
         </div>
       </div>
 
-      <div class="stage-dock">
-        <audio id="player" preload="metadata"></audio>
-        <button id="playBtn" class="play-btn" type="button" aria-label="Reproduir">Inicia</button>
-        <div id="audioModeToggle" class="settings-toggle stage-toggle" role="group" aria-label="Pista d’àudio" hidden>
-          <button
-            id="audioModeOriginalBtn"
-            type="button"
-            class="settings-toggle-btn is-active"
-            aria-pressed="true"
-          >
-            Amb veu
-          </button>
-          <button
-            id="audioModeInstrumentalBtn"
-            type="button"
-            class="settings-toggle-btn"
-            aria-pressed="false"
-          >
-            Karaoke
-          </button>
+      <div class="stage-dock-layer">
+        <div class="stage-dock">
+          <audio id="player" preload="metadata"></audio>
+          <button id="playBtn" class="play-btn" type="button" aria-label="Reproduir">Inicia</button>
+          <div class="stage-toggles">
+            <div id="audioModeToggle" class="settings-toggle stage-toggle" role="group" aria-label="Pista d’àudio" hidden>
+              <button
+                id="audioModeOriginalBtn"
+                type="button"
+                class="settings-toggle-btn is-active"
+                aria-pressed="true"
+              >
+                Amb veu
+              </button>
+              <button
+                id="audioModeInstrumentalBtn"
+                type="button"
+                class="settings-toggle-btn"
+                aria-pressed="false"
+              >
+                Karaoke
+              </button>
+            </div>
+            <div id="videoModeToggle" class="settings-toggle stage-toggle" role="group" aria-label="Fons de l’escenari" hidden>
+              <button
+                id="videoModeOnBtn"
+                type="button"
+                class="settings-toggle-btn is-active"
+                aria-pressed="true"
+              >
+                Vídeo
+              </button>
+              <button
+                id="videoModeCoverBtn"
+                type="button"
+                class="settings-toggle-btn"
+                aria-pressed="false"
+              >
+                Portada
+              </button>
+              <button
+                id="videoModeOffBtn"
+                type="button"
+                class="settings-toggle-btn"
+                aria-pressed="false"
+              >
+                Escenari
+              </button>
+            </div>
+          </div>
+          <p id="lyricsStatus" class="status">Preparat</p>
+          <p id="audioModeStatus" class="status stage-substatus" aria-live="polite"></p>
+          <p id="videoStatus" class="status stage-substatus" aria-live="polite"></p>
         </div>
-        <p id="lyricsStatus" class="status">Preparat</p>
-        <p id="audioModeStatus" class="status stage-substatus" aria-live="polite"></p>
       </div>
     </section>
 
-    <script src="/app.js?v=32"></script>
+    <script src="/app.js?v=44"></script>
   </body>
 </html>

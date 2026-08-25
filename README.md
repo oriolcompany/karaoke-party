@@ -113,8 +113,9 @@ For full Whisper alignment support, prefer `KaraokeParty.bat`.
 3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper → MMS syllables**. Word timings are cached under `tracks/<key>/aligned.json`. Matching locates each lyric line as a phrase in the ASR, then aligns words inside that span, so a misheard word cannot steal the next line. Repeated choruses stay monotonic, and tokens can merge in both directions (`l'amor` vs `l'` + `amor`). MMS then timestamps each letter of that known line on the vocal stem and the fill is grouped into Catalan syllables (`brin`+`dar`). If MMS is unavailable, syllable edges fall back to energy valleys inside the Whisper word window.
 4. When alignment finishes (or is already cached), the stage swaps to syllable-accurate timings.
 5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file); a copy also lives at `tracks/<key>/cover.<ext>`.
-6. Stems are also generated on demand from the instrumental toggle / bulk settings action; Whisper reuses the same cache.
-7. Settings → Memòria cau can clear/resync one song, wipe all caches, or export/import a per-song zip between PCs.
+6. When you open a song, the server looks up a YouTube music video (`yt-dlp` search, or a tagged/filename video id) and caches only `tracks/<key>/youtube.json` (the video id, not the file). The stage can play that clip **muted** in a YouTube iframe as the background; local audio keeps the lyric clock. Toggle **Vídeo / Portada / Escenari** on the stage: Portada is a Ken Burns animation of the album cover (always available, no extra network). Spotify Canvas is not used — the public Spotify API does not expose those clips.
+7. Stems are also generated on demand from the instrumental toggle / bulk settings action; Whisper reuses the same cache.
+8. Settings → Memòria cau can clear/resync one song, wipe all caches, or export/import a per-song zip between PCs.
 
 ### Per-song cache layout
 
@@ -128,6 +129,7 @@ tracks/<key>/
   instrumental.mp3
   vocals.mp3
   cover.<ext>
+  youtube.json
 ```
 
 `key` is `sha1(artist.lower|title.lower|int(duration))`. Demucs scratch files go to
@@ -139,4 +141,5 @@ tracks/<key>/
 - Default alignment language is Catalan (`ca`). Change via `POST /api/align` body `language`.
 - Improving the aligner bumps `ALIGNED_CACHE_VERSION`, so songs aligned by an older version are recomputed on demand.
 - Not every song has synced lyrics on LRCLIB; plain lyrics are shown when only those exist.
+- Stage video search needs network access and `yt-dlp` (installed with the base package). Set `KARAOKE_YOUTUBE=0` to skip search. Tagged YouTube URLs or a yt-dlp `[id]` in the filename still count.
 - This is for personal/local use with music you own.

@@ -42,7 +42,7 @@ if errorlevel 1 (
 )
 
 echo [2/5] Comprovant dependències Python...
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, mutagen, httpx, multipart" 1>nul 2>nul
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, mutagen, httpx, multipart, yt_dlp" 1>nul 2>nul
 if errorlevel 1 (
   echo       Instal·lant paquet base...
   ".venv\Scripts\python.exe" -m pip install -q --upgrade pip

@@ -38,6 +38,7 @@ pyinstaller --noconfirm --clean --onefile --console ^
   --collect-all fastapi ^
   --collect-all starlette ^
   --collect-all mutagen ^
+  --collect-all yt_dlp ^
   --collect-all anyio ^
   --collect-submodules karaoke_party ^
   run_exe.py

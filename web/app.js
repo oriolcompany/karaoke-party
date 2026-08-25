@@ -62,8 +62,21 @@ const audioModeToggle = document.getElementById("audioModeToggle");
 const audioModeOriginalBtn = document.getElementById("audioModeOriginalBtn");
 const audioModeInstrumentalBtn = document.getElementById("audioModeInstrumentalBtn");
 const audioModeStatus = document.getElementById("audioModeStatus");
+const videoStatus = document.getElementById("videoStatus");
+const videoModeToggle = document.getElementById("videoModeToggle");
+const videoModeOnBtn = document.getElementById("videoModeOnBtn");
+const videoModeCoverBtn = document.getElementById("videoModeCoverBtn");
+const videoModeOffBtn = document.getElementById("videoModeOffBtn");
+const stageVideoEl = document.getElementById("stageVideo");
+const stageCoverEl = document.getElementById("stageCover");
+const stageCoverArt = document.getElementById("stageCoverArt");
+const stageCoverBlur = document.getElementById("stageCoverBlur");
+const stageVideoDimEl = document.getElementById("stageVideoDim");
 const generateStemsBtn = document.getElementById("generateStemsBtn");
 const stemsSettingsStatus = document.getElementById("stemsSettingsStatus");
+const searchYoutubeMissingBtn = document.getElementById("searchYoutubeMissingBtn");
+const searchYoutubeAllBtn = document.getElementById("searchYoutubeAllBtn");
+const youtubeSettingsStatus = document.getElementById("youtubeSettingsStatus");
 const cacheSongSearch = document.getElementById("cacheSongSearch");
 const cacheSongSelect = document.getElementById("cacheSongSelect");
 const cacheSongMeta = document.getElementById("cacheSongMeta");
@@ -72,6 +85,7 @@ const cacheScopeLyrics = document.getElementById("cacheScopeLyrics");
 const cacheScopeAligned = document.getElementById("cacheScopeAligned");
 const cacheScopeStems = document.getElementById("cacheScopeStems");
 const cacheScopeCover = document.getElementById("cacheScopeCover");
+const cacheScopeYoutube = document.getElementById("cacheScopeYoutube");
 const cacheClearBtn = document.getElementById("cacheClearBtn");
 const cacheResyncBtn = document.getElementById("cacheResyncBtn");
 const cacheClearAllBtn = document.getElementById("cacheClearAllBtn");
@@ -89,6 +103,8 @@ const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
 const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
 const AUDIO_MODE_KEY = "karaoke-audio-mode";
+const STAGE_VIDEO_KEY = "karaoke-stage-video";
+const STAGE_BG_KEY = "karaoke-stage-bg";
 const MUTE_KEY = "karaoke-muted";
 let coverBust = 0;
 
@@ -99,6 +115,12 @@ function loadLyricsLayout() {
 
 function loadAudioMode() {
   return localStorage.getItem(AUDIO_MODE_KEY) === "instrumental" ? "instrumental" : "original";
+}
+
+function loadStageBgMode() {
+  const stored = localStorage.getItem(STAGE_BG_KEY);
+  if (stored === "video" || stored === "cover" || stored === "stage") return stored;
+  return localStorage.getItem(STAGE_VIDEO_KEY) === "0" ? "stage" : "video";
 }
 
 function loadLyricsFilterMode() {
@@ -148,9 +170,11 @@ let lyricsFilterMode = loadLyricsFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
 let audioMode = loadAudioMode();
+let stageBgMode = loadStageBgMode();
 let stemsAvailable = false;
 let stemsJobTimer = 0;
 let stemsBulkTimer = 0;
+let youtubeBulkTimer = 0;
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
@@ -166,6 +190,14 @@ let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
 let stageOutroTimer = 0;
+let youtubeToken = 0;
+let youtubeApiPromise = null;
+let youtubePlayer = null;
+let youtubeCurrent = null;
+let youtubeWantedId = "";
+let youtubeEmbedOk = false;
+let lastYoutubeSync = 0;
+const YOUTUBE_DRIFT_SEC = 0.45;
 
 /** @type {string[]} */
 const syncQueue = [];
@@ -229,6 +261,7 @@ function showTitleScreen() {
   document.body.classList.remove("mode-stage");
   viewStage.classList.remove("is-live");
   player.pause();
+  teardownYoutubeBackdrop();
   stopTicker();
   stopAlignPoll();
   currentId = null;
@@ -245,6 +278,7 @@ function showMenu() {
   document.body.classList.remove("mode-stage");
   viewStage.classList.remove("is-live");
   player.pause();
+  teardownYoutubeBackdrop();
   stopTicker();
   stopAlignPoll();
   currentId = null;
@@ -256,6 +290,7 @@ function beginStageOutro() {
   clearStageOutro();
   viewStage.classList.remove("is-live");
   viewStage.classList.add("is-outro");
+  pauseYoutubePlayer();
   stopTicker();
   updatePlayButton();
   const trackId = currentId;
@@ -307,6 +342,10 @@ function setStemStatus(text) {
   if (audioModeStatus) audioModeStatus.textContent = text || "";
 }
 
+function setVideoStatus(text) {
+  if (videoStatus) videoStatus.textContent = text || "";
+}
+
 function applyAudioModeButtons() {
   const instrumental = audioMode === "instrumental";
   audioModeOriginalBtn?.classList.toggle("is-active", !instrumental);
@@ -316,9 +355,389 @@ function applyAudioModeButtons() {
   if (audioModeToggle) audioModeToggle.hidden = !stemsAvailable;
 }
 
+function coverUrlFor(trackId) {
+  const bust = coverBust ? `?t=${coverBust}` : "";
+  return trackId ? `/api/cover/${encodeURI(trackId)}${bust}` : GENERIC_COVER;
+}
+
+function setStageCover(trackId) {
+  const url = coverUrlFor(trackId);
+  for (const img of [stageCoverArt, stageCoverBlur]) {
+    if (!img) continue;
+    img.onerror = () => {
+      img.onerror = null;
+      img.src = GENERIC_COVER;
+    };
+    img.src = url;
+  }
+}
+
+function applyVideoModeButtons() {
+  const hasClip = Boolean(youtubeCurrent?.found && youtubeCurrent?.video_id);
+  const videoOn = stageBgMode === "video" && hasClip && youtubeEmbedOk;
+  const coverOn = stageBgMode === "cover";
+  videoModeOnBtn?.classList.toggle("is-active", stageBgMode === "video");
+  videoModeCoverBtn?.classList.toggle("is-active", stageBgMode === "cover");
+  videoModeOffBtn?.classList.toggle("is-active", stageBgMode === "stage");
+  videoModeOnBtn?.setAttribute("aria-pressed", stageBgMode === "video" ? "true" : "false");
+  videoModeCoverBtn?.setAttribute("aria-pressed", stageBgMode === "cover" ? "true" : "false");
+  videoModeOffBtn?.setAttribute("aria-pressed", stageBgMode === "stage" ? "true" : "false");
+  if (videoModeOnBtn) {
+    videoModeOnBtn.disabled = !hasClip;
+    videoModeOnBtn.title = hasClip ? "" : "Encara no hi ha videoclip";
+  }
+  if (videoModeToggle) videoModeToggle.hidden = false;
+  viewStage?.classList.toggle("has-video", videoOn);
+  viewStage?.classList.toggle("has-cover", coverOn);
+  if (stageVideoEl) stageVideoEl.setAttribute("aria-hidden", videoOn ? "false" : "true");
+  if (stageCoverEl) stageCoverEl.setAttribute("aria-hidden", coverOn ? "false" : "true");
+  if (stageVideoDimEl) stageVideoDimEl.setAttribute("aria-hidden", videoOn || coverOn ? "false" : "true");
+}
+
+function setStageBgMode(mode) {
+  stageBgMode = mode === "cover" || mode === "stage" ? mode : "video";
+  localStorage.setItem(STAGE_BG_KEY, stageBgMode);
+  applyVideoModeButtons();
+  if (stageBgMode === "video" && youtubeCurrent?.video_id) {
+    const ids = youtubeCandidateIds(youtubeCurrent);
+    const tryNext = (index) => {
+      if (index >= ids.length) {
+        youtubeEmbedOk = false;
+        applyVideoModeButtons();
+        return;
+      }
+      ensureYoutubePlayer(ids[index])
+        .then(() => {
+          youtubeCurrent = { ...youtubeCurrent, video_id: ids[index] };
+          applyVideoModeButtons();
+          syncYoutubeToAudio();
+        })
+        .catch(() => tryNext(index + 1));
+    };
+    tryNext(0);
+  } else {
+    pauseYoutubePlayer();
+  }
+}
+
+function loadYoutubeApi() {
+  if (window.YT && window.YT.Player) return Promise.resolve();
+  if (youtubeApiPromise) return youtubeApiPromise;
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      youtubeApiPromise = null;
+      reject(new Error("YouTube API timeout"));
+    }, 12000);
+    const previous = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      clearTimeout(timer);
+      if (typeof previous === "function") previous();
+      resolve();
+    };
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+    script.onerror = () => {
+      clearTimeout(timer);
+      youtubeApiPromise = null;
+      reject(new Error("YouTube API"));
+    };
+    document.head.appendChild(script);
+  });
+  return youtubeApiPromise;
+}
+
+function youtubePlayerVars() {
+  return {
+    autoplay: 1,
+    cc_load_policy: 0,
+    controls: 0,
+    disablekb: 1,
+    enablejsapi: 1,
+    fs: 0,
+    iv_load_policy: 3,
+    modestbranding: 1,
+    mute: 1,
+    origin: window.location.origin,
+    playsinline: 1,
+    rel: 0,
+    widget_referrer: window.location.href,
+  };
+}
+
+function lockYoutubeReferrer(root) {
+  const nodes = root?.querySelectorAll?.("iframe") || [];
+  for (const el of nodes) {
+    // YouTube 153 if the embed request has no Referer. Keep this on the
+    // iframe *before* it navigates; YT.Player may clone the node.
+    el.setAttribute("referrerpolicy", "origin");
+    try {
+      el.referrerPolicy = "origin";
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function buildYoutubeIframe() {
+  const iframe = document.createElement("iframe");
+  iframe.id = "stageVideoHost";
+  iframe.title = "Videoclip";
+  iframe.setAttribute("referrerpolicy", "origin");
+  iframe.referrerPolicy = "origin";
+  iframe.setAttribute(
+    "allow",
+    "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+  );
+  iframe.setAttribute("allowfullscreen", "");
+  iframe.setAttribute("frameborder", "0");
+  return iframe;
+}
+
+function resetYoutubeHost() {
+  if (youtubePlayer) {
+    try {
+      youtubePlayer.destroy();
+    } catch {
+      /* ignore */
+    }
+    youtubePlayer = null;
+  }
+  youtubeWantedId = "";
+  youtubeEmbedOk = false;
+  const frame = stageVideoEl?.querySelector(".stage-video-frame");
+  if (!frame) return null;
+  frame.innerHTML = "";
+  const iframe = buildYoutubeIframe();
+  frame.appendChild(iframe);
+  lockYoutubeReferrer(frame);
+  return iframe;
+}
+
+function muteYoutubePlayer(target) {
+  const playerYt = target || youtubePlayer;
+  if (!playerYt) return;
+  try {
+    if (typeof playerYt.mute === "function") playerYt.mute();
+    if (typeof playerYt.setVolume === "function") playerYt.setVolume(0);
+  } catch {
+    /* ignore */
+  }
+}
+
+function pauseYoutubePlayer() {
+  if (!youtubePlayer || typeof youtubePlayer.pauseVideo !== "function") return;
+  try {
+    youtubePlayer.pauseVideo();
+  } catch {
+    /* ignore */
+  }
+}
+
+function teardownYoutubeBackdrop() {
+  youtubeToken += 1;
+  youtubeCurrent = null;
+  pauseYoutubePlayer();
+  resetYoutubeHost();
+  setVideoStatus("");
+  applyVideoModeButtons();
+}
+
+function youtubePlayerReady() {
+  return Boolean(
+    youtubePlayer &&
+      typeof youtubePlayer.getPlayerState === "function" &&
+      typeof youtubePlayer.seekTo === "function"
+  );
+}
+
+function syncYoutubeToAudio() {
+  if (stageBgMode !== "video" || !youtubeCurrent?.video_id || !youtubePlayerReady()) return;
+  muteYoutubePlayer();
+  const audioPlaying = !player.paused && !player.ended;
+  const t = Number(player.currentTime) || 0;
+  let ytTime = 0;
+  let state = -1;
+  try {
+    ytTime = Number(youtubePlayer.getCurrentTime()) || 0;
+    state = youtubePlayer.getPlayerState();
+  } catch {
+    return;
+  }
+  const YT = window.YT;
+  const playing = YT ? YT.PlayerState.PLAYING : 1;
+  const buffering = YT ? YT.PlayerState.BUFFERING : 3;
+  if (state !== buffering && Math.abs(ytTime - t) > YOUTUBE_DRIFT_SEC) {
+    try {
+      youtubePlayer.seekTo(t, true);
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    if (audioPlaying && state !== playing) youtubePlayer.playVideo();
+    else if (!audioPlaying && state === playing) youtubePlayer.pauseVideo();
+  } catch {
+    /* ignore */
+  }
+}
+
+function youtubeStatePlaying(state) {
+  const YT = window.YT;
+  const playing = YT ? YT.PlayerState.PLAYING : 1;
+  const buffering = YT ? YT.PlayerState.BUFFERING : 3;
+  return state === playing || state === buffering;
+}
+
+function createYoutubePlayer(videoId, host) {
+  return loadYoutubeApi().then(
+    () =>
+      new Promise((resolve, reject) => {
+        const iframe = resetYoutubeHost();
+        if (!iframe || !window.YT?.Player) {
+          reject(new Error("YouTube host"));
+          return;
+        }
+        youtubeWantedId = videoId;
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          youtubeEmbedOk = false;
+          reject(new Error("YouTube player timeout"));
+        }, 8000);
+        const finish = (err, player) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (err) {
+            youtubeEmbedOk = false;
+            reject(err);
+          } else {
+            youtubeEmbedOk = true;
+            resolve(player);
+          }
+        };
+        try {
+          const domain = host || "www.youtube.com";
+          youtubePlayer = new window.YT.Player(iframe, {
+            videoId,
+            host: `https://${domain}`,
+            playerVars: youtubePlayerVars(),
+            events: {
+              onReady: (event) => {
+                if (youtubeWantedId !== videoId) return;
+                lockYoutubeReferrer(stageVideoEl);
+                muteYoutubePlayer(event.target);
+                // onReady fires even with error 153 / "video no disponible".
+                // Only accept the embed once media actually buffers.
+                try {
+                  event.target.mute();
+                  event.target.playVideo();
+                } catch {
+                  /* ignore */
+                }
+              },
+              onStateChange: (event) => {
+                muteYoutubePlayer(event.target);
+                if (youtubeWantedId !== videoId) return;
+                if (youtubeStatePlaying(event.data)) finish(null, event.target);
+              },
+              onError: (event) => {
+                youtubeEmbedOk = false;
+                applyVideoModeButtons();
+                finish(new Error(`YouTube embed ${event?.data ?? ""}`.trim()));
+              },
+            },
+          });
+          lockYoutubeReferrer(stageVideoEl);
+        } catch (err) {
+          finish(err);
+        }
+      })
+  );
+}
+
+function ensureYoutubePlayer(videoId) {
+  if (!videoId) return Promise.reject(new Error("no video"));
+  if (youtubeWantedId === videoId && youtubePlayerReady() && youtubeEmbedOk) {
+    return Promise.resolve(youtubePlayer);
+  }
+  return createYoutubePlayer(videoId, "www.youtube.com").catch(() =>
+    createYoutubePlayer(videoId, "www.youtube-nocookie.com")
+  );
+}
+
+function youtubeCandidateIds(payload) {
+  const ids = [];
+  for (const value of [payload?.video_id, ...(payload?.candidates || [])]) {
+    const id = String(value || "").trim();
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+async function loadYoutubeBackdrop(trackId) {
+  const token = ++youtubeToken;
+  youtubeCurrent = null;
+  pauseYoutubePlayer();
+  resetYoutubeHost();
+  applyVideoModeButtons();
+  setVideoStatus("Cercant videoclip…");
+  try {
+    const payload = await api(`/api/youtube?track_id=${encodeURIComponent(trackId)}`);
+    if (token !== youtubeToken || currentId !== trackId) return;
+    const ids = youtubeCandidateIds(payload);
+    if (!payload?.found || !ids.length) {
+      youtubeCurrent = null;
+      applyVideoModeButtons();
+      setVideoStatus(
+        payload?.source === "error" || payload?.source === "unavailable"
+          ? "No s’ha pogut cercar el videoclip"
+          : "No s’ha trobat videoclip"
+      );
+      return;
+    }
+    youtubeCurrent = payload;
+    applyVideoModeButtons();
+    if (stageBgMode !== "video") {
+      setVideoStatus("Videoclip a punt · toca Vídeo per mostrar-lo");
+      return;
+    }
+    let loaded = false;
+    for (const videoId of ids) {
+      if (token !== youtubeToken || currentId !== trackId) return;
+      try {
+        await ensureYoutubePlayer(videoId);
+        if (token !== youtubeToken || currentId !== trackId) return;
+        youtubeCurrent = { ...payload, video_id: videoId };
+        loaded = true;
+        break;
+      } catch {
+        /* try next candidate / host */
+      }
+    }
+    if (!loaded) {
+      youtubeEmbedOk = false;
+      setVideoStatus("Videoclip trobat, però YouTube no l’ha pogut mostrar");
+      applyVideoModeButtons();
+      return;
+    }
+    applyVideoModeButtons();
+    syncYoutubeToAudio();
+    setVideoStatus("");
+  } catch {
+    if (token !== youtubeToken || currentId !== trackId) return;
+    youtubeCurrent = null;
+    applyVideoModeButtons();
+    setVideoStatus("No s’ha pogut cercar el videoclip");
+  }
+}
+
 function applyStemsAvailability(data) {
   stemsAvailable = !!data.stems_available;
   applyAudioModeButtons();
+  applyYoutubeBulkAvailability(data);
   if (!generateStemsBtn) return;
   const bulk = data.stems || {};
   if (!stemsAvailable) {
@@ -504,6 +923,134 @@ function pollStemsBulk() {
       if (generateStemsBtn) generateStemsBtn.disabled = false;
     }
   }, 2000);
+}
+
+function youtubeBulkLabel(state) {
+  const done = state.done || 0;
+  const total = state.total || 0;
+  const found = state.found || 0;
+  const skipped = state.skipped || 0;
+  const missed = state.missed || 0;
+  const errors = state.errors || 0;
+  const overwrite = state.scope === "all";
+  const current = state.current ? ` · ${state.current}` : "";
+  if (state.running) {
+    const verb = overwrite ? "Tornant a cercar-ho tot" : "Cercant videoclips";
+    return `${verb}… ${done}/${total}${current}`;
+  }
+  if (!total && skipped) {
+    return `Totes les cançons ja tenen videoclip · ${skipped} omeses`;
+  }
+  if (!total) {
+    return "No hi ha cançons per cercar";
+  }
+  const bits = overwrite
+    ? [`${found} clips · ${done}/${total}`]
+    : [`${found} clips nous · ${done}/${total}`];
+  if (skipped) bits.push(`${skipped} ja en tenien`);
+  if (missed) bits.push(`${missed} sense vídeo`);
+  if (errors) bits.push(`${errors} amb error`);
+  return bits.join(" · ");
+}
+
+function setYoutubeSearchButtonsDisabled(disabled) {
+  if (searchYoutubeMissingBtn) searchYoutubeMissingBtn.disabled = disabled;
+  if (searchYoutubeAllBtn) searchYoutubeAllBtn.disabled = disabled;
+}
+
+function applyYoutubeBulkAvailability(data) {
+  const bulk = data.youtube || {};
+  const available = bulk.available !== false;
+  if (!searchYoutubeMissingBtn && !searchYoutubeAllBtn) return;
+  if (!available) {
+    setYoutubeSearchButtonsDisabled(true);
+    setSettingsStatus(
+      youtubeSettingsStatus,
+      "Cerca de videoclips no disponible",
+      "error"
+    );
+    return;
+  }
+  if (bulk.running) {
+    setYoutubeSearchButtonsDisabled(true);
+    pollYoutubeBulk();
+    setSettingsStatus(youtubeSettingsStatus, youtubeBulkLabel(bulk), "running");
+    return;
+  }
+  setYoutubeSearchButtonsDisabled(!data.root || !(data.total || playableTracks.length));
+}
+
+function startYoutubeSearch(scope) {
+  if (!searchYoutubeMissingBtn && !searchYoutubeAllBtn) return;
+  if (scope === "all") {
+    const ok = window.confirm(
+      "Això tornarà a cercar el videoclip de TOTES les cançons i substituirà els que ja tens desats. Continuar?"
+    );
+    if (!ok) return;
+  }
+  setYoutubeSearchButtonsDisabled(true);
+  const enqueue =
+    scope === "all"
+      ? "Encuant la recerca de tots els videoclips…"
+      : "Encuant la cerca de videoclips…";
+  setSettingsStatus(youtubeSettingsStatus, enqueue, "running");
+  api("/api/library/youtube/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  })
+    .then((res) => {
+      if (!res.running && !(res.total || 0)) {
+        setSettingsStatus(youtubeSettingsStatus, youtubeBulkLabel(res), "ok");
+        if (lastLibraryData) {
+          lastLibraryData.youtube = { ...(lastLibraryData.youtube || {}), ...res };
+          applyYoutubeBulkAvailability(lastLibraryData);
+        } else {
+          setYoutubeSearchButtonsDisabled(false);
+        }
+        return;
+      }
+      pollYoutubeBulk();
+    })
+    .catch((err) => {
+      setSettingsStatus(
+        youtubeSettingsStatus,
+        err.message || "Error en cercar videoclips",
+        "error"
+      );
+      setYoutubeSearchButtonsDisabled(false);
+    });
+}
+
+function pollYoutubeBulk() {
+  if (youtubeBulkTimer) return;
+  youtubeBulkTimer = setInterval(async () => {
+    try {
+      const state = await api("/api/library/youtube");
+      if (state.running) {
+        setSettingsStatus(youtubeSettingsStatus, youtubeBulkLabel(state), "running");
+        if (lastLibraryData) {
+          lastLibraryData.youtube = state;
+          refreshLibraryMetaLabel();
+        }
+        return;
+      }
+      clearInterval(youtubeBulkTimer);
+      youtubeBulkTimer = 0;
+      setYoutubeSearchButtonsDisabled(false);
+      const errors = state.errors || 0;
+      setSettingsStatus(
+        youtubeSettingsStatus,
+        youtubeBulkLabel(state),
+        errors ? "error" : "ok"
+      );
+      loadLibrary().catch(() => {});
+    } catch {
+      clearInterval(youtubeBulkTimer);
+      youtubeBulkTimer = 0;
+      setYoutubeSearchButtonsDisabled(false);
+    }
+  }, 1500);
 }
 
 function applyAudioMute() {
@@ -1039,8 +1586,7 @@ function setBrowseMode(mode, { rerender = true } = {}) {
 
 function coverImageFor(track) {
   const img = document.createElement("img");
-  const bust = coverBust ? `?t=${coverBust}` : "";
-  img.src = `/api/cover/${encodeURI(track.id)}${bust}`;
+  img.src = coverUrlFor(track.id);
   img.alt = "";
   img.draggable = false;
   img.loading = "lazy";
@@ -1054,6 +1600,7 @@ function coverImageFor(track) {
 function refreshCoverImages() {
   coverBust = Date.now();
   renderSongs(searchEl.value, { play: false });
+  if (currentId) setStageCover(currentId);
 }
 
 function alignBadgeFor(track) {
@@ -2128,6 +2675,11 @@ function syncKaraoke() {
 function tick() {
   if (!player.paused && !player.ended) {
     syncKaraoke();
+    const now = performance.now();
+    if (now - lastYoutubeSync > 400) {
+      lastYoutubeSync = now;
+      syncYoutubeToAudio();
+    }
   }
   rafId = requestAnimationFrame(tick);
 }
@@ -2166,6 +2718,11 @@ function refreshLibraryMetaLabel() {
     const done = coversResync.done || 0;
     const coverTotal = coversResync.total || 0;
     libraryMeta.textContent = `Resincronitzant portades… ${done}/${coverTotal}`;
+    return;
+  }
+  const youtubeBulk = data.youtube || {};
+  if (youtubeBulk.running) {
+    libraryMeta.textContent = youtubeBulkLabel(youtubeBulk);
     return;
   }
   if (!data.root) {
@@ -2491,6 +3048,7 @@ async function openSong(trackId) {
   stopStemPoll();
   currentId = trackId;
   showStage();
+  setStageCover(trackId);
   songTitle.textContent = track.title;
   songArtist.textContent = track.artist || "Artista desconegut";
   // Fall back to the original mix while the instrumental is still cooking.
@@ -2498,6 +3056,7 @@ async function openSong(trackId) {
   const useInstrumental = wantsInstrumental && !!track.has_instrumental;
   player.src = audioUrlFor(trackId, useInstrumental ? "instrumental" : "original");
   applyAudioModeButtons();
+  loadYoutubeBackdrop(trackId);
   setStemStatus("");
   if (wantsInstrumental && !useInstrumental) requestInstrumental(trackId);
   lyricsStatus.textContent = "Obtenint la lletra…";
@@ -2601,6 +3160,10 @@ resyncCoverBtn.addEventListener("click", () => {
     });
 });
 backBtn.addEventListener("click", showMenu);
+document.querySelector(".stage-dock-layer")?.addEventListener("mouseleave", () => {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && viewStage?.contains(active)) active.blur();
+});
 searchEl.addEventListener("input", () => {
   selectedIndex = 0;
   renderSongs(searchEl.value);
@@ -2681,6 +3244,7 @@ function selectedCacheScopes() {
   if (cacheScopeAligned?.checked) scopes.push("aligned");
   if (cacheScopeStems?.checked) scopes.push("stems");
   if (cacheScopeCover?.checked) scopes.push("cover");
+  if (cacheScopeYoutube?.checked) scopes.push("youtube");
   return scopes;
 }
 
@@ -2697,6 +3261,7 @@ function renderCacheFlags(cache) {
     ["Instrumental", cache.instrumental],
     ["Veu", cache.vocals],
     ["Portada", cache.cover],
+    ["Videoclip", cache.youtube],
   ];
   cacheFlags.hidden = false;
   cacheFlags.innerHTML = "";
@@ -3040,13 +3605,19 @@ lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
 lyricsLayoutDualBtn?.addEventListener("click", () => setLyricsLayout("dual"));
 audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
 audioModeInstrumentalBtn?.addEventListener("click", () => setAudioMode("instrumental"));
+videoModeOnBtn?.addEventListener("click", () => setStageBgMode("video"));
+videoModeCoverBtn?.addEventListener("click", () => setStageBgMode("cover"));
+videoModeOffBtn?.addEventListener("click", () => setStageBgMode("stage"));
 generateStemsBtn?.addEventListener("click", () => startStemsGeneration());
+searchYoutubeMissingBtn?.addEventListener("click", () => startYoutubeSearch("missing"));
+searchYoutubeAllBtn?.addEventListener("click", () => startYoutubeSearch("all"));
 albumBackBtn?.addEventListener("click", () => closeAlbum());
 applyLyricsFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
 applyLyricsLayout();
 applyAudioModeButtons();
+applyVideoModeButtons();
 
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
@@ -3126,14 +3697,20 @@ playBtn.addEventListener("click", () => {
 player.addEventListener("play", () => {
   startTicker();
   updatePlayButton();
+  syncYoutubeToAudio();
 });
 player.addEventListener("playing", () => {
   startTicker();
   updatePlayButton();
+  syncYoutubeToAudio();
 });
 player.addEventListener("pause", () => {
   syncKaraoke();
   updatePlayButton();
+  syncYoutubeToAudio();
+});
+player.addEventListener("seeked", () => {
+  syncYoutubeToAudio();
 });
 player.addEventListener("ended", () => {
   syncWordFills(Number.POSITIVE_INFINITY);

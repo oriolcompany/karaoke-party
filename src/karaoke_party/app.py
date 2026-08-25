@@ -71,6 +71,7 @@ from .stems import (
     separate_track,
     separation_available,
 )
+from .track_cache import CACHE_SCOPES as _CACHE_SCOPES
 
 
 log = logging.getLogger("karaoke_party")
@@ -149,6 +150,20 @@ _stem_bulk_state: dict = {
     "current": "",
     "error": "",
 }
+_youtube_bulk_lock = threading.Lock()
+_youtube_bulk_state: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "found": 0,
+    "skipped": 0,
+    "missed": 0,
+    "errors": 0,
+    "current": "",
+    "error": "",
+    "scope": "missing",
+}
+_youtube_bulk_thread: threading.Thread | None = None
 
 
 class SetRootBody(BaseModel):
@@ -174,6 +189,12 @@ class ResyncLyricsBody(BaseModel):
     scope: str = "all"
 
 
+class YoutubeSearchBody(BaseModel):
+    """scope: missing = only songs without a clip; all = overwrite every track."""
+
+    scope: str = "missing"
+
+
 class StemsBody(BaseModel):
     track_id: str
 
@@ -183,9 +204,6 @@ class TrackCacheBody(BaseModel):
     # Empty = every song-related cache bucket.
     scopes: list[str] | None = None
     language: str = "ca"
-
-
-_CACHE_SCOPES = frozenset({"lyrics", "aligned", "stems", "cover"})
 
 
 def _normalize_cache_scopes(scopes: list[str] | None) -> set[str]:
@@ -206,12 +224,14 @@ def _normalize_cache_scopes(scopes: list[str] | None) -> set[str]:
 def _track_cache_status(track: TrackInfo) -> dict:
     from .track_cache import aligned_path as aligned_file_path
     from .track_cache import track_status
+    from .youtube import load_cached as load_youtube_cached
 
     key = cache_key(track.artist, track.title, track.duration)
     root = cache_dir()
     files = track_status(root, key)
     lyrics = load_cached(root, key)
     aligned = load_aligned_cached(root, key)
+    youtube = load_youtube_cached(root, key)
     return {
         "track_id": track.id,
         "title": track.title,
@@ -225,6 +245,7 @@ def _track_cache_status(track: TrackInfo) -> dict:
         "instrumental": files["instrumental"],
         "vocals": files["vocals"],
         "cover": files["cover"],
+        "youtube": bool(youtube and youtube.get("found") and youtube.get("video_id")),
         "whisper_aligned": aligned is not None,
     }
 
@@ -648,6 +669,12 @@ def _library_snapshot() -> dict:
     with _stem_lock:
         stems_state = dict(_stem_bulk_state)
         stems_state["queued"] = len(_stem_queue)
+    with _youtube_bulk_lock:
+        youtube_state = dict(_youtube_bulk_state)
+    from .youtube import search_available as youtube_search_available
+    from .youtube import youtube_enabled
+
+    youtube_state["available"] = youtube_search_available() and youtube_enabled()
     return {
         "root": str(_music_root),
         "tracks": playable,
@@ -662,6 +689,7 @@ def _library_snapshot() -> dict:
         "covers_resync": covers_resync,
         "stems": stems_state,
         "stems_available": separation_available(),
+        "youtube": youtube_state,
     }
 
 
@@ -1094,7 +1122,7 @@ def _clear_cache_tree(path: Path) -> int:
 
 @app.post("/api/cache/clear-all")
 def clear_all_cache(body: TrackCacheBody | None = None) -> dict:
-    """Wipe lyrics / Whisper / stems / cover caches for the whole library."""
+    """Wipe lyrics / Whisper / stems / cover / YouTube caches for the whole library."""
     from .track_cache import clear_all_tracks
 
     scopes = _normalize_cache_scopes(body.scopes if body else None)
@@ -1372,6 +1400,170 @@ async def lyrics(track_id: str = Query(...)):
     return _lyrics_response(track, track_id, payload, aligned=False)
 
 
+@app.get("/api/youtube")
+async def youtube_clip(track_id: str = Query(...)):
+    """Muted stage-background clip id for this song (cached per track)."""
+    from .youtube import resolve_youtube_clip
+
+    track = _resolve_track(track_id)
+    return await asyncio.to_thread(
+        resolve_youtube_clip,
+        path=Path(track.path),
+        artist=track.artist,
+        title=track.title,
+        duration=track.duration,
+        album=track.album,
+        cache_dir=cache_dir(),
+    )
+
+
+def _youtube_bulk_payload() -> dict:
+    with _youtube_bulk_lock:
+        return dict(_youtube_bulk_state)
+
+
+def _run_youtube_bulk(track_ids: list[str]) -> None:
+    from .youtube import resolve_youtube_clip
+
+    root = cache_dir()
+    try:
+        for track_id in track_ids:
+            track = _tracks.get(track_id)
+            if track is None:
+                with _youtube_bulk_lock:
+                    _youtube_bulk_state["done"] += 1
+                    _youtube_bulk_state["missed"] += 1
+                continue
+            label = f"{track.artist or 'Desconegut'} — {track.title or track.id}"
+            with _youtube_bulk_lock:
+                _youtube_bulk_state["current"] = label
+            try:
+                payload = resolve_youtube_clip(
+                    path=Path(track.path),
+                    artist=track.artist,
+                    title=track.title,
+                    duration=track.duration,
+                    album=track.album,
+                    cache_dir=root,
+                    force=True,
+                )
+            except Exception as exc:
+                log.exception("YouTube bulk failed for %s", label)
+                with _youtube_bulk_lock:
+                    _youtube_bulk_state["done"] += 1
+                    _youtube_bulk_state["errors"] += 1
+                    _youtube_bulk_state["error"] = str(exc)
+                continue
+            with _youtube_bulk_lock:
+                _youtube_bulk_state["done"] += 1
+                if payload.get("found") and payload.get("video_id"):
+                    _youtube_bulk_state["found"] += 1
+                elif payload.get("source") in {"error", "unavailable"}:
+                    _youtube_bulk_state["errors"] += 1
+                    _youtube_bulk_state["error"] = str(payload.get("source") or "error")
+                else:
+                    _youtube_bulk_state["missed"] += 1
+    finally:
+        with _youtube_bulk_lock:
+            _youtube_bulk_state["running"] = False
+            _youtube_bulk_state["current"] = ""
+
+
+@app.post("/api/library/youtube/search")
+def search_library_youtube(body: YoutubeSearchBody | None = None) -> dict:
+    """Search YouTube clips one by one.
+
+    scope=missing: skip songs that already have a cached hit.
+    scope=all: re-search every track and overwrite cached clips.
+    """
+    global _youtube_bulk_thread
+    from .youtube import has_youtube_hit, search_available, youtube_enabled
+
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta de música seleccionada")
+    if not youtube_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Cerca de videoclips desactivada (KARAOKE_YOUTUBE=0)",
+        )
+    if not search_available():
+        raise HTTPException(status_code=400, detail="Falta yt-dlp · pip install -e .")
+    if not _tracks:
+        _reload_library(_music_root, reset_probe=False)
+
+    scope = (body.scope if body else "missing") or "missing"
+    if scope not in {"all", "missing"}:
+        raise HTTPException(status_code=400, detail="scope ha de ser 'all' o 'missing'")
+
+    with _youtube_bulk_lock:
+        if _youtube_bulk_state["running"]:
+            return dict(_youtube_bulk_state)
+        if _youtube_bulk_thread is not None and _youtube_bulk_thread.is_alive():
+            return dict(_youtube_bulk_state)
+
+    root = cache_dir()
+    pending: list[TrackInfo] = []
+    skipped = 0
+    for track in sorted(_tracks.values(), key=_sort_key):
+        if scope == "missing" and has_youtube_hit(
+            root, track.artist, track.title, track.duration
+        ):
+            skipped += 1
+            continue
+        pending.append(track)
+
+    if not pending:
+        return {
+            "running": False,
+            "queued": 0,
+            "done": 0,
+            "total": 0,
+            "found": 0,
+            "skipped": skipped,
+            "missed": 0,
+            "errors": 0,
+            "current": "",
+            "error": "",
+            "scope": scope,
+        }
+
+    with _youtube_bulk_lock:
+        _youtube_bulk_state.update(
+            {
+                "running": True,
+                "done": 0,
+                "total": len(pending),
+                "found": 0,
+                "skipped": skipped,
+                "missed": 0,
+                "errors": 0,
+                "current": "",
+                "error": "",
+                "scope": scope,
+            }
+        )
+        thread = threading.Thread(
+            target=_run_youtube_bulk,
+            args=([track.id for track in pending],),
+            daemon=True,
+            name="youtube-bulk",
+        )
+        _youtube_bulk_thread = thread
+        state = dict(_youtube_bulk_state)
+        state["queued"] = len(pending)
+    thread.start()
+    return state
+
+
+@app.get("/api/library/youtube")
+def library_youtube_state() -> dict:
+    from .youtube import search_available, youtube_enabled
+
+    state = _youtube_bulk_payload()
+    state["available"] = search_available() and youtube_enabled()
+    return state
+
+
 @app.post("/api/align")
 def start_align(body: AlignBody) -> dict:
     track = _resolve_track(body.track_id)
@@ -1437,6 +1629,9 @@ async def _no_store_for_ui(request, call_next):
     path = request.url.path
     if path.endswith((".js", ".css", ".html")) or path == "/":
         response.headers["Cache-Control"] = "no-store, max-age=0"
+    # HTTP localhost → HTTPS YouTube. strict-origin-when-cross-origin omits
+    # Referer on that hop, and the embed then shows "video no disponible" (153).
+    response.headers["Referrer-Policy"] = "origin"
     return response
 
 

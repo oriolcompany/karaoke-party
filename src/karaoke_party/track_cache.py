@@ -7,6 +7,7 @@ One folder holds everything for a song so export/import is a single copy:
 - ``aligned.json`` — Whisper word timings
 - ``instrumental.mp3`` / ``vocals.mp3`` — stem separation
 - ``cover.<ext>`` — artwork bytes
+- ``youtube.json`` — YouTube clip id for the stage background
 """
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ ALIGNED_NAME = "aligned.json"
 INSTRUMENTAL_NAME = "instrumental.mp3"
 VOCALS_NAME = "vocals.mp3"
 COVER_PREFIX = "cover"
+YOUTUBE_NAME = "youtube.json"
 
-CACHE_SCOPES = frozenset({"lyrics", "aligned", "stems", "cover"})
+CACHE_SCOPES = frozenset({"lyrics", "aligned", "stems", "cover", "youtube"})
 
 
 def tracks_cache_dir() -> Path:
@@ -67,6 +69,10 @@ def instrumental_path(tracks_root: Path, key: str) -> Path:
 
 def vocals_path(tracks_root: Path, key: str) -> Path:
     return track_dir(tracks_root, key) / VOCALS_NAME
+
+
+def youtube_path(tracks_root: Path, key: str) -> Path:
+    return track_dir(tracks_root, key) / YOUTUBE_NAME
 
 
 def find_cover_path(tracks_root: Path, key: str) -> Path | None:
@@ -136,6 +142,7 @@ def track_status(tracks_root: Path, key: str) -> dict[str, Any]:
     instrumental = instrumental_path(tracks_root, key)
     vocals = vocals_path(tracks_root, key)
     cover = find_cover_path(tracks_root, key)
+    youtube = youtube_path(tracks_root, key)
     meta = read_meta(tracks_root, key) or {}
     return {
         "key": key,
@@ -146,6 +153,7 @@ def track_status(tracks_root: Path, key: str) -> dict[str, Any]:
         "instrumental": instrumental.is_file() and instrumental.stat().st_size > 0,
         "vocals": vocals.is_file() and vocals.stat().st_size > 0,
         "cover": cover is not None and cover.is_file(),
+        "youtube": youtube.is_file() and youtube.stat().st_size > 0,
     }
 
 
@@ -160,7 +168,7 @@ def _unlink(path: Path) -> int:
 
 
 def clear_track_files(tracks_root: Path, key: str, scopes: set[str]) -> dict[str, int]:
-    removed = {"lyrics": 0, "aligned": 0, "stems": 0, "cover": 0}
+    removed = {"lyrics": 0, "aligned": 0, "stems": 0, "cover": 0, "youtube": 0}
     if "lyrics" in scopes:
         removed["lyrics"] = _unlink(lyrics_path(tracks_root, key))
     if "aligned" in scopes:
@@ -172,6 +180,8 @@ def clear_track_files(tracks_root: Path, key: str, scopes: set[str]) -> dict[str
     if "cover" in scopes:
         cover = find_cover_path(tracks_root, key)
         removed["cover"] = _unlink(cover) if cover else 0
+    if "youtube" in scopes:
+        removed["youtube"] = _unlink(youtube_path(tracks_root, key))
 
     folder = track_dir(tracks_root, key)
     if folder.is_dir() and not any(folder.iterdir()):
@@ -183,7 +193,7 @@ def clear_track_files(tracks_root: Path, key: str, scopes: set[str]) -> dict[str
 
 
 def clear_all_tracks(tracks_root: Path, scopes: set[str]) -> dict[str, int]:
-    removed = {"lyrics": 0, "aligned": 0, "stems": 0, "cover": 0}
+    removed = {"lyrics": 0, "aligned": 0, "stems": 0, "cover": 0, "youtube": 0}
     root = Path(tracks_root)
     if not root.is_dir():
         return removed
