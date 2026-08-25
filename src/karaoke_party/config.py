@@ -7,10 +7,45 @@ DEFAULT_PORT = 8765
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".ogg", ".wav", ".opus"}
 
 
+def last_music_root_file() -> Path:
+    return app_cache_root() / "music-root.txt"
+
+
+def load_last_music_root() -> Path | None:
+    """Last folder the user loaded, if it still exists on disk."""
+    try:
+        text = last_music_root_file().read_text(encoding="utf-8").strip().strip('"')
+    except OSError:
+        return None
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    try:
+        if candidate.is_dir():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def save_last_music_root(root: Path) -> None:
+    """Remember the music folder so the next launch can reopen it."""
+    try:
+        resolved = root.expanduser().resolve()
+        if not resolved.is_dir():
+            return
+        last_music_root_file().write_text(str(resolved), encoding="utf-8")
+    except OSError:
+        return
+
+
 def default_music_root() -> Path | None:
     env = os.environ.get("KARAOKE_MUSIC_ROOT", "").strip()
     if env:
         return Path(env)
+    cached = load_last_music_root()
+    if cached is not None:
+        return cached
     candidates = [
         Path(r"C:\Users\orico\Documents\Songs"),
         Path(r"C:\Users\orico\Documents\GitHub\local-youtube-downloader")

@@ -155,6 +155,7 @@ let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
 let lyricLines = [];
+let lyricsAligned = false;
 let activeLineIndex = -1;
 let wordNodes = [];
 let lineSwapTimer = null;
@@ -510,7 +511,7 @@ function applyAudioMute() {
   muteOnBtn?.classList.toggle("is-active", audioMuted);
   muteOffBtn?.setAttribute("aria-pressed", audioMuted ? "false" : "true");
   muteOnBtn?.setAttribute("aria-pressed", audioMuted ? "true" : "false");
-  if (player) player.muted = audioMuted;
+  if (player) player.muted = false;
   previewPlayers.forEach((el) => {
     el.muted = audioMuted;
   });
@@ -1409,8 +1410,11 @@ async function processSyncQueue() {
     updatePrimaryAction();
     updateSyncQueueMeta();
     try {
-      await runQueuedAlign(trackId);
+      const job = await runQueuedAlign(trackId);
       markTrackAligned(trackId);
+      if (currentId === trackId && job?.lines) {
+        applyAlignedLyrics(job);
+      }
       syncCompleted += 1;
     } catch (err) {
       syncLastError = err.message || "Error de sincronització";
@@ -1663,6 +1667,7 @@ function applyAlignedLyrics(payload) {
   renderLyrics(payload);
   lyricsStatus.textContent = `Alineat per paraules · ${payload.source || "whisper-align"}`;
   if (currentId) markTrackAligned(currentId);
+  syncKaraoke();
 }
 
 async function pollAlignJob(jobId, trackId, token) {
@@ -1741,6 +1746,7 @@ async function startAlignment(trackId) {
 function showStage() {
   clearStageOutro();
   stopPreview();
+  if (player) player.muted = false;
   viewTitle?.classList.add("hidden");
   viewMenu.classList.add("hidden");
   viewStage.classList.remove("hidden");
@@ -1838,6 +1844,7 @@ function setSlotRole(slotEl, role) {
 }
 
 function markSlotSung(slotEl) {
+  if (!lyricsAligned) return;
   slotEl.querySelectorAll(".k-word").forEach((el) => {
     el.classList.add("done");
     el.classList.remove("active");
@@ -2029,10 +2036,16 @@ function showLyricsLayout(index, animate) {
   }
 }
 
+function setLyricsAligned(aligned) {
+  lyricsAligned = Boolean(aligned);
+  lyricsEl?.classList.toggle("is-aligned", lyricsAligned);
+}
+
 function renderLyrics(payload) {
   lyricLines = payload.lines || [];
   activeLineIndex = -1;
   wordNodes = [];
+  setLyricsAligned(payload.aligned);
   applyLyricsLayout();
 
   if (!lyricLines.length) {
@@ -2061,6 +2074,7 @@ function setActiveLine(index) {
 }
 
 function syncWordFills(t) {
+  if (!lyricsAligned) return;
   for (const word of wordNodes) {
     if (t >= word.end) {
       word.el.classList.add("done");
@@ -2384,14 +2398,21 @@ async function bootTitleScreen() {
   setTitleStatus("Connectant…", "running");
   try {
     const health = await api("/api/health");
-    if (health.music_root && titleRootInput && !titleRootInput.value) {
-      titleRootInput.value = health.music_root;
+    if (health.music_root) {
+      if (titleRootInput) titleRootInput.value = health.music_root;
+      if (rootInput) rootInput.value = health.music_root;
     }
-    if (health.music_root && rootInput && !rootInput.value) {
-      rootInput.value = health.music_root;
+    refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
+    if (health.music_root) {
+      setTitleStatus("Carregant la biblioteca…", "running");
+      await loadLibrary({
+        onProgress: (msg) => setTitleStatus(msg, "running"),
+      });
+      setTitleStatus("");
+      showMenu();
+      return;
     }
     setTitleStatus("");
-    refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
   } catch (err) {
     setTitleStatus(err.message || "No s’ha pogut contactar amb l’API", "error");
   }

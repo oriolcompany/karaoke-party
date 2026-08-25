@@ -1838,7 +1838,7 @@ button:hover {
 .karaoke-board.is-dual .k-slot-next .k-word,
 .karaoke-board.is-dual .k-slot.is-active .k-word,
 .karaoke-board.is-dual .k-slot.is-idle .k-word {
-  color: rgba(255, 246, 234, 0.28);
+  color: var(--ink);
 }
 
 /* Bottom slot must be able to illuminate — override stack-mode hide. */
@@ -1882,7 +1882,7 @@ button:hover {
   position: relative;
   display: inline-block;
   margin: 0 0.16em 0.1em 0;
-  color: rgba(255, 246, 234, 0.22);
+  color: var(--ink);
   transition: transform 0.12s ease, filter 0.12s ease;
   vertical-align: baseline;
 }
@@ -1894,7 +1894,7 @@ button:hover {
 }
 
 .k-slot-current .k-word {
-  color: rgba(255, 246, 234, 0.24);
+  color: var(--ink);
 }
 
 .k-slot-next .k-word {
@@ -1915,6 +1915,19 @@ button:hover {
     0 0 36px rgba(255, 45, 106, 0.55),
     0 2px 0 rgba(0, 0, 0, 0.35);
   will-change: width;
+}
+
+/* Approximate LRC timings must not gold-fill until Whisper alignment is ready. */
+.karaoke-board:not(.is-aligned) .k-word-fill,
+.karaoke-board.is-dual:not(.is-aligned) .k-slot-next .k-word-fill {
+  display: none;
+}
+
+.karaoke-board:not(.is-aligned) .k-word.active,
+.karaoke-board:not(.is-aligned) .k-word.done {
+  color: var(--ink);
+  transform: none;
+  filter: none;
 }
 
 .k-slot-next .k-word-fill {

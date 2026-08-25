@@ -32,6 +32,7 @@ from .config import (
     app_cache_root,
     cache_dir,
     default_music_root,
+    save_last_music_root,
     stems_cache_dir,
 )
 from .deps import check_dependencies, require_dependencies
@@ -275,6 +276,8 @@ def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[Trac
     old_root = _music_root.resolve() if _music_root is not None else None
     root_changed = old_root is None or new_root != old_root
     _music_root = new_root
+    if new_root.is_dir():
+        save_last_music_root(new_root)
     tracks = scan_library(new_root)
     _tracks = {track.id: track for track in tracks}
     if reset_probe if reset_probe is not None else root_changed:
