@@ -23,6 +23,7 @@ if errorlevel 1 (
 
 pyinstaller --noconfirm --clean --onefile --console ^
   --name KaraokeParty ^
+  --icon web/icon.ico ^
   --paths src ^
   --add-data "web;web" ^
   --hidden-import uvicorn.logging ^

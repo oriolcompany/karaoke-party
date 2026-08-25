@@ -3,6 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 title Karaoke Party
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\make_shortcut.ps1" -RepoRoot "%~dp0." -Target "%~f0" >nul 2>&1
 echo.
 echo  Karaoke Party
 echo  =============

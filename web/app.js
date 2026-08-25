@@ -1,6 +1,9 @@
+const viewLanding = document.getElementById("view-landing");
 const viewTitle = document.getElementById("view-title");
 const viewMenu = document.getElementById("view-menu");
 const viewStage = document.getElementById("view-stage");
+const landingEnterBtn = document.getElementById("landingEnterBtn");
+const landingStatus = document.getElementById("landingStatus");
 const titleRootInput = document.getElementById("titleRootInput");
 const titleBrowseBtn = document.getElementById("titleBrowseBtn");
 const titleStartBtn = document.getElementById("titleStartBtn");
@@ -171,6 +174,9 @@ let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
 let audioMode = loadAudioMode();
 let stageBgMode = loadStageBgMode();
+let bootLibraryReady = false;
+let bootWork = Promise.resolve();
+let landingEntering = false;
 let stemsAvailable = false;
 let stemsJobTimer = 0;
 let stemsBulkTimer = 0;
@@ -252,8 +258,38 @@ function setTitleStatus(message, kind) {
   titleStatus.classList.toggle("is-running", kind === "running");
 }
 
+function setLandingStatus(message, kind) {
+  if (!landingStatus) return;
+  landingStatus.textContent = message || "";
+  landingStatus.classList.toggle("is-error", kind === "error");
+  landingStatus.classList.toggle("is-running", kind === "running");
+}
+
+function isLandingVisible() {
+  return Boolean(viewLanding && !viewLanding.classList.contains("hidden"));
+}
+
+function showLanding() {
+  clearStageOutro();
+  viewLanding?.classList.remove("hidden");
+  viewTitle?.classList.add("hidden");
+  viewMenu.classList.add("hidden");
+  viewStage.classList.add("hidden");
+  document.body.classList.add("mode-title");
+  document.body.classList.remove("mode-stage");
+  viewStage.classList.remove("is-live");
+  player.pause();
+  teardownYoutubeBackdrop();
+  stopTicker();
+  stopAlignPoll();
+  currentId = null;
+  updatePlayButton();
+  landingEnterBtn?.focus();
+}
+
 function showTitleScreen() {
   clearStageOutro();
+  viewLanding?.classList.add("hidden");
   viewTitle?.classList.remove("hidden");
   viewMenu.classList.add("hidden");
   viewStage.classList.add("hidden");
@@ -271,6 +307,7 @@ function showTitleScreen() {
 
 function showMenu() {
   clearStageOutro();
+  viewLanding?.classList.add("hidden");
   viewTitle?.classList.add("hidden");
   viewMenu.classList.remove("hidden");
   viewStage.classList.add("hidden");
@@ -372,19 +409,27 @@ function setStageCover(trackId) {
   }
 }
 
+function youtubeVideoReady() {
+  return Boolean(youtubeCurrent?.found && youtubeCurrent?.video_id && youtubeEmbedOk);
+}
+
 function applyVideoModeButtons() {
-  const hasClip = Boolean(youtubeCurrent?.found && youtubeCurrent?.video_id);
-  const videoOn = stageBgMode === "video" && hasClip && youtubeEmbedOk;
+  const videoReady = youtubeVideoReady();
+  const videoOn = stageBgMode === "video" && videoReady;
   const coverOn = stageBgMode === "cover";
-  videoModeOnBtn?.classList.toggle("is-active", stageBgMode === "video");
+  videoModeOnBtn?.classList.toggle("is-active", videoOn);
   videoModeCoverBtn?.classList.toggle("is-active", stageBgMode === "cover");
   videoModeOffBtn?.classList.toggle("is-active", stageBgMode === "stage");
-  videoModeOnBtn?.setAttribute("aria-pressed", stageBgMode === "video" ? "true" : "false");
+  videoModeOnBtn?.setAttribute("aria-pressed", videoOn ? "true" : "false");
   videoModeCoverBtn?.setAttribute("aria-pressed", stageBgMode === "cover" ? "true" : "false");
   videoModeOffBtn?.setAttribute("aria-pressed", stageBgMode === "stage" ? "true" : "false");
   if (videoModeOnBtn) {
-    videoModeOnBtn.disabled = !hasClip;
-    videoModeOnBtn.title = hasClip ? "" : "Encara no hi ha videoclip";
+    videoModeOnBtn.disabled = !videoReady;
+    videoModeOnBtn.title = videoReady
+      ? ""
+      : youtubeCurrent?.found
+        ? "El videoclip encara s’està carregant"
+        : "Encara no hi ha videoclip";
   }
   if (videoModeToggle) videoModeToggle.hidden = false;
   viewStage?.classList.toggle("has-video", videoOn);
@@ -395,6 +440,7 @@ function applyVideoModeButtons() {
 }
 
 function setStageBgMode(mode) {
+  if (mode === "video" && !youtubeVideoReady()) return;
   stageBgMode = mode === "cover" || mode === "stage" ? mode : "video";
   localStorage.setItem(STAGE_BG_KEY, stageBgMode);
   applyVideoModeButtons();
@@ -700,10 +746,6 @@ async function loadYoutubeBackdrop(trackId) {
     }
     youtubeCurrent = payload;
     applyVideoModeButtons();
-    if (stageBgMode !== "video") {
-      setVideoStatus("Videoclip a punt · toca Vídeo per mostrar-lo");
-      return;
-    }
     let loaded = false;
     for (const videoId of ids) {
       if (token !== youtubeToken || currentId !== trackId) return;
@@ -724,7 +766,11 @@ async function loadYoutubeBackdrop(trackId) {
       return;
     }
     applyVideoModeButtons();
-    syncYoutubeToAudio();
+    if (stageBgMode === "video") {
+      syncYoutubeToAudio();
+    } else {
+      pauseYoutubePlayer();
+    }
     setVideoStatus("");
   } catch {
     if (token !== youtubeToken || currentId !== trackId) return;
@@ -1561,7 +1607,7 @@ function updateCoverMeta() {
     coverIndex.textContent = openedAlbum
       ? `${selectedIndex + 1}/${list.length} · ${item.artist || ""}`
       : `${selectedIndex + 1}/${list.length}`;
-    resyncCoverBtn.hidden = false;
+    resyncCoverBtn.hidden = true;
   }
   updatePrimaryAction();
 }
@@ -2294,6 +2340,7 @@ function showStage() {
   clearStageOutro();
   stopPreview();
   if (player) player.muted = false;
+  viewLanding?.classList.add("hidden");
   viewTitle?.classList.add("hidden");
   viewMenu.classList.add("hidden");
   viewStage.classList.remove("hidden");
@@ -2950,28 +2997,53 @@ async function enterLibraryFromTitle() {
   }
 }
 
-async function bootTitleScreen() {
-  showTitleScreen();
-  setTitleStatus("Connectant…", "running");
+function setLandingBusy(busy) {
+  if (!landingEnterBtn) return;
+  landingEnterBtn.classList.toggle("is-loading", busy);
+  landingEnterBtn.disabled = busy;
+  landingEnterBtn.setAttribute("aria-busy", busy ? "true" : "false");
+  if (busy) landingEnterBtn.setAttribute("aria-label", "Carregant");
+  else landingEnterBtn.removeAttribute("aria-label");
+}
+
+async function enterFromLanding() {
+  if (landingEntering) return;
+  landingEntering = true;
+  setLandingBusy(true);
   try {
+    await bootWork;
+    if (bootLibraryReady) {
+      showMenu();
+      return;
+    }
+    showTitleScreen();
+  } catch (err) {
+    setLandingStatus(err.message || "No s’ha pogut arrencar", "error");
+  } finally {
+    landingEntering = false;
+    setLandingBusy(false);
+  }
+}
+
+async function bootTitleScreen() {
+  showLanding();
+  bootLibraryReady = false;
+  bootWork = (async () => {
     const health = await api("/api/health");
     if (health.music_root) {
       if (titleRootInput) titleRootInput.value = health.music_root;
       if (rootInput) rootInput.value = health.music_root;
     }
     refreshWhisperStatus({ pollWhileLoading: true }).catch(() => {});
-    if (health.music_root) {
-      setTitleStatus("Carregant la biblioteca…", "running");
-      await loadLibrary({
-        onProgress: (msg) => setTitleStatus(msg, "running"),
-      });
-      setTitleStatus("");
-      showMenu();
-      return;
+    if (health.music_root && health.tracks > 0) {
+      await loadLibrary();
+      bootLibraryReady = true;
     }
-    setTitleStatus("");
+  })();
+  try {
+    await bootWork;
   } catch (err) {
-    setTitleStatus(err.message || "No s’ha pogut contactar amb l’API", "error");
+    setLandingStatus(err.message || "No s’ha pogut contactar amb l’API", "error");
   }
 }
 
@@ -3647,6 +3719,13 @@ window.addEventListener(
       closeAlbum();
       return;
     }
+    if (isLandingVisible()) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        enterFromLanding();
+      }
+      return;
+    }
     if (isSettingsOpen()) return;
     if (viewMenu.classList.contains("hidden")) return;
     if (!browseList().length) return;
@@ -3720,6 +3799,9 @@ player.addEventListener("ended", () => {
 titleStartForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   enterLibraryFromTitle();
+});
+landingEnterBtn?.addEventListener("click", () => {
+  enterFromLanding();
 });
 titleBrowseBtn?.addEventListener("click", () => {
   pickFolderInto(titleRootInput, { statusEl: "title" });

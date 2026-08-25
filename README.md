@@ -5,7 +5,7 @@ Local web karaoke: pick a folder of tagged MP3s, fetch synced lyrics from
 
 ## Quick start (Windows)
 
-Double-click:
+Double-click **Karaoke Party** on the Desktop (created on first launch, with the app icon), or:
 
 ```text
 KaraokeParty.bat

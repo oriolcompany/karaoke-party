@@ -5,13 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="origin" />
     <title>Karaoke Party</title>
+    <link rel="icon" href="/favicon.ico?v=4" sizes="any" />
+    <link rel="icon" type="image/png" href="/favicon.png?v=4" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=4" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=32" />
+    <link rel="stylesheet" href="/styles.css?v=37" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -20,8 +23,29 @@
       <div class="fx-scan"></div>
     </div>
 
+    <!-- Landing d’arrencada -->
+    <section id="view-landing" class="view view-landing" aria-labelledby="landingBrand">
+      <div class="landing-stage">
+        <img
+          class="landing-logo"
+          src="/favicon.png?v=4"
+          width="512"
+          height="512"
+          alt=""
+          draggable="false"
+        />
+        <p class="landing-kicker">Nit local</p>
+        <h1 id="landingBrand" class="landing-brand">Karaoke Party</h1>
+        <p class="landing-tagline">Puja a l’escenari.</p>
+        <button id="landingEnterBtn" class="title-start-btn landing-enter-btn" type="button">
+          Entrar
+        </button>
+        <p id="landingStatus" class="title-status landing-status" aria-live="polite"></p>
+      </div>
+    </section>
+
     <!-- Portada / title screen -->
-    <section id="view-title" class="view view-title" aria-labelledby="titleBrand">
+    <section id="view-title" class="view view-title hidden" aria-labelledby="titleBrand">
       <div class="title-stage">
         <p class="title-kicker">Nit local</p>
         <h1 id="titleBrand" class="title-brand">Karaoke Party</h1>
@@ -634,6 +658,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=44"></script>
+    <script src="/app.js?v=49"></script>
   </body>
 </html>

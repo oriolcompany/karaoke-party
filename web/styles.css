@@ -321,6 +321,133 @@ body.mode-title .fx-glow {
   }
 }
 
+/* ---------- Landing (boot) ---------- */
+.view-landing {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: clamp(1.5rem, 5vh, 3rem) clamp(1rem, 4vw, 2.5rem);
+  box-sizing: border-box;
+}
+
+.landing-stage {
+  width: min(42rem, 100%);
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: 0;
+}
+
+.landing-logo {
+  width: min(17.5rem, 52vw);
+  height: auto;
+  margin-bottom: clamp(1.8rem, 5vh, 2.8rem);
+  filter: drop-shadow(0 18px 36px rgba(255, 225, 74, 0.22));
+  animation: landing-logo-in 0.95s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.landing-kicker {
+  margin: 0 0 0.85rem;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  font-size: 0.82rem;
+  font-weight: 700;
+  opacity: 0;
+  animation: title-rise 0.7s ease-out 0.28s forwards;
+}
+
+.landing-brand {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(3.4rem, 13vw, 7rem);
+  line-height: 0.9;
+  letter-spacing: 0.02em;
+  opacity: 0;
+  animation: title-rise 0.85s ease-out 0.4s forwards;
+}
+
+.landing-tagline {
+  margin: 1.15rem 0 0;
+  color: var(--muted);
+  font-size: clamp(1.05rem, 2.5vw, 1.25rem);
+  font-weight: 600;
+  opacity: 0;
+  animation: title-rise 0.7s ease-out 0.52s forwards;
+}
+
+.landing-enter-btn {
+  margin-top: clamp(2.2rem, 6vh, 3.4rem);
+  position: relative;
+  opacity: 0;
+  animation:
+    title-rise 0.7s ease-out 0.7s forwards,
+    title-pulse 2.4s ease-in-out 1.6s infinite;
+}
+
+.landing-enter-btn.is-loading,
+.landing-enter-btn.is-loading:disabled {
+  color: transparent;
+  opacity: 1;
+  cursor: wait;
+  animation: none;
+  filter: none;
+}
+
+.landing-enter-btn.is-loading::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin: -0.675rem 0 0 -0.675rem;
+  border: 2.5px solid rgba(26, 6, 16, 0.22);
+  border-top-color: #1a0610;
+  border-radius: 50%;
+  animation: landing-spin 0.7s linear infinite;
+}
+
+.landing-status {
+  text-align: center;
+  justify-self: stretch;
+  margin-top: 1rem;
+}
+
+.landing-status:empty {
+  display: none;
+}
+
+@keyframes landing-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes landing-logo-in {
+  from {
+    opacity: 0;
+    transform: scale(0.84) translateY(0.6rem);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-logo,
+  .landing-kicker,
+  .landing-brand,
+  .landing-tagline,
+  .landing-enter-btn {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* ---------- Menu (SingStar select) ---------- */
 .view-menu {
   min-height: 100vh;
@@ -928,6 +1055,7 @@ button:hover {
 .settings-toggle-btn:disabled {
   opacity: 0.42;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 .album-back-btn {
@@ -1351,6 +1479,7 @@ button:hover {
 }
 
 .resync-cover-btn {
+  display: none !important;
   min-width: 8rem;
   padding: 0.45rem 1rem;
   font-size: 0.82rem;
