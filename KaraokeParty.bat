@@ -92,6 +92,29 @@ if errorlevel 1 (
   echo       Stems OK
 )
 
+".venv\Scripts\python.exe" -c "import torchaudio" 1>nul 2>nul
+if errorlevel 1 (
+  echo       Instal·lant torchaudio ^(MMS / sil·labes^)...
+  where nvidia-smi >nul 2>&1
+  if errorlevel 1 (
+    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
+  ) else (
+    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems]"
+    if errorlevel 1 (
+      ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
+    )
+  )
+  ".venv\Scripts\python.exe" -c "import torchaudio" 1>nul 2>nul
+  if errorlevel 1 (
+    echo [ERROR] No s'ha pogut instal·lar torchaudio.
+    echo         Prova manualment: pip install -e ".[stems]"
+    pause
+    exit /b 1
+  )
+) else (
+  echo       torchaudio / MMS OK
+)
+
 echo [3/5] Comprovant GPU / CUDA...
 where nvidia-smi >nul 2>&1
 if errorlevel 1 (

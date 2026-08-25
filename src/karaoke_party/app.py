@@ -59,7 +59,7 @@ from .lyrics import (
     save_aligned_cached,
     save_cached,
 )
-from .syllables import expand_syllable_tokens
+from .syllables import expand_syllable_tokens, has_syllable_glue, refine_syllable_timings
 from .stems import (
     SeparationError,
     clear_work_dir,
@@ -92,8 +92,8 @@ async def _lifespan(_app: FastAPI):
     cache_dir()
     stems_cache_dir()
     log.info("Cache root: %s", root)
-    # Download/load Whisper as soon as the server starts so the first song does
-    # not stall the align queue on a multi-GB HuggingFace fetch.
+    # Download/load Whisper (then Meta MMS) at startup so the first song does
+    # not stall the align queue on a multi-GB model fetch.
     preload_whisper_model()
     yield
 
@@ -300,7 +300,31 @@ def _resolve_track(track_id: str) -> TrackInfo:
 
 
 def _lines_for_client(lines: list) -> list[dict]:
-    return [asdict(line) for line in expand_syllable_tokens(lines)]
+    prepared = lines if has_syllable_glue(lines) else expand_syllable_tokens(lines)
+    return [asdict(line) for line in prepared]
+
+
+def _with_audio_syllables(key: str, payload: LyricsPayload) -> LyricsPayload:
+    """Upgrade word-level Whisper timings to MMS (or energy) syllable splits."""
+    if has_syllable_glue(payload.lines):
+        return payload
+    from .track_cache import vocals_path
+
+    vocals = vocals_path(aligned_cache_dir(), key)
+    has_vocals = vocals.is_file()
+    lines = refine_syllable_timings(vocals if has_vocals else None, payload.lines)
+    updated = LyricsPayload(
+        synced=payload.synced,
+        source=payload.source,
+        lines=lines,
+        plain=payload.plain,
+    )
+    if has_vocals:
+        try:
+            save_aligned_cached(aligned_cache_dir(), key, updated)
+        except OSError:
+            pass
+    return updated
 
 
 def _lyrics_response(track: TrackInfo, track_id: str, payload: LyricsPayload, *, aligned: bool) -> dict:
@@ -1332,6 +1356,7 @@ async def lyrics(track_id: str = Query(...)):
     key = cache_key(track.artist, track.title, track.duration)
     aligned = load_aligned_cached(aligned_cache_dir(), key)
     if aligned is not None:
+        aligned = _with_audio_syllables(key, aligned)
         return _lyrics_response(track, track_id, aligned, aligned=True)
 
     payload = await fetch_lyrics(
@@ -1350,6 +1375,7 @@ def start_align(body: AlignBody) -> dict:
     key = cache_key(track.artist, track.title, track.duration)
     cached = load_aligned_cached(aligned_cache_dir(), key)
     if cached is not None:
+        cached = _with_audio_syllables(key, cached)
         return {"job_id": None, **_align_done_payload(cached)}
 
     if not alignment_available():
@@ -1428,7 +1454,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-deps",
         action="store_true",
-        help="Do not abort when Whisper/stems/ffmpeg are missing (dev only)",
+        help="Do not abort when Whisper/stems/torchaudio/ffmpeg are missing (dev only)",
     )
     args = parser.parse_args()
     if not args.skip_deps:

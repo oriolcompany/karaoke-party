@@ -1,7 +1,7 @@
 """Startup dependency checks for Karaoke Party.
 
-Whisper alignment always needs stem separation first, so both extras plus
-ffmpeg are required before the server starts.
+Whisper alignment needs stem separation first, and syllable timings need
+Meta MMS (torchaudio). Those extras plus ffmpeg are required on start.
 """
 
 from __future__ import annotations
@@ -62,6 +62,15 @@ def check_dependencies() -> list[DependencyIssue]:
                 detail="necessari per separar veu/instrumental (i per Whisper)",
                 fix='pip install -e ".[stems]"   # GPU NVIDIA\n'
                 '     o  pip install -e ".[stems-cpu]"   # només CPU',
+            )
+        )
+
+    if not _module_available("torchaudio"):
+        issues.append(
+            DependencyIssue(
+                name="torchaudio",
+                detail="necessari per alinear síl·labes amb Meta MMS",
+                fix='pip install torchaudio   # o  pip install -e ".[stems]"',
             )
         )
 

@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .lyrics import LyricLine, LyricWord, estimate_words, sung_word_duration, tighten_phrase_onsets
+from .syllables import refine_syllable_timings
 
 _model = None
 # Status reads must never wait on a multi-GB HuggingFace download. Keep a
@@ -366,6 +367,12 @@ def preload_whisper_model() -> None:
         try:
             _get_model(DEFAULT_MODEL_SIZE)
         except Exception:  # noqa: BLE001 — status already recorded for /api/health
+            pass
+        try:
+            from .mms_align import preload_mms_model
+
+            preload_mms_model()
+        except Exception:  # noqa: BLE001 — energy fallback still works
             pass
 
     threading.Thread(target=_run, name="whisper-preload", daemon=True).start()
@@ -883,7 +890,7 @@ def align_lyrics(
     model_size: str | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> list[LyricLine]:
-    """Align known lyric lines to the audio with faster-whisper word timestamps."""
+    """Align known lyric lines: Whisper locates phrases, MMS times syllables."""
     if not lines:
         return []
     if not audio_path.is_file():
@@ -942,4 +949,6 @@ def align_lyrics(
             line_time = line.time
             words = estimate_words(line.time, next_time, line.text)
         aligned_lines.append(LyricLine(time=line_time, text=line.text, words=words))
-    return tighten_phrase_onsets(_enforce_monotonic(aligned_lines))
+    aligned = tighten_phrase_onsets(_enforce_monotonic(aligned_lines))
+    # Whisper located the phrases; MMS (or energy/letters) times each syllable.
+    return refine_syllable_timings(audio_path, aligned)

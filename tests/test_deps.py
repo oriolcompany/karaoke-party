@@ -10,7 +10,7 @@ from karaoke_party.deps import DependencyIssue, check_dependencies, require_depe
 def test_check_dependencies_reports_missing_modules(monkeypatch) -> None:
     monkeypatch.setattr(
         "karaoke_party.deps._module_available",
-        lambda name: name not in {"faster_whisper", "audio_separator"},
+        lambda name: name not in {"faster_whisper", "audio_separator", "torchaudio"},
     )
     monkeypatch.setattr("karaoke_party.deps.shutil.which", lambda _name: "C:/ffmpeg.exe")
 
@@ -18,6 +18,7 @@ def test_check_dependencies_reports_missing_modules(monkeypatch) -> None:
     names = {issue.name for issue in issues}
     assert "faster-whisper" in names
     assert "audio-separator" in names
+    assert "torchaudio" in names
     assert "ffmpeg" not in names
 
 

@@ -1866,9 +1866,16 @@ button:hover {
 }
 
 .k-word-group {
-  display: inline-block;
-  margin: 0 0.16em 0.1em 0;
+  /* Flex, not inline-block: .k-slot letter-spacing must not open gaps
+     between syllable boxes of the same word. */
+  display: inline-flex;
+  flex-flow: row nowrap;
+  align-items: baseline;
+  gap: 0;
+  margin: 0 0.18em 0.1em 0;
   white-space: nowrap;
+  letter-spacing: 0;
+  vertical-align: baseline;
 }
 
 .k-word {
@@ -1877,10 +1884,13 @@ button:hover {
   margin: 0 0.16em 0.1em 0;
   color: rgba(255, 246, 234, 0.22);
   transition: transform 0.12s ease, filter 0.12s ease;
+  vertical-align: baseline;
 }
 
-.k-word-group .k-word {
+.k-word-group .k-word,
+.k-word.is-glue {
   margin: 0;
+  letter-spacing: 0.03em;
 }
 
 .k-slot-current .k-word {

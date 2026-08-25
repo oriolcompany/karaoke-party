@@ -48,3 +48,82 @@ def test_expand_syllables_splits_time_inside_the_word() -> None:
     assert tokens[0].end <= tokens[1].time + 0.001
     assert tokens[1].time > tokens[0].time
     assert abs(tokens[2].time - 10.8) < 0.001
+
+
+def test_energy_split_puts_boundary_in_the_quiet_gap() -> None:
+    import numpy as np
+    from karaoke_party.syllables import _energy_split_times
+
+    sr = 22050
+    duration = 1.0
+    samples = np.zeros(int(sr * duration), dtype=np.float32)
+    t = np.arange(len(samples)) / sr
+    # Two sung nuclei with a dip in the middle.
+    burst1 = (t >= 0.08) & (t <= 0.32)
+    burst2 = (t >= 0.62) & (t <= 0.92)
+    samples[burst1] = 0.8 * np.sin(2 * np.pi * 220 * t[burst1])
+    samples[burst2] = 0.8 * np.sin(2 * np.pi * 220 * t[burst2])
+    times = _energy_split_times(samples, sr, [1, 1])
+    assert times[0] == 0.0
+    assert abs(times[-1] - duration) < 0.02
+    assert 0.35 < times[1] < 0.62
+
+
+def test_refine_syllable_timings_uses_audio_when_present(tmp_path, monkeypatch) -> None:
+    import numpy as np
+    import soundfile as sf
+    from karaoke_party.syllables import refine_syllable_timings
+
+    monkeypatch.setenv("KARAOKE_MMS", "0")
+
+    sr = 22050
+    samples = np.zeros(sr, dtype=np.float32)
+    t = np.arange(sr) / sr
+    samples[(t >= 0.08) & (t <= 0.32)] = 0.7
+    samples[(t >= 0.62) & (t <= 0.92)] = 0.7
+    wav = tmp_path / "vocals.wav"
+    sf.write(wav, samples, sr)
+    lines = [
+        LyricLine(
+            time=0.0,
+            text="brindar",
+            words=[LyricWord(time=0.0, end=1.0, text="brindar")],
+        )
+    ]
+    refined = refine_syllable_timings(wav, lines)
+    tokens = refined[0].words
+    assert [token.text for token in tokens] == ["brin", "dar"]
+    assert tokens[0].glue is True
+    assert 0.32 < tokens[0].end < 0.66
+
+
+def test_refine_prefers_mms_when_enabled(tmp_path, monkeypatch) -> None:
+    from karaoke_party.syllables import refine_syllable_timings
+
+    monkeypatch.setenv("KARAOKE_MMS", "1")
+    fake = [
+        LyricLine(
+            time=0.0,
+            text="brindar",
+            words=[
+                LyricWord(time=0.0, end=0.41, text="brin", glue=True),
+                LyricWord(time=0.41, end=1.0, text="dar", glue=False),
+            ],
+        )
+    ]
+    monkeypatch.setattr(
+        "karaoke_party.mms_align.align_syllables_mms",
+        lambda _path, _lines: fake,
+    )
+    wav = tmp_path / "vocals.wav"
+    wav.write_bytes(b"fake")
+    lines = [
+        LyricLine(
+            time=0.0,
+            text="brindar",
+            words=[LyricWord(time=0.0, end=1.0, text="brindar")],
+        )
+    ]
+    refined = refine_syllable_timings(wav, lines)
+    assert [token.text for token in refined[0].words] == ["brin", "dar"]
+    assert abs(refined[0].words[0].end - 0.41) < 0.001

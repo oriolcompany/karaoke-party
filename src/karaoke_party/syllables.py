@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import Path
 
 from .lyrics import LyricLine, LyricWord
 
@@ -207,11 +208,48 @@ def _syllable_weight(text: str) -> int:
     return max(1, letters + vowels)
 
 
+def _proportional_rel_times(span: float, weights: list[int]) -> list[float]:
+    total = sum(weights) or 1
+    times = [0.0]
+    acc = 0
+    for weight in weights[:-1]:
+        acc += weight
+        times.append(span * acc / total)
+    times.append(span)
+    return times
+
+
+def _tokens_from_splits(
+    word: LyricWord,
+    parts: list[str],
+    rel_times: list[float],
+) -> list[LyricWord]:
+    span = max(0.05, float(word.end) - float(word.time))
+    last = len(parts) - 1
+    tokens: list[LyricWord] = []
+    for index, part in enumerate(parts):
+        start = float(word.time) + min(span, max(0.0, rel_times[index]))
+        end = (
+            float(word.end)
+            if index == last
+            else float(word.time) + min(span, max(0.0, rel_times[index + 1]))
+        )
+        tokens.append(
+            LyricWord(
+                time=start,
+                end=max(end, start + 0.04),
+                text=part,
+                glue=index < last,
+            )
+        )
+    return tokens
+
+
 def expand_syllable_tokens(lines: list[LyricLine]) -> list[LyricLine]:
     """Subdivide each word's time span across its syllables for karaoke fill.
 
-    Alignment stays word-level (Whisper). Painting can then light each syllable
-    in order without a new transcription.
+    Fallback when we cannot inspect the vocal audio: longer syllables get a
+    larger slice of the Whisper word window.
     """
     expanded: list[LyricLine] = []
     for line in lines:
@@ -223,21 +261,121 @@ def expand_syllable_tokens(lines: list[LyricLine]) -> list[LyricLine]:
                     LyricWord(time=word.time, end=word.end, text=word.text, glue=False)
                 )
                 continue
-            weights = [_syllable_weight(part) for part in parts]
-            total = sum(weights) or 1
             span = max(0.05, float(word.end) - float(word.time))
-            cursor = float(word.time)
-            last = len(parts) - 1
-            for index, (part, weight) in enumerate(zip(parts, weights)):
-                end = float(word.end) if index == last else cursor + span * (weight / total)
-                tokens.append(
-                    LyricWord(
-                        time=cursor,
-                        end=max(end, cursor + 0.04),
-                        text=part,
-                        glue=index < last,
-                    )
-                )
-                cursor = end
+            rel = _proportional_rel_times(span, [_syllable_weight(part) for part in parts])
+            tokens.extend(_tokens_from_splits(word, parts, rel))
         expanded.append(LyricLine(time=line.time, text=line.text, words=tokens))
     return expanded
+
+
+def has_syllable_glue(lines: list[LyricLine]) -> bool:
+    return any(word.glue for line in lines for word in line.words)
+
+
+def _energy_split_times(samples, sr: int, weights: list[int]) -> list[float]:
+    """Split a word-sized clip at energy valleys near each syllable's share."""
+    import numpy as np
+    import librosa
+
+    n = len(weights)
+    duration = len(samples) / float(sr)
+    if n <= 1 or duration < 0.08:
+        return _proportional_rel_times(duration, weights or [1])
+
+    hop = 256
+    frame = min(1024, max(256, len(samples) // 2))
+    rms = librosa.feature.rms(y=samples, hop_length=hop, frame_length=frame)[0]
+    if rms.size < n + 3:
+        return _proportional_rel_times(duration, weights)
+
+    energy = np.convolve(rms, np.ones(5) / 5.0, mode="same") + 1e-8
+    cum = np.cumsum(energy)
+    cum = cum / cum[-1]
+    total_w = sum(weights) or n
+    max_frame = len(energy) - 1
+    radius = max(2, int(0.16 * sr / hop))
+    frames = [0]
+    acc = 0.0
+    for weight in weights[:-1]:
+        acc += weight
+        target = acc / total_w
+        index = int(np.searchsorted(cum, target))
+        index = min(max(index, frames[-1] + 2), max_frame - 1)
+        low = max(frames[-1] + 1, index - radius)
+        high = min(max_frame, index + radius + 1)
+        band = np.arange(low, high)
+        dist = ((band - index) / max(radius, 1)) ** 2
+        frames.append(low + int(np.argmin(energy[low:high] + 0.12 * dist)))
+    frames.append(max_frame)
+
+    times = [min(duration, max(0.0, frame * hop / sr)) for frame in frames]
+    times[0] = 0.0
+    times[-1] = duration
+    for index in range(1, len(times)):
+        if times[index] <= times[index - 1]:
+            times[index] = min(duration, times[index - 1] + 0.04)
+    times[-1] = duration
+    return times
+
+
+def _refine_from_audio(audio_path: Path, lines: list[LyricLine]) -> list[LyricLine]:
+    import librosa
+
+    samples, sr = librosa.load(str(audio_path), sr=22050, mono=True)
+    expanded: list[LyricLine] = []
+    for line in lines:
+        tokens: list[LyricWord] = []
+        for word in line.words:
+            parts = syllabify_token(word.text)
+            if len(parts) <= 1:
+                tokens.append(
+                    LyricWord(time=word.time, end=word.end, text=word.text, glue=False)
+                )
+                continue
+            start = max(0.0, float(word.time))
+            end = max(start + 0.05, float(word.end))
+            i0 = min(len(samples), max(0, int(start * sr)))
+            i1 = min(len(samples), max(i0 + 1, int(end * sr)))
+            clip = samples[i0:i1]
+            weights = [_syllable_weight(part) for part in parts]
+            rel = _energy_split_times(clip, sr, weights)
+            clip_dur = max(len(clip) / float(sr), 1e-6)
+            span = end - start
+            scaled = [span * (time / clip_dur) for time in rel]
+            scaled[0] = 0.0
+            scaled[-1] = span
+            tokens.extend(_tokens_from_splits(word, parts, scaled))
+        expanded.append(LyricLine(time=line.time, text=line.text, words=tokens))
+    return expanded
+
+
+def refine_syllable_timings(
+    audio_path: Path | None,
+    lines: list[LyricLine],
+) -> list[LyricLine]:
+    """Place syllable boundaries on the vocal stem.
+
+    Whisper only locates each phrase. Meta MMS then force-aligns the known
+    lyric characters inside that window and we group them into Catalan
+    syllables. If MMS is missing, fall back to energy valleys, then to a
+    letter-weighted split of the Whisper word window.
+    """
+    if not lines:
+        return lines
+    if has_syllable_glue(lines):
+        return lines
+    if audio_path is not None and Path(audio_path).is_file():
+        from .mms_align import align_syllables_mms, mms_enabled
+
+        if mms_enabled():
+            try:
+                aligned = align_syllables_mms(Path(audio_path), lines)
+            except Exception:  # noqa: BLE001 — energy / letters still work
+                aligned = None
+            if aligned is not None:
+                return aligned
+        try:
+            return _refine_from_audio(Path(audio_path), lines)
+        except Exception:  # noqa: BLE001 — fall back to proportional slices
+            pass
+    return expand_syllable_tokens(lines)

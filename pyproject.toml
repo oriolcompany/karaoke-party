@@ -22,9 +22,11 @@ align = [
 ]
 stems = [
     "audio-separator[gpu]>=0.24",
+    "torchaudio>=2.1.0",
 ]
 stems-cpu = [
     "audio-separator[cpu]>=0.24",
+    "torchaudio>=2.1.0",
 ]
 
 [project.scripts]

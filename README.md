@@ -34,7 +34,7 @@ pip install -e ".[stems]"      # or ".[stems-cpu]" without NVIDIA GPU
 ```
 
 `ffmpeg` must also be on PATH. On start, `karaoke-party` checks base packages, Whisper,
-stems, and ffmpeg, and exits if any are missing (use `--skip-deps` only for development).
+stems, torchaudio (MMS), and ffmpeg, and exits if any are missing (use `--skip-deps` only for development).
 With an NVIDIA GPU, `KaraokeParty.bat` (and `python -m karaoke_party`) also runs
 `python -m karaoke_party.gpu_setup`, which installs a CUDA PyTorch wheel matching the
 driver and the CUDA 12 libraries Whisper needs when they are missing.
@@ -44,8 +44,13 @@ CUDA when a GPU is available, otherwise CPU. The model is downloaded/loaded in
 the background when the server starts (not on the first song). Results are
 cached per song under `tracks/<key>/aligned.json`. Alignment always isolates the
 vocal track first (generating stems on demand when missing); the `[stems]` extra
-is required for Whisper. If CUDA libraries do not match, Whisper falls back to CPU
-automatically.
+is required for Whisper. After Whisper locates each phrase, **Meta MMS**
+force-aligns the known lyric letters on the vocal stem and groups them into
+Catalan syllables. `torchaudio` (pulled in with `[stems]`) downloads the MMS
+weights on first use (~1.2 GB, cached under the app cache `torch/` folder).
+MMS is licensed CC-BY-NC; this app is for personal/local use. If CUDA libraries
+do not match, Whisper falls back to CPU automatically. Set `KARAOKE_MMS=0` to
+skip MMS and keep energy-based syllable splits.
 
 ### Karaoke (instrumental) tracks
 
@@ -74,6 +79,8 @@ Whisper alignment more accurate. **ffmpeg must be on PATH.**
 | `KARAOKE_WHISPER_BEAM` | `5` on CUDA, else `3` | Higher can help a bit more; `1` is fastest |
 | `KARAOKE_WHISPER_DEVICE` | auto (`cuda` if available, else `cpu`) | Force with `cpu` / `cuda` |
 | `KARAOKE_WHISPER_COMPUTE` | `float16` on CUDA, `int8` on CPU | CTranslate2 compute type |
+| `KARAOKE_MMS` | `1` | `0` disables Meta MMS syllable alignment |
+| `KARAOKE_MMS_DEVICE` | auto (`cuda` if Torch sees a GPU) | Force with `cpu` / `cuda` |
 
 When LRCLIB already provides synced line times, each line is located as a
 phrase near those cues (so choruses do not steal each other’s timings). Without
@@ -103,8 +110,8 @@ For full Whisper alignment support, prefer `KaraokeParty.bat`.
 
 1. The server scans the music folder and reads title/artist/album/duration from tags. Basic LRCLIB sync does **not** run on startup.
 2. Synced lyrics (LRC) are fetched from LRCLIB when you open a song, run Whisper sync, or use Settings → “Resincronitzar sense lletra”, and cached under `tracks/<key>/lyrics.json`.
-3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper**. Word timings are cached under `tracks/<key>/aligned.json`. Matching locates each lyric line as a phrase in the ASR, then aligns words inside that span, so a misheard word cannot steal the next line. Repeated choruses stay monotonic, and tokens can merge in both directions (`l'amor` vs `l'` + `amor`).
-4. When alignment finishes (or is already cached), the stage swaps to word-accurate timings.
+3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper → MMS syllables**. Word timings are cached under `tracks/<key>/aligned.json`. Matching locates each lyric line as a phrase in the ASR, then aligns words inside that span, so a misheard word cannot steal the next line. Repeated choruses stay monotonic, and tokens can merge in both directions (`l'amor` vs `l'` + `amor`). MMS then timestamps each letter of that known line on the vocal stem and the fill is grouped into Catalan syllables (`brin`+`dar`). If MMS is unavailable, syllable edges fall back to energy valleys inside the Whisper word window.
+4. When alignment finishes (or is already cached), the stage swaps to syllable-accurate timings.
 5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file); a copy also lives at `tracks/<key>/cover.<ext>`.
 6. Stems are also generated on demand from the instrumental toggle / bulk settings action; Whisper reuses the same cache.
 7. Settings → Memòria cau can clear/resync one song, wipe all caches, or export/import a per-song zip between PCs.
@@ -124,7 +131,7 @@ tracks/<key>/
 ```
 
 `key` is `sha1(artist.lower|title.lower|int(duration))`. Demucs scratch files go to
-`stems-work/`; downloaded models stay in `stem-models/` and `whisper` caches.
+`stems-work/`; downloaded models stay in `stem-models/`, `whisper`, and `torch` (MMS).
 
 ## Notes
 
