@@ -59,6 +59,7 @@ from .lyrics import (
     save_aligned_cached,
     save_cached,
 )
+from .syllables import expand_syllable_tokens
 from .stems import (
     SeparationError,
     clear_work_dir,
@@ -298,6 +299,10 @@ def _resolve_track(track_id: str) -> TrackInfo:
     return track
 
 
+def _lines_for_client(lines: list) -> list[dict]:
+    return [asdict(line) for line in expand_syllable_tokens(lines)]
+
+
 def _lyrics_response(track: TrackInfo, track_id: str, payload: LyricsPayload, *, aligned: bool) -> dict:
     return {
         "track_id": track_id,
@@ -307,7 +312,7 @@ def _lyrics_response(track: TrackInfo, track_id: str, payload: LyricsPayload, *,
         "aligned": aligned,
         "source": payload.source,
         "plain": payload.plain,
-        "lines": [asdict(line) for line in payload.lines],
+        "lines": _lines_for_client(payload.lines),
     }
 
 
@@ -318,7 +323,7 @@ def _align_done_payload(payload: LyricsPayload) -> dict:
         "synced": True,
         "source": payload.source,
         "plain": payload.plain,
-        "lines": [asdict(line) for line in payload.lines],
+        "lines": _lines_for_client(payload.lines),
     }
 
 

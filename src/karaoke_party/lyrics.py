@@ -31,6 +31,7 @@ class LyricWord:
     time: float
     end: float
     text: str
+    glue: bool = False
 
 
 @dataclass
@@ -222,7 +223,15 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
         return None
     lines: list[LyricLine] = []
     for row in data.get("lines") or []:
-        words = [LyricWord(**word) for word in row.get("words") or []]
+        words = [
+            LyricWord(
+                time=float(word["time"]),
+                end=float(word["end"]),
+                text=str(word.get("text") or ""),
+                glue=bool(word.get("glue", False)),
+            )
+            for word in row.get("words") or []
+        ]
         lines.append(
             LyricLine(time=float(row["time"]), text=str(row.get("text") or ""), words=words)
         )

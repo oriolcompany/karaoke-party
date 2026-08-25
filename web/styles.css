@@ -1865,12 +1865,22 @@ button:hover {
   }
 }
 
+.k-word-group {
+  display: inline-block;
+  margin: 0 0.16em 0.1em 0;
+  white-space: nowrap;
+}
+
 .k-word {
   position: relative;
   display: inline-block;
   margin: 0 0.16em 0.1em 0;
   color: rgba(255, 246, 234, 0.22);
   transition: transform 0.12s ease, filter 0.12s ease;
+}
+
+.k-word-group .k-word {
+  margin: 0;
 }
 
 .k-slot-current .k-word {

@@ -1750,7 +1750,7 @@ function showStage() {
 
 function buildWordNode(word) {
   const wrap = document.createElement("span");
-  wrap.className = "k-word";
+  wrap.className = word.glue ? "k-word is-glue" : "k-word";
 
   const base = document.createElement("span");
   base.className = "k-word-base";
@@ -1794,9 +1794,16 @@ function fillSlot(slotEl, line, { trackWords = false, resetWords = true } = {}) 
     return;
   }
   if (trackWords && resetWords) wordNodes = [];
+  let groupEl = null;
   for (const word of lineWords(line)) {
     const node = buildWordNode(word);
-    slotEl.appendChild(node);
+    if (!groupEl) {
+      groupEl = document.createElement("span");
+      groupEl.className = "k-word-group";
+      slotEl.appendChild(groupEl);
+    }
+    groupEl.appendChild(node);
+    if (!word.glue) groupEl = null;
     if (trackWords) {
       wordNodes.push({
         start: Number(word.time),
