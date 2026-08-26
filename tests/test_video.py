@@ -17,12 +17,15 @@ from karaoke_party.track_cache import (
     write_meta,
 )
 from karaoke_party.video import (
+    INTRO_SECONDS,
     KARAOKE_RENDER_VERSION,
+    OUTRO_SECONDS,
     ass_timestamp,
     build_ass_document,
     build_ffmpeg_command,
     build_copy_mux_command,
     build_mux_command,
+    bumpered_duration,
     choose_audio,
     choose_background,
     download_filename,
@@ -78,8 +81,8 @@ def test_ass_karaoke_fill_and_glue() -> None:
         layout="stack",
     )
     assert "Style: Current" in script
-    assert "SOPA DE CABRA" in script
-    assert "El far del sud" in script
+    assert "SOPA DE CABRA" not in script
+    assert "El far del sud" not in script
     assert r"{\k20}brin{\k30}dar {\k30}amb {\k30}mi" in script
     assert "una altra" in script
     assert "Style: Next" in script
@@ -187,17 +190,28 @@ def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
         output_name="out.mp4",
         duration=12.5,
     )
+    joined = " ".join(command)
     assert command[0] == "ffmpeg"
     assert command[command.index("-c:v") + 1] == "copy"
     assert command[command.index("-f") + 1] == "h264"
     assert command[command.index("-r") + 1] == "30"
     assert command.index("-r") < command.index("stage.h264")
     assert command[command.index("-c:a") + 1] == "aac"
-    assert command[command.index("-t") + 1] == "12.500"
+    assert command[command.index("-t") + 1] == "25.500"
     assert "libx264" not in command
     assert "+faststart" in command
     # -shortest would make ffmpeg drop the buffered audio of a copied raw stream.
     assert "-shortest" not in command
+    assert "adelay=5000" in joined
+    assert "apad=pad_dur=8.000" in joined
+    assert "amix=" in joined
+    assert "[a]" in command
+
+
+def test_bumpers_extend_copy_mux_to_intro_song_outro() -> None:
+    assert INTRO_SECONDS == 5.0
+    assert OUTRO_SECONDS == 8.0
+    assert bumpered_duration(12.5) == 25.5
 
 
 def test_choose_audio_uses_original_even_with_instrumental(tmp_path: Path) -> None:

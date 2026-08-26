@@ -44,10 +44,10 @@ const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
 const exportVideoBtn = document.getElementById("exportVideoBtn");
 const exportVideoStatus = document.getElementById("exportVideoStatus");
-const exportCaptureBadge = document.getElementById("exportCaptureBadge");
-const exportOverlay = document.getElementById("exportOverlay");
-const exportOverlayDetail = document.getElementById("exportOverlayDetail");
-const exportCancelBtn = document.getElementById("exportCancelBtn");
+// const exportCaptureBadge = document.getElementById("exportCaptureBadge");
+// const exportOverlay = document.getElementById("exportOverlay");
+// const exportOverlayDetail = document.getElementById("exportOverlayDetail");
+// const exportCancelBtn = document.getElementById("exportCancelBtn");
 const pasteLyricsBtn = document.getElementById("pasteLyricsBtn");
 const stagePasteLyricsBtn = document.getElementById("stagePasteLyricsBtn");
 const lyricsPasteModal = document.getElementById("lyricsPasteModal");
@@ -234,6 +234,9 @@ let stageCapture = null;
 const EXPORT_VIDEO_W = 1920;
 const EXPORT_VIDEO_H = 1080;
 const EXPORT_VIDEO_FPS = 30;
+// Keep in sync with INTRO_SECONDS / OUTRO_SECONDS in video.py.
+const EXPORT_INTRO_SECONDS = 5;
+const EXPORT_OUTRO_SECONDS = 8;
 // 1:1 with the output frame: supersampling the aura cost four times the fill
 // work and bought nothing once the video was scaled back down to 1080p.
 const EXPORT_AURA_DPR = 1;
@@ -2235,10 +2238,11 @@ async function waitVideoJob(jobId) {
   }
 }
 
-function setExportCaptureBadge(text, detail = "") {
-  if (exportOverlay) exportOverlay.hidden = !text;
-  if (exportCaptureBadge) exportCaptureBadge.textContent = text || "Preparant…";
-  if (exportOverlayDetail) exportOverlayDetail.textContent = text ? detail : "";
+function setExportCaptureBadge(_text, _detail = "") {
+  // Overlay paused: progress stays on #exportVideoStatus under the cover buttons.
+  // if (exportOverlay) exportOverlay.hidden = !_text;
+  // if (exportCaptureBadge) exportCaptureBadge.textContent = _text || "Preparant…";
+  // if (exportOverlayDetail) exportOverlayDetail.textContent = _text ? _detail : "";
 }
 
 function waitAnimationFrames(count) {
@@ -2460,8 +2464,6 @@ function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
 function collectExportText(ctx) {
   const items = [];
   const shadow = viewStage.classList.contains("has-aura");
-  collectExportElementText(ctx, items, songArtist, { shadow });
-  collectExportElementText(ctx, items, songTitle, { shadow });
   if (lyricsEl) {
     const clip = lyricsEl.getBoundingClientRect();
     lyricsEl
@@ -2610,7 +2612,125 @@ function exportProfileDetail() {
   ].join(" · ");
 }
 
-function paintExportFrame() {
+function clamp01(value) {
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+function smoothstep(value) {
+  const t = clamp01(value);
+  return t * t * (3 - 2 * t);
+}
+
+let exportBrandLogo = null;
+let exportBrandLogoWait = null;
+
+function ensureExportBrandLogo() {
+  if (exportBrandLogo?.complete && exportBrandLogo.naturalWidth) return Promise.resolve();
+  if (exportBrandLogoWait) return exportBrandLogoWait;
+  exportBrandLogoWait = new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      exportBrandLogo = img;
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = "/intro-logo.png?v=1";
+  });
+  return exportBrandLogoWait;
+}
+
+function setExportLetterSpacing(ctx, px) {
+  if (typeof ctx.letterSpacing === "string") ctx.letterSpacing = `${px}px`;
+}
+
+function fitExportFont(ctx, text, family, maxPx, minPx, maxWidth) {
+  let size = maxPx;
+  while (size > minPx) {
+    ctx.font = `${size}px ${family}`;
+    if (ctx.measureText(text || "").width <= maxWidth) return size;
+    size -= 2;
+  }
+  ctx.font = `${minPx}px ${family}`;
+  return minPx;
+}
+
+function fillExportHeadline(ctx, text, x, y) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.85)";
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 2;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+  ctx.fillText(text, x, y);
+}
+
+function drawExportBrandMark(ctx, x, y, size) {
+  if (!exportBrandLogo?.naturalWidth) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(exportBrandLogo, x, y, size, size);
+  ctx.restore();
+}
+
+function paintExportIntro(ctx, t, track) {
+  const fadeIn = smoothstep(t / 0.7);
+  const card = smoothstep((t - 0.65) / 0.55);
+  const fadeOut = smoothstep((t - 4.2) / 0.8);
+  const alpha = fadeIn * (1 - fadeOut);
+  if (alpha < 0.01) return;
+  const artist = (track?.artist || "").toLocaleUpperCase("ca");
+  const title = track?.title || "";
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = `rgba(3, 2, 8, ${0.52 * alpha})`;
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  const cx = EXPORT_VIDEO_W / 2;
+  const logoSize = 220 + (1 - card) * 160;
+  const logoY = 48 + (1 - card) * 24;
+  ctx.globalAlpha = alpha;
+  drawExportBrandMark(ctx, cx - logoSize / 2, logoY, logoSize);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.globalAlpha = alpha * card;
+  setExportLetterSpacing(ctx, 7);
+  ctx.font = "700 28px Outfit, sans-serif";
+  ctx.fillStyle = "#ffe14a";
+  fillExportHeadline(ctx, artist, cx, 340);
+  setExportLetterSpacing(ctx, 2);
+  const titleSize = fitExportFont(ctx, title, "Bebas Neue, sans-serif", 88, 44, 1600);
+  ctx.font = `${titleSize}px Bebas Neue, sans-serif`;
+  ctx.fillStyle = "#fff6ea";
+  fillExportHeadline(ctx, title, cx, 340 + titleSize + 16);
+  setExportLetterSpacing(ctx, 4);
+  ctx.font = "500 22px Outfit, sans-serif";
+  ctx.fillStyle = "#3de7ff";
+  fillExportHeadline(ctx, "KARAOKE", cx, 340 + titleSize + 60);
+  ctx.restore();
+}
+
+function paintExportOutro(ctx, t) {
+  const fade = smoothstep(t / 1.1);
+  if (fade < 0.01) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = `rgba(3, 2, 8, ${0.28 * fade})`;
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  setExportLetterSpacing(ctx, 2);
+  const text = "Gràcies per cantar!";
+  const size = fitExportFont(ctx, text, "Bebas Neue, sans-serif", 120, 64, 1680);
+  ctx.font = `${size}px Bebas Neue, sans-serif`;
+  ctx.fillStyle = "#fff6ea";
+  fillExportHeadline(ctx, text, EXPORT_VIDEO_W / 2, EXPORT_VIDEO_H / 2);
+  ctx.restore();
+}
+
+function paintExportFrame(options = {}) {
   if (!stageCapture?.ctx || !viewStage) return;
   const ctx = stageCapture.ctx;
   const startedAt = performance.now();
@@ -2652,8 +2772,10 @@ function paintExportFrame() {
 
   const afterBackground = performance.now();
   exportProfile.bg += afterBackground - startedAt;
-  paintExportText(ctx, view);
-  exportProfile.text += performance.now() - afterBackground;
+  if (!options.skipText) {
+    paintExportText(ctx, view);
+    exportProfile.text += performance.now() - afterBackground;
+  }
 }
 
 function stopExportPaintLoop() {
@@ -2923,10 +3045,12 @@ async function openStageForExport(track) {
   clearStageOutro();
   stopPreview();
   setStageBgMode("aura", { persist: false });
-  viewMenu.classList.add("hidden");
-  viewStage.classList.remove("hidden");
+  // Keep the library on screen so more videos can be queued. The stage is
+  // parked offscreen via body.is-exporting-video.
+  // viewMenu.classList.add("hidden");
   viewStage.classList.add("is-exporting");
   document.body.classList.add("is-exporting-video");
+  viewStage.classList.remove("hidden");
   songArtist.textContent = track.artist || "Artista desconegut";
   songTitle.textContent = track.title;
 
@@ -2942,6 +3066,7 @@ async function openStageForExport(track) {
   startAuraEngine();
   stopAuraEngine();
   await document.fonts.ready.catch(() => {});
+  await ensureExportBrandLogo();
   return payload;
 }
 
@@ -2950,11 +3075,9 @@ function closeStageForExport(previousBgMode) {
   exportTimers.length = 0;
   clearLineRoll();
   resumeStageAnimations();
+  if (!currentId) viewStage.classList.add("hidden");
   detachStageCapture();
-  if (!currentId) {
-    viewStage.classList.add("hidden");
-    viewMenu.classList.remove("hidden");
-  }
+  // if (!currentId) viewMenu.classList.remove("hidden");
   if (previousBgMode) setStageBgMode(previousBgMode, { persist: false });
   syncAuraEngine();
 }
@@ -3016,8 +3139,12 @@ async function renderStageOffline(track, config, onProgress) {
   });
   encoder.configure(config);
 
-  const totalSeconds = exportSongSeconds(track, await probeAudioSeconds(track.id));
-  const totalFrames = Math.max(1, Math.round(totalSeconds * EXPORT_VIDEO_FPS));
+  const songSeconds = exportSongSeconds(track, await probeAudioSeconds(track.id));
+  const introFrames = Math.round(EXPORT_INTRO_SECONDS * EXPORT_VIDEO_FPS);
+  const songFrames = Math.max(1, Math.round(songSeconds * EXPORT_VIDEO_FPS));
+  const outroFrames = Math.round(EXPORT_OUTRO_SECONDS * EXPORT_VIDEO_FPS);
+  const totalFrames = introFrames + songFrames + outroFrames;
+  const songEnd = songFrames / EXPORT_VIDEO_FPS;
   // A keyframe every two seconds instead of every half second: fewer bits spent
   // on repeated keyframes leaves more for the picture at the same bitrate.
   const gop = EXPORT_VIDEO_FPS * 2;
@@ -3032,21 +3159,35 @@ async function renderStageOffline(track, config, onProgress) {
       if (state.error) throw state.error;
       if (exportAborted) throw new Error("S’ha cancel·lat el vídeo");
 
-      const seconds = frame / EXPORT_VIDEO_FPS;
+      const fileTime = frame / EXPORT_VIDEO_FPS;
       const markStart = performance.now();
-      exportClock = seconds;
-      runDueStageSteps(seconds);
-      syncKaraoke();
+      let skipText = false;
+      if (frame < introFrames) {
+        exportClock = 0;
+        skipText = true;
+      } else if (frame < introFrames + songFrames) {
+        exportClock = (frame - introFrames) / EXPORT_VIDEO_FPS;
+        runDueStageSteps(exportClock);
+        syncKaraoke();
+      } else {
+        exportClock = songEnd;
+        skipText = true;
+      }
       const markKaraoke = performance.now();
-      stepStageAnimations(seconds * 1000);
+      if (!skipText) stepStageAnimations(exportClock * 1000);
       const markAnim = performance.now();
-      drawAuraFrame(auraT0 + (staticAura ? 0 : seconds * 1000));
+      drawAuraFrame(auraT0 + (staticAura ? 0 : fileTime * 1000));
       const markAura = performance.now();
-      paintExportFrame();
+      paintExportFrame({ skipText });
+      if (frame < introFrames) {
+        paintExportIntro(stageCapture.ctx, fileTime, track);
+      } else if (frame >= introFrames + songFrames) {
+        paintExportOutro(stageCapture.ctx, fileTime - EXPORT_INTRO_SECONDS - songEnd);
+      }
       const markPaint = performance.now();
 
       const videoFrame = new VideoFrame(canvas, {
-        timestamp: Math.round(seconds * 1e6),
+        timestamp: Math.round(fileTime * 1e6),
         duration: frameDuration,
       });
       encoder.encode(videoFrame, { keyFrame: frame % gop === 0 });
@@ -5496,9 +5637,9 @@ lyricsPasteSaveBtn?.addEventListener("click", () => {
 exportVideoBtn?.addEventListener("click", () => {
   exportSelectedKaraokeVideo();
 });
-exportCancelBtn?.addEventListener("click", () => {
-  cancelVideoQueue();
-});
+// exportCancelBtn?.addEventListener("click", () => {
+//   cancelVideoQueue();
+// });
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
 });

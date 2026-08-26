@@ -30,9 +30,13 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 11
+KARAOKE_RENDER_VERSION = 15
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
+# YouTube bumpers painted by the browser encoder. Keep in sync with app.js.
+INTRO_SECONDS = 5.0
+OUTRO_SECONDS = 8.0
+OUTRO_PAD_SECONDS = 2.0
 # Stage palette (styles.css): ink, gold, cyan, bg.
 _INK = "&H00EAF6FF"
 _GOLD = "&H004AE1FF"
@@ -197,7 +201,7 @@ def build_ass_document(
     layout: str = "stack",
     background: str = "aura",
 ) -> str:
-    """ASS script: title/artist + current karaoke line + upcoming preview."""
+    """ASS script: current karaoke line + upcoming preview."""
     audio_end = max(float(duration), 0.2)
     dual = layout == "dual"
     current_size = 64 if dual else 72
@@ -205,10 +209,7 @@ def build_ass_document(
     next_primary = _INK if dual else _CYAN
     outline = 4 if background == "aura" else 3
     shadow = 2 if background == "aura" else 0
-    events: list[str] = [
-        f"Dialogue: 0,0:00:00.00,{ass_timestamp(audio_end)},Title,,0,0,0,,{{\\pos(960,72)}}{_escape_ass(title)}",
-        f"Dialogue: 0,0:00:00.00,{ass_timestamp(audio_end)},Artist,,0,0,0,,{{\\pos(960,138)}}{_escape_ass(artist.upper())}",
-    ]
+    events: list[str] = []
     for index, line in enumerate(lines):
         nxt = lines[index + 1] if index + 1 < len(lines) else None
         start, end = _line_span(line, nxt, audio_end)
@@ -514,6 +515,26 @@ def build_mux_command(
     ]
 
 
+def bumpered_duration(song_seconds: float) -> float:
+    """Song length plus the YouTube intro and outro bumpers."""
+    return INTRO_SECONDS + max(float(song_seconds), 0.2) + OUTRO_SECONDS
+
+
+def _copy_mux_audio_graph(song_seconds: float) -> str:
+    """Delay the mix for the intro, then pad silence under the outro."""
+    intro_ms = int(round(INTRO_SECONDS * 1000.0))
+    pad_ms = int(round((INTRO_SECONDS + song_seconds) * 1000.0))
+    rate = YOUTUBE_AUDIO_RATE
+    fmt = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts=stereo"
+    return (
+        f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}[song];"
+        f"[2:a]{fmt},afade=t=out:st=0.05:d=0.35,volume=0.55[sting];"
+        f"[3:a]{fmt},afade=t=in:d=0.15,afade=t=out:st=1.2:d=0.8,"
+        f"adelay={pad_ms}|{pad_ms},volume=0.28[pad];"
+        "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
+    )
+
+
 def build_copy_mux_command(
     *,
     video_name: str,
@@ -522,7 +543,8 @@ def build_copy_mux_command(
     duration: float,
 ) -> list[str]:
     """Wrap an already encoded H.264 stream: no second generation of losses."""
-    duration = max(float(duration), 0.2)
+    song = max(float(duration), 0.2)
+    total = bumpered_duration(song)
     return [
         "ffmpeg",
         "-y",
@@ -542,12 +564,22 @@ def build_copy_mux_command(
         video_name,
         "-i",
         audio_name,
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=f=196:r={YOUTUBE_AUDIO_RATE}:d=0.4",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=f=131:r={YOUTUBE_AUDIO_RATE}:d={OUTRO_PAD_SECONDS:.1f}",
+        "-filter_complex",
+        _copy_mux_audio_graph(song),
         "-t",
-        f"{duration:.3f}",
+        f"{total:.3f}",
         "-map",
         "0:v:0",
         "-map",
-        "1:a:0",
+        "[a]",
         "-c:v",
         "copy",
         "-c:a",
@@ -610,7 +642,8 @@ def mux_stage_recording(
             output_name=out_name,
             duration=duration,
         )
-        _run_ffmpeg(command, work_dir, duration, on_progress)
+        progress_span = bumpered_duration(duration) if stream_copy else duration
+        _run_ffmpeg(command, work_dir, progress_span, on_progress)
         produced = work_dir / out_name
         if not produced.is_file() or produced.stat().st_size <= 0:
             raise VideoRenderError("ffmpeg no ha generat el MP4")

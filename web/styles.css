@@ -1739,6 +1739,7 @@ body.is-exporting-video .fx {
   visibility: hidden;
 }
 
+/* Overlay paused: progress is back on #exportVideoStatus under the cover buttons.
 .export-overlay {
   position: fixed;
   inset: 0;
@@ -1803,6 +1804,7 @@ body.is-exporting-video .fx {
 .export-overlay-cancel:hover {
   border-color: rgba(255, 246, 234, 0.45);
 }
+*/
 
 .export-capture-canvas {
   position: fixed;
