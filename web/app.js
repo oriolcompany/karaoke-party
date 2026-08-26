@@ -69,9 +69,12 @@ const videoStatus = document.getElementById("videoStatus");
 const videoModeToggle = document.getElementById("videoModeToggle");
 const videoModeOnBtn = document.getElementById("videoModeOnBtn");
 const videoModeCoverBtn = document.getElementById("videoModeCoverBtn");
+const videoModeAuraBtn = document.getElementById("videoModeAuraBtn");
 const videoModeOffBtn = document.getElementById("videoModeOffBtn");
 const stageVideoEl = document.getElementById("stageVideo");
 const stageCoverEl = document.getElementById("stageCover");
+const stageAuraEl = document.getElementById("stageAura");
+const stageAuraCanvas = document.getElementById("stageAuraCanvas");
 const stageCoverArt = document.getElementById("stageCoverArt");
 const stageCoverBlur = document.getElementById("stageCoverBlur");
 const stageVideoDimEl = document.getElementById("stageVideoDim");
@@ -120,9 +123,11 @@ function loadAudioMode() {
   return localStorage.getItem(AUDIO_MODE_KEY) === "instrumental" ? "instrumental" : "original";
 }
 
+const STAGE_BG_MODES = new Set(["video", "cover", "aura", "stage"]);
+
 function loadStageBgMode() {
   const stored = localStorage.getItem(STAGE_BG_KEY);
-  if (stored === "video" || stored === "cover" || stored === "stage") return stored;
+  if (STAGE_BG_MODES.has(stored)) return stored;
   return localStorage.getItem(STAGE_VIDEO_KEY) === "0" ? "stage" : "video";
 }
 
@@ -161,11 +166,13 @@ let selectedIndex = 0;
 let previewToken = 0;
 let previewActive = 0;
 let previewFadeTimer = 0;
-const PREVIEW_FADE_MS = 320;
+const PREVIEW_FADE_IN_MS = 90;
 let previewCtx = null;
 let previewGains = [null, null];
 let previewMasterGain = null;
 let previewGraphReady = false;
+let uiSfxCtx = null;
+let lastCoverTickAt = 0;
 let browseMode = localStorage.getItem(VIEW_MODE_KEY) === "grid" ? "grid" : "cover";
 let libraryBrowseMode =
   localStorage.getItem(LIBRARY_BROWSE_KEY) === "album" ? "album" : "song";
@@ -285,6 +292,7 @@ function showLanding() {
   currentId = null;
   updatePlayButton();
   landingEnterBtn?.focus();
+  syncAuraEngine();
 }
 
 function showTitleScreen() {
@@ -303,6 +311,7 @@ function showTitleScreen() {
   currentId = null;
   updatePlayButton();
   titleRootInput?.focus();
+  syncAuraEngine();
 }
 
 function showMenu() {
@@ -321,6 +330,7 @@ function showMenu() {
   currentId = null;
   updatePlayButton();
   renderSongs(searchEl.value);
+  syncAuraEngine();
 }
 
 function beginStageOutro() {
@@ -413,15 +423,167 @@ function youtubeVideoReady() {
   return Boolean(youtubeCurrent?.found && youtubeCurrent?.video_id && youtubeEmbedOk);
 }
 
+const AURA_RIBBONS = [
+  { rgb: [255, 45, 106], amp: 0.12, freq: 1.15, speed: 0.32, width: 6, phase: 0.2, y: 0.18 },
+  { rgb: [255, 225, 74], amp: 0.1, freq: 0.82, speed: -0.24, width: 4, phase: 1.7, y: 0.8 },
+  { rgb: [61, 231, 255], amp: 0.11, freq: 1.4, speed: 0.41, width: 4, phase: 3.1, y: 0.14 },
+  { rgb: [255, 120, 60], amp: 0.09, freq: 0.62, speed: -0.18, width: 7, phase: 4.4, y: 0.86 },
+];
+
+let auraRaf = 0;
+let auraRunning = false;
+let auraCtx = null;
+let auraW = 0;
+let auraH = 0;
+let auraDpr = 1;
+let auraParticles = [];
+let auraT0 = 0;
+
+function auraReduceMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function auraLive() {
+  return Boolean(viewStage?.classList.contains("is-live"));
+}
+
+function seedAuraParticles(count) {
+  auraParticles = Array.from({ length: count }, () => ({
+    x: Math.random(),
+    y: Math.random(),
+    z: 0.35 + Math.random() * 0.65,
+    vx: (Math.random() - 0.5) * 0.00035,
+    vy: -0.00012 - Math.random() * 0.00028,
+    hue: Math.floor(Math.random() * 3),
+  }));
+}
+
+function resizeAuraCanvas() {
+  if (!stageAuraCanvas || !stageAuraEl) return;
+  const rect = stageAuraEl.getBoundingClientRect();
+  auraDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  auraW = Math.max(1, Math.floor(rect.width));
+  auraH = Math.max(1, Math.floor(rect.height));
+  stageAuraCanvas.width = Math.floor(auraW * auraDpr);
+  stageAuraCanvas.height = Math.floor(auraH * auraDpr);
+  auraCtx = stageAuraCanvas.getContext("2d", { alpha: false });
+  if (auraCtx) auraCtx.setTransform(auraDpr, 0, 0, auraDpr, 0, 0);
+}
+
+function drawAuraRibbon(t, spec, live) {
+  if (!auraCtx) return;
+  const steps = 48;
+  const [r, g, b] = spec.rgb;
+  const energy = live ? 1.35 : 1;
+  auraCtx.beginPath();
+  for (let i = 0; i <= steps; i += 1) {
+    const u = i / steps;
+    const x = u * auraW;
+    const wave =
+      Math.sin(u * Math.PI * 2 * spec.freq + t * spec.speed + spec.phase) * spec.amp +
+      Math.sin(u * Math.PI * 5.2 + t * spec.speed * 0.55) * spec.amp * 0.35;
+    const y = auraH * (spec.y + wave * energy * 0.55);
+    if (i === 0) auraCtx.moveTo(x, y);
+    else auraCtx.lineTo(x, y);
+  }
+  auraCtx.strokeStyle = `rgba(${r},${g},${b},${live ? 0.28 : 0.18})`;
+  auraCtx.lineWidth = spec.width * (live ? 1.25 : 1);
+  auraCtx.lineCap = "round";
+  auraCtx.stroke();
+}
+
+function drawAuraFrame(ts) {
+  if (!auraCtx || !auraW) return;
+  const t = (ts - auraT0) / 1000;
+  const live = auraLive();
+  auraCtx.globalCompositeOperation = "source-over";
+  auraCtx.fillStyle = "rgba(3, 2, 8, 0.22)";
+  auraCtx.fillRect(0, 0, auraW, auraH);
+
+  auraCtx.globalCompositeOperation = "lighter";
+  for (const spec of AURA_RIBBONS) drawAuraRibbon(t, spec, live);
+
+  const palette = [
+    [255, 45, 106],
+    [255, 225, 74],
+    [61, 231, 255],
+  ];
+  for (const p of auraParticles) {
+    p.x += p.vx * (live ? 1.8 : 1) + Math.sin(t * 0.6 + p.y * 12) * 0.00012;
+    p.y += p.vy * (live ? 1.6 : 1);
+    if (p.y < -0.04) p.y = 1.04;
+    if (p.x < -0.04) p.x = 1.04;
+    if (p.x > 1.04) p.x = -0.04;
+    const [r, g, b] = palette[p.hue];
+    const s = (live ? 2.0 : 1.4) * p.z;
+    auraCtx.fillStyle = `rgba(${r},${g},${b},${0.12 + p.z * 0.32})`;
+    auraCtx.beginPath();
+    auraCtx.arc(p.x * auraW, p.y * auraH, s, 0, Math.PI * 2);
+    auraCtx.fill();
+  }
+}
+
+function tickAura(ts) {
+  if (!auraRunning) return;
+  drawAuraFrame(ts);
+  auraRaf = requestAnimationFrame(tickAura);
+}
+
+function stopAuraEngine() {
+  auraRunning = false;
+  if (auraRaf) {
+    cancelAnimationFrame(auraRaf);
+    auraRaf = 0;
+  }
+}
+
+function startAuraEngine() {
+  if (!stageAuraCanvas) return;
+  resizeAuraCanvas();
+  if (auraCtx) {
+    auraCtx.setTransform(auraDpr, 0, 0, auraDpr, 0, 0);
+    auraCtx.fillStyle = "#030208";
+    auraCtx.fillRect(0, 0, auraW, auraH);
+  }
+  if (!auraParticles.length) seedAuraParticles(Math.min(240, Math.floor((auraW * auraH) / 9000) + 90));
+  if (!auraT0) auraT0 = performance.now();
+  if (auraReduceMotion()) {
+    if (auraCtx) {
+      auraCtx.fillStyle = "#030208";
+      auraCtx.fillRect(0, 0, auraW, auraH);
+      drawAuraFrame(auraT0);
+    }
+    return;
+  }
+  if (auraRunning) return;
+  auraRunning = true;
+  auraRaf = requestAnimationFrame(tickAura);
+}
+
+function syncAuraEngine() {
+  const on =
+    stageBgMode === "aura" && viewStage && !viewStage.classList.contains("hidden");
+  if (on) startAuraEngine();
+  else stopAuraEngine();
+}
+
+window.addEventListener("resize", () => {
+  if (!auraRunning && stageBgMode !== "aura") return;
+  resizeAuraCanvas();
+});
+
 function applyVideoModeButtons() {
   const videoReady = youtubeVideoReady();
   const videoOn = stageBgMode === "video" && videoReady;
   const coverOn = stageBgMode === "cover";
+  const auraOn = stageBgMode === "aura";
   videoModeOnBtn?.classList.toggle("is-active", videoOn);
-  videoModeCoverBtn?.classList.toggle("is-active", stageBgMode === "cover");
+  videoModeCoverBtn?.classList.toggle("is-active", coverOn);
+  videoModeAuraBtn?.classList.toggle("is-active", auraOn);
   videoModeOffBtn?.classList.toggle("is-active", stageBgMode === "stage");
   videoModeOnBtn?.setAttribute("aria-pressed", videoOn ? "true" : "false");
-  videoModeCoverBtn?.setAttribute("aria-pressed", stageBgMode === "cover" ? "true" : "false");
+  videoModeCoverBtn?.setAttribute("aria-pressed", coverOn ? "true" : "false");
+  videoModeAuraBtn?.setAttribute("aria-pressed", auraOn ? "true" : "false");
   videoModeOffBtn?.setAttribute("aria-pressed", stageBgMode === "stage" ? "true" : "false");
   if (videoModeOnBtn) {
     videoModeOnBtn.disabled = !videoReady;
@@ -434,14 +596,19 @@ function applyVideoModeButtons() {
   if (videoModeToggle) videoModeToggle.hidden = false;
   viewStage?.classList.toggle("has-video", videoOn);
   viewStage?.classList.toggle("has-cover", coverOn);
+  viewStage?.classList.toggle("has-aura", auraOn);
   if (stageVideoEl) stageVideoEl.setAttribute("aria-hidden", videoOn ? "false" : "true");
   if (stageCoverEl) stageCoverEl.setAttribute("aria-hidden", coverOn ? "false" : "true");
-  if (stageVideoDimEl) stageVideoDimEl.setAttribute("aria-hidden", videoOn || coverOn ? "false" : "true");
+  if (stageAuraEl) stageAuraEl.setAttribute("aria-hidden", auraOn ? "false" : "true");
+  if (stageVideoDimEl) {
+    stageVideoDimEl.setAttribute("aria-hidden", videoOn || coverOn || auraOn ? "false" : "true");
+  }
+  syncAuraEngine();
 }
 
 function setStageBgMode(mode) {
   if (mode === "video" && !youtubeVideoReady()) return;
-  stageBgMode = mode === "cover" || mode === "stage" ? mode : "video";
+  stageBgMode = STAGE_BG_MODES.has(mode) ? mode : "stage";
   localStorage.setItem(STAGE_BG_KEY, stageBgMode);
   applyVideoModeButtons();
   if (stageBgMode === "video" && youtubeCurrent?.video_id) {
@@ -1222,42 +1389,28 @@ function settlePreviewRoles() {
   }
 }
 
-function crossfadePreview(fromIndex, toIndex, token) {
-  if (!previewCtx) return;
-  const fromGain = previewGains[fromIndex];
-  const toGain = previewGains[toIndex];
-  const fromEl = previewPlayers[fromIndex];
-  const fromAlive = fromEl && !fromEl.paused && !fromEl.ended && fromGain.gain.value > 0.01;
-  const now = previewCtx.currentTime;
-  const dur = PREVIEW_FADE_MS / 1000;
-  const steps = 32;
-  const fadeOut = new Float32Array(steps);
-  const fadeIn = new Float32Array(steps);
-  for (let i = 0; i < steps; i += 1) {
-    const t = i / (steps - 1);
-    const angle = t * (Math.PI / 2);
-    fadeOut[i] = fromAlive ? Math.cos(angle) : 0;
-    fadeIn[i] = Math.sin(angle);
+function fadeInPreview(toIndex, token) {
+  if (!previewCtx) {
+    setPreviewGain(toIndex, 1);
+    previewActive = toIndex;
+    return;
   }
-  fromGain.gain.cancelScheduledValues(now);
+  const toGain = previewGains[toIndex];
+  if (!toGain) return;
+  const now = previewCtx.currentTime;
+  const dur = PREVIEW_FADE_IN_MS / 1000;
   toGain.gain.cancelScheduledValues(now);
-  fromGain.gain.setValueAtTime(fromAlive ? Math.max(fromGain.gain.value, 0.001) : 0, now);
   toGain.gain.setValueAtTime(Math.max(toGain.gain.value, 0.0001), now);
-  if (fromAlive) fromGain.gain.setValueCurveAtTime(fadeOut, now, dur);
-  else fromGain.gain.setValueAtTime(0, now);
-  toGain.gain.setValueCurveAtTime(fadeIn, now, dur);
-
+  toGain.gain.exponentialRampToValueAtTime(1, now + dur);
+  previewActive = toIndex;
   previewFadeTimer = setTimeout(() => {
     previewFadeTimer = 0;
     if (token !== previewToken) return;
-    setPreviewGain(fromIndex, 0);
-    clearPreviewElement(fromEl);
     setPreviewGain(toIndex, 1);
-    previewActive = toIndex;
     setTimeout(() => {
       if (token === previewToken) armUpcomingPreview();
     }, 400);
-  }, PREVIEW_FADE_MS + 40);
+  }, PREVIEW_FADE_IN_MS + 40);
 }
 
 function previewUrlFor(trackId) {
@@ -1297,25 +1450,24 @@ function armUpcomingPreview() {
   preparePreviewElement(next, upcoming.id);
 }
 
-function sleepPreview(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForPreviewPrimed(el, token, minTime = 0.15) {
-  const deadline = performance.now() + 1800;
-  while (performance.now() < deadline) {
-    if (token !== previewToken) return false;
-    if (
-      !el.paused &&
-      !el.ended &&
-      el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
-      el.currentTime >= minTime
-    ) {
-      return true;
+function cutPreviewIfNotTrack(trackId) {
+  if (!previewGraphReady) return false;
+  cancelPreviewFade();
+  let keepIndex = -1;
+  previewPlayers.forEach((el, index) => {
+    if (trackId && previewHasTrack(el, trackId) && !el.paused && !el.ended) {
+      keepIndex = index;
     }
-    await sleepPreview(16);
-  }
-  return !el.paused && !el.ended && token === previewToken;
+  });
+  previewPlayers.forEach((el, index) => {
+    if (index === keepIndex) return;
+    setPreviewGain(index, 0);
+    el.pause();
+  });
+  if (keepIndex < 0) return false;
+  previewActive = keepIndex;
+  setPreviewGain(keepIndex, 1);
+  return true;
 }
 
 async function playPreviewForSelection() {
@@ -1324,12 +1476,20 @@ async function playPreviewForSelection() {
     stopPreview();
     return;
   }
-  await ensurePreviewGraph();
-  settlePreviewRoles();
   const token = ++previewToken;
-  const { current, next, currentIndex, nextIndex } = previewSlots();
+  const alreadyPlaying = cutPreviewIfNotTrack(track.id);
+  await ensurePreviewGraph();
+  if (token !== previewToken) return;
 
-  // Already playing this track — keep it, and arm the following one.
+  if (alreadyPlaying) {
+    setTimeout(() => {
+      if (token === previewToken) armUpcomingPreview();
+    }, 200);
+    return;
+  }
+
+  settlePreviewRoles();
+  const { current, next, currentIndex, nextIndex } = previewSlots();
   if (previewHasTrack(current, track.id) && !current.paused && !current.ended) {
     setPreviewGain(currentIndex, 1);
     setTimeout(() => {
@@ -1338,8 +1498,8 @@ async function playPreviewForSelection() {
     return;
   }
 
-  // Keep the current song audible until the next one is really producing audio.
-  if (!current.paused && !current.ended) setPreviewGain(currentIndex, 1);
+  setPreviewGain(currentIndex, 0);
+  silencePreviewElement(current, currentIndex);
   setPreviewGain(nextIndex, 0);
   preparePreviewElement(next, track.id);
 
@@ -1357,17 +1517,11 @@ async function playPreviewForSelection() {
       if (token !== previewToken) silencePreviewElement(next, nextIndex);
       return;
     }
-    const primed = await waitForPreviewPrimed(next, token, 0.15);
     if (token !== previewToken) {
       silencePreviewElement(next, nextIndex);
       return;
     }
-    if (!primed && (current.paused || current.ended)) {
-      setPreviewGain(nextIndex, 1);
-      previewActive = nextIndex;
-      return;
-    }
-    crossfadePreview(currentIndex, nextIndex, token);
+    fadeInPreview(nextIndex, token);
   };
 
   if (next.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
@@ -1579,7 +1733,7 @@ function closeAlbum() {
   applyLibraryBrowseMode();
   renderSongs(searchEl.value, { play: true });
   const idx = filteredAlbums.findIndex((a) => a.key === previousKey);
-  if (idx >= 0) setSelectedIndex(idx, { play: true });
+  if (idx >= 0) setSelectedIndex(idx, { play: true, tick: false });
 }
 
 function updateCoverMeta() {
@@ -2086,7 +2240,102 @@ function gridColumnCount() {
   return Math.max(1, cols);
 }
 
-function setSelectedIndex(index, { play = true } = {}) {
+function coverStepDirection(from, to, length) {
+  if (from === to || length < 2) return 0;
+  const forward = (to - from + length) % length;
+  const backward = (from - to + length) % length;
+  return forward <= backward ? 1 : -1;
+}
+
+function playCoverStepSoundNow(direction) {
+  if (!uiSfxCtx || !direction) return;
+  const nowMs = performance.now();
+  if (nowMs - lastCoverTickAt < 40) return;
+  lastCoverTickAt = nowMs;
+  const ctx = uiSfxCtx;
+  const t0 = ctx.currentTime;
+  const pan = typeof ctx.createStereoPanner === "function" ? ctx.createStereoPanner() : null;
+  if (pan) {
+    pan.pan.setValueAtTime(direction > 0 ? 0.22 : -0.22, t0);
+    pan.connect(ctx.destination);
+  }
+  const out = pan || ctx.destination;
+
+  const body = ctx.createOscillator();
+  const bodyGain = ctx.createGain();
+  body.type = "triangle";
+  body.frequency.setValueAtTime(290, t0);
+  body.frequency.exponentialRampToValueAtTime(130, t0 + 0.1);
+  bodyGain.gain.setValueAtTime(0.0001, t0);
+  bodyGain.gain.exponentialRampToValueAtTime(0.74, t0 + 0.004);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+  body.connect(bodyGain);
+  bodyGain.connect(out);
+  body.start(t0);
+  body.stop(t0 + 0.14);
+
+  const thump = ctx.createOscillator();
+  const thumpGain = ctx.createGain();
+  thump.type = "sine";
+  thump.frequency.setValueAtTime(180, t0);
+  thump.frequency.exponentialRampToValueAtTime(92, t0 + 0.11);
+  thumpGain.gain.setValueAtTime(0.0001, t0);
+  thumpGain.gain.exponentialRampToValueAtTime(0.54, t0 + 0.005);
+  thumpGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+  thump.connect(thumpGain);
+  thumpGain.connect(out);
+  thump.start(t0);
+  thump.stop(t0 + 0.15);
+
+  const click = ctx.createOscillator();
+  const clickGain = ctx.createGain();
+  click.type = "triangle";
+  click.frequency.setValueAtTime(840, t0);
+  click.frequency.exponentialRampToValueAtTime(360, t0 + 0.07);
+  clickGain.gain.setValueAtTime(0.0001, t0);
+  clickGain.gain.exponentialRampToValueAtTime(0.4, t0 + 0.003);
+  clickGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
+  click.connect(clickGain);
+  clickGain.connect(out);
+  click.start(t0);
+  click.stop(t0 + 0.1);
+
+  const n = Math.max(1, Math.floor(ctx.sampleRate * 0.04));
+  const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i += 1) {
+    const env = 1 - i / n;
+    data[i] = (Math.random() * 2 - 1) * env;
+  }
+  const noise = ctx.createBufferSource();
+  noise.buffer = buf;
+  const band = ctx.createBiquadFilter();
+  band.type = "bandpass";
+  band.frequency.value = 620;
+  band.Q.value = 0.9;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0.0001, t0);
+  noiseGain.gain.exponentialRampToValueAtTime(0.26, t0 + 0.002);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.06);
+  noise.connect(band);
+  band.connect(noiseGain);
+  noiseGain.connect(out);
+  noise.start(t0);
+}
+
+function playCoverStepSound(direction) {
+  if (!direction) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  if (!uiSfxCtx) uiSfxCtx = new Ctx();
+  if (uiSfxCtx.state === "suspended") {
+    uiSfxCtx.resume().then(() => playCoverStepSoundNow(direction)).catch(() => {});
+    return;
+  }
+  playCoverStepSoundNow(direction);
+}
+
+function setSelectedIndex(index, { play = true, tick = true } = {}) {
   const list = browseList();
   if (!list.length) {
     selectedIndex = 0;
@@ -2094,11 +2343,20 @@ function setSelectedIndex(index, { play = true } = {}) {
     stopPreview();
     return;
   }
+  const from = selectedIndex;
   const next = ((index % list.length) + list.length) % list.length;
   selectedIndex = next;
   layoutCovers();
   layoutGridSelection();
   updateCoverMeta();
+  if (
+    tick &&
+    browseMode === "cover" &&
+    from !== next &&
+    !viewMenu.classList.contains("hidden")
+  ) {
+    playCoverStepSound(coverStepDirection(from, next, list.length));
+  }
   if (play && !viewMenu.classList.contains("hidden")) {
     playPreviewForSelection();
   }
@@ -2253,6 +2511,7 @@ function renderSongs(filter = "", options = { play: true }) {
   if (selectedIndex >= list.length) selectedIndex = 0;
   setSelectedIndex(selectedIndex, {
     play: options.play !== false && !viewMenu.classList.contains("hidden"),
+    tick: false,
   });
 }
 
@@ -2346,6 +2605,7 @@ function showStage() {
   viewStage.classList.remove("hidden");
   document.body.classList.remove("mode-title");
   document.body.classList.add("mode-stage");
+  syncAuraEngine();
 }
 
 function buildWordNode(word) {
@@ -3679,6 +3939,7 @@ audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
 audioModeInstrumentalBtn?.addEventListener("click", () => setAudioMode("instrumental"));
 videoModeOnBtn?.addEventListener("click", () => setStageBgMode("video"));
 videoModeCoverBtn?.addEventListener("click", () => setStageBgMode("cover"));
+videoModeAuraBtn?.addEventListener("click", () => setStageBgMode("aura"));
 videoModeOffBtn?.addEventListener("click", () => setStageBgMode("stage"));
 generateStemsBtn?.addEventListener("click", () => startStemsGeneration());
 searchYoutubeMissingBtn?.addEventListener("click", () => startYoutubeSearch("missing"));

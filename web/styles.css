@@ -1565,7 +1565,7 @@ button:hover {
 .view-stage {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
   max-height: 100dvh;
@@ -1576,6 +1576,7 @@ button:hover {
 }
 
 .view-stage.is-outro .back-btn,
+.view-stage.is-outro .stage-back-layer,
 .view-stage.is-outro .stage-meta,
 .view-stage.is-outro .karaoke-board,
 .view-stage.is-outro .stage-dock-layer {
@@ -1639,14 +1640,69 @@ button:hover {
 .view-stage.has-video .stage-video,
 .view-stage.has-video .stage-video-dim,
 .view-stage.has-cover .stage-cover,
-.view-stage.has-cover .stage-video-dim {
+.view-stage.has-cover .stage-video-dim,
+.view-stage.has-aura .stage-aura {
   opacity: 1;
   visibility: visible;
 }
 
 .view-stage.has-video .stage-fx,
-.view-stage.has-cover .stage-fx {
+.view-stage.has-cover .stage-fx,
+.view-stage.has-aura .stage-fx {
   opacity: 0;
+}
+
+.stage-aura {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  background: #030208;
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.stage-aura-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.stage-aura-grain {
+  position: absolute;
+  inset: 0;
+  opacity: 0.18;
+  mix-blend-mode: overlay;
+  background-image: repeating-radial-gradient(
+    circle at 20% 20%,
+    rgba(255, 246, 234, 0.16) 0 0.6px,
+    transparent 0.8px 3px
+  );
+  background-size: 140px 140px;
+}
+
+.stage-aura-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, transparent 16%, transparent 84%, rgba(0, 0, 0, 0.5) 100%);
+}
+
+.view-stage.has-aura .stage-artist,
+.view-stage.has-aura .stage-title,
+.view-stage.has-aura .k-word,
+.view-stage.has-aura .k-word-base,
+.view-stage.has-aura .k-word-fill,
+.view-stage.has-aura .k-slot-next .k-word {
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.7),
+    0 2px 8px rgba(0, 0, 0, 0.85),
+    0 0 18px rgba(0, 0, 0, 0.8),
+    0 0 36px rgba(0, 0, 0, 0.55);
 }
 
 .stage-cover {
@@ -1958,8 +2014,16 @@ button:hover {
   }
 }
 
+.stage-back-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 4;
+  padding: 0.75rem 2.4rem 2.2rem 0.75rem;
+  pointer-events: none;
+}
+
 .back-btn {
-  justify-self: start;
   position: relative;
   z-index: 2;
   background: rgba(0, 0, 0, 0.35);
@@ -1991,7 +2055,6 @@ button:hover {
   font-size: clamp(1.6rem, 4.5vw, 2.8rem);
   letter-spacing: 0.03em;
   line-height: 0.95;
-  opacity: 0.92;
   text-shadow: none;
 }
 
@@ -2303,15 +2366,35 @@ button:hover {
   .view-stage:not(.is-outro) .stage-dock-layer:has(:focus-visible)::before {
     opacity: 1;
   }
+
+  .view-stage:not(.is-outro) .stage-back-layer {
+    pointer-events: auto;
+  }
+
+  .view-stage:not(.is-outro) .back-btn {
+    opacity: 0;
+    transform: translateY(-0.45rem);
+    pointer-events: none;
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+
+  .view-stage:not(.is-outro) .stage-back-layer:hover .back-btn,
+  .view-stage:not(.is-outro) .stage-back-layer:has(:focus-visible) .back-btn {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .stage-dock,
-  .stage-dock-layer::before {
+  .stage-dock-layer::before,
+  .back-btn {
     transition-duration: 0.01ms !important;
   }
 
-  .view-stage:not(.is-outro) .stage-dock {
+  .view-stage:not(.is-outro) .stage-dock,
+  .view-stage:not(.is-outro) .back-btn {
     transform: none;
   }
 }
@@ -2328,7 +2411,7 @@ button:hover {
 }
 
 .stage-toggle .settings-toggle-btn {
-  padding: 0.5rem 0.78rem;
+  padding: 0.48rem 0.68rem;
 }
 
 .stage-toggles {

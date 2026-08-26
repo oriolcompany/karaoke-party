@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=37" />
+    <link rel="stylesheet" href="/styles.css?v=46" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -567,6 +567,11 @@
         <img id="stageCoverBlur" class="stage-cover-blur" alt="" draggable="false" />
         <img id="stageCoverArt" class="stage-cover-art" alt="" draggable="false" />
       </div>
+      <div id="stageAura" class="stage-aura" aria-hidden="true">
+        <canvas id="stageAuraCanvas" class="stage-aura-canvas"></canvas>
+        <div class="stage-aura-grain"></div>
+        <div class="stage-aura-vignette"></div>
+      </div>
       <div id="stageVideoDim" class="stage-video-dim" aria-hidden="true"></div>
       <div class="stage-fx" aria-hidden="true">
         <div class="stage-curtains"></div>
@@ -587,7 +592,9 @@
         </div>
       </div>
 
-      <button id="backBtn" class="back-btn" type="button">← Cançons</button>
+      <div class="stage-back-layer">
+        <button id="backBtn" class="back-btn" type="button">← Cançons</button>
+      </div>
 
       <div class="stage-meta">
         <p id="songArtist" class="stage-artist"></p>
@@ -642,6 +649,14 @@
                 Portada
               </button>
               <button
+                id="videoModeAuraBtn"
+                type="button"
+                class="settings-toggle-btn"
+                aria-pressed="false"
+              >
+                Aura
+              </button>
+              <button
                 id="videoModeOffBtn"
                 type="button"
                 class="settings-toggle-btn"
@@ -658,6 +673,6 @@
       </div>
     </section>
 
-    <script src="/app.js?v=49"></script>
+    <script src="/app.js?v=68"></script>
   </body>
 </html>
