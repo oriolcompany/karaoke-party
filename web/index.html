@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=46" />
+    <link rel="stylesheet" href="/styles.css?v=48" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -196,6 +196,9 @@
         <div class="cover-actions">
           <button id="albumBackBtn" class="album-back-btn" type="button" hidden>← Àlbums</button>
           <button id="singBtn" class="sing-btn" type="button">Cantar</button>
+          <button id="pasteLyricsBtn" class="paste-lyrics-btn" type="button" hidden>
+            Editar lletra
+          </button>
           <button id="resyncCoverBtn" class="resync-cover-btn" type="button" hidden>Nova portada</button>
           <p id="syncQueueMeta" class="sync-queue-meta" hidden></p>
         </div>
@@ -276,8 +279,10 @@
                 <h4 class="settings-block-title">Lletres</h4>
                 <div class="settings-inline-row">
                   <p class="settings-help">
-                    Descarrega només les lletres bàsiques (LRCLIB) de les cançons que encara no en
-                    tenen. No s’executa en obrir el programa.
+                    Descarrega les lletres de les cançons que encara no en tenen: primer el fitxer
+                    (.lrc / tags), després LRCLIB i lyrics.ovh. Si el MP3 no en té, s’incrusten al
+                    tag. No s’executa en obrir el programa. Pots editar la còpia del fitxer des de
+                    la cançó.
                   </p>
                   <button id="resyncLyricsMissingBtn" type="button">
                     Resincronitzar sense lletra
@@ -411,6 +416,29 @@
                       aria-pressed="false"
                     >
                       Dues línies
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Punts flotants del fons Aura. Les cintes de color es mantenen.
+                  </p>
+                  <div class="settings-toggle" role="group" aria-label="Partícules del fons Aura">
+                    <button
+                      id="auraParticlesOnBtn"
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      aria-pressed="true"
+                    >
+                      Amb partícules
+                    </button>
+                    <button
+                      id="auraParticlesOffBtn"
+                      type="button"
+                      class="settings-toggle-btn"
+                      aria-pressed="false"
+                    >
+                      Sense partícules
                     </button>
                   </div>
                 </div>
@@ -551,6 +579,48 @@
       </div>
     </div>
 
+    <div
+      id="lyricsPasteModal"
+      class="settings-modal lyrics-paste-modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="lyricsPasteTitle"
+      hidden
+    >
+      <div class="settings-backdrop" data-lyrics-paste-close></div>
+      <div class="settings-panel lyrics-paste-panel">
+        <header class="settings-header">
+          <h2 id="lyricsPasteTitle">Editar lletra</h2>
+          <button
+            id="lyricsPasteCloseBtn"
+            class="settings-close"
+            type="button"
+            aria-label="Tancar"
+            data-lyrics-paste-close
+          >
+            ×
+          </button>
+        </header>
+        <div class="lyrics-paste-body">
+          <p id="lyricsPasteMeta" class="settings-help">
+            Enganxa o edita la lletra desada al fitxer (text pla o LRC). Whisper s’encarrega dels temps.
+          </p>
+          <textarea
+            id="lyricsPasteInput"
+            spellcheck="true"
+            placeholder="Una línia per frase, o LRC amb [00:12.00]…"
+          ></textarea>
+          <p id="lyricsPasteStatus" class="settings-status" aria-live="polite"></p>
+          <div class="lyrics-paste-actions">
+            <button id="lyricsPasteCancelBtn" class="settings-secondary-btn" type="button">
+              Cancel·lar
+            </button>
+            <button id="lyricsPasteSaveBtn" type="button">Desar al fitxer</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Escenari de karaoke -->
     <section id="view-stage" class="view view-stage hidden">
       <div id="stageVideo" class="stage-video" aria-hidden="true">
@@ -667,12 +737,15 @@
             </div>
           </div>
           <p id="lyricsStatus" class="status">Preparat</p>
+          <button id="stagePasteLyricsBtn" class="paste-lyrics-btn stage-paste-lyrics-btn" type="button" hidden>
+            Editar lletra
+          </button>
           <p id="audioModeStatus" class="status stage-substatus" aria-live="polite"></p>
           <p id="videoStatus" class="status stage-substatus" aria-live="polite"></p>
         </div>
       </div>
     </section>
 
-    <script src="/app.js?v=68"></script>
+    <script src="/app.js?v=71"></script>
   </body>
 </html>

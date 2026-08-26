@@ -2,9 +2,12 @@ from karaoke_party.lyrics import (
     LyricLine,
     LyricWord,
     attach_word_timings,
+    clean_query_text,
     estimate_words,
     parse_enhanced_words,
     parse_lrc,
+    payload_from_text,
+    payload_to_text,
     tighten_phrase_onsets,
 )
 
@@ -97,3 +100,25 @@ def test_tighten_keeps_held_word_after_a_pause() -> None:
     first = lines[1].words[0]
     assert abs(first.time - 12.0) < 0.01
     assert abs(first.end - 14.0) < 0.01
+
+
+def test_clean_query_text_strips_feat_and_version() -> None:
+    assert clean_query_text("Cançó (feat. Algú)") == "Cançó"
+    assert clean_query_text("Cançó (Remastered)") == "Cançó"
+    assert clean_query_text("Artist ft. Other") == "Artist"
+
+
+def test_payload_from_text_plain_and_lrc() -> None:
+    plain = payload_from_text("Hola\nAdéu", "manual")
+    assert plain is not None
+    assert plain.synced is False
+    assert [line.text for line in plain.lines] == ["Hola", "Adéu"]
+
+    lrc = payload_from_text("[00:10.00]Hola\n[00:12.00]Adéu", "manual")
+    assert lrc is not None
+    assert lrc.synced is True
+    assert lrc.lines[0].time == 10.0
+    assert [line.text for line in lrc.lines] == ["Hola", "Adéu"]
+    rendered = payload_to_text(lrc)
+    assert rendered.startswith("[00:10.00]Hola")
+    assert "[00:12.00]Adéu" in rendered

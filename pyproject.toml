@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "karaoke-party"
 version = "0.1.0"
-description = "Local web karaoke player with synced lyrics from LRCLIB"
+description = "Local web karaoke player with lyrics lookup and Whisper alignment"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

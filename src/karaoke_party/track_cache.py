@@ -3,7 +3,7 @@
 One folder holds everything for a song so export/import is a single copy:
 
 - ``meta.json`` — artist, title, duration (human-readable + import checks)
-- ``lyrics.json`` — LRCLIB / probe result
+- ``lyrics.json`` — lookup / local / manual / probe result
 - ``aligned.json`` — Whisper word timings
 - ``instrumental.mp3`` / ``vocals.mp3`` — stem separation
 - ``cover.<ext>`` — artwork bytes

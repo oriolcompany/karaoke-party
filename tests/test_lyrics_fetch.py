@@ -50,7 +50,7 @@ async def test_throttled_lookup_raises_instead_of_caching_miss(tmp_path: Path, m
     with pytest.raises(LyricsUnavailable):
         await fetch_lyrics(artist="A", title="B", cache_dir=tmp_path)
 
-    assert calls["n"] == 3  # retried instead of failing on the first 429
+    assert calls["n"] >= 3  # LRCLIB, then lyrics.ovh if LRCLIB stays throttled
     assert list(tmp_path.glob("*.json")) == []  # nothing cached as a miss
 
 

@@ -1,7 +1,8 @@
 # Karaoke Party
 
-Local web karaoke: pick a folder of tagged MP3s, fetch synced lyrics from
-[LRCLIB](https://lrclib.net), align words to the audio, and sing along in the browser.
+Local web karaoke: pick a folder of tagged MP3s, fetch lyrics from
+[LRCLIB](https://lrclib.net) (with local files and lyrics.ovh as fallbacks),
+align words to the audio, and sing along in the browser.
 
 ## Quick start (Windows)
 
@@ -108,8 +109,8 @@ For full Whisper alignment support, prefer `KaraokeParty.bat`.
 
 ## How it works
 
-1. The server scans the music folder and reads title/artist/album/duration from tags. Basic LRCLIB sync does **not** run on startup.
-2. Synced lyrics (LRC) are fetched from LRCLIB when you open a song, run Whisper sync, or use Settings → “Resincronitzar sense lletra”, and cached under `tracks/<key>/lyrics.json`.
+1. The server scans the music folder and reads title/artist/album/duration from tags. Basic lyrics lookup does **not** run on startup.
+2. Lyrics are fetched when you open a song, run Whisper sync, or use Settings → “Resincronitzar sense lletra”, and cached under `tracks/<key>/lyrics.json`. Lookup order: sidecar `.lrc`/`.txt` next to the audio and ID3 `USLT`/`SYLT` tags; then [LRCLIB](https://lrclib.net) with relaxed title/duration matching; then plain lyrics from [lyrics.ovh](https://lyricsovh.docs.apiary.io). Hits from the internet are **embedded into the audio file** when it has no lyrics yet. **Editar lletra** shows and saves that local copy.
 3. Whisper sync always runs the chain **basic lyrics → stem separation → Whisper → MMS syllables**. Word timings are cached under `tracks/<key>/aligned.json`. Matching locates each lyric line as a phrase in the ASR, then aligns words inside that span, so a misheard word cannot steal the next line. Repeated choruses stay monotonic, and tokens can merge in both directions (`l'amor` vs `l'` + `amor`). MMS then timestamps each letter of that known line on the vocal stem and the fill is grouped into Catalan syllables (`brin`+`dar`). If MMS is unavailable, syllable edges fall back to energy valleys inside the Whisper word window.
 4. When alignment finishes (or is already cached), the stage swaps to syllable-accurate timings.
 5. Covers are resolved from embedded tags, then folder art, then iTunes (and embedded back into the file); a copy also lives at `tracks/<key>/cover.<ext>`.
@@ -140,6 +141,7 @@ tracks/<key>/
 - Best results when files already have clean `title` and `artist` tags (e.g. after music-cataloger).
 - Default alignment language is Catalan (`ca`). Change via `POST /api/align` body `language`.
 - Improving the aligner bumps `ALIGNED_CACHE_VERSION`, so songs aligned by an older version are recomputed on demand.
-- Not every song has synced lyrics on LRCLIB; plain lyrics are shown when only those exist.
+- Not every song has lyrics online; plain lyrics (including pasted or local files) are shown when only those exist, and Whisper still times them.
+- Songs still missing after lookup can be filled in from the browse view or the stage with **Editar lletra** (stored on the audio file).
 - Stage video search needs network access and `yt-dlp` (installed with the base package). Set `KARAOKE_YOUTUBE=0` to skip search. Tagged YouTube URLs or a yt-dlp `[id]` in the filename still count.
 - This is for personal/local use with music you own.

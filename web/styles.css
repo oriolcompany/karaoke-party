@@ -634,6 +634,50 @@ button:hover {
   display: none !important;
 }
 
+.lyrics-paste-modal {
+  place-items: center;
+}
+
+.lyrics-paste-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.2rem 1.2rem;
+  min-height: 0;
+  flex: 1;
+}
+
+.lyrics-paste-body textarea {
+  flex: 1 1 auto;
+  min-height: 14rem;
+  width: 100%;
+  resize: vertical;
+  border-radius: 0.85rem;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+  padding: 0.85rem 1rem;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.lyrics-paste-body textarea:focus {
+  outline: 2px solid rgba(255, 246, 234, 0.28);
+  outline-offset: 1px;
+}
+
+.lyrics-paste-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.stage-paste-lyrics-btn {
+  min-width: 0;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.78rem;
+}
+
 .settings-backdrop {
   position: absolute;
   inset: 0;
@@ -657,6 +701,12 @@ button:hover {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
   animation: settings-in 180ms ease-out;
   overflow: hidden;
+}
+
+.settings-panel.lyrics-paste-panel {
+  width: min(42rem, 100%);
+  height: auto;
+  max-height: min(38rem, 92vh);
 }
 
 @keyframes settings-in {
@@ -1506,6 +1556,32 @@ button:hover {
   filter: none;
 }
 
+.paste-lyrics-btn {
+  min-width: 8.5rem;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.86rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.paste-lyrics-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.paste-lyrics-btn.is-needed {
+  color: var(--ink);
+  border-color: rgba(217, 119, 6, 0.7);
+}
+
+.paste-lyrics-btn[hidden] {
+  display: none !important;
+}
+
 .sync-queue-meta {
   margin: 0.15rem 0 0;
   color: var(--muted);
@@ -1683,6 +1759,10 @@ button:hover {
     transparent 0.8px 3px
   );
   background-size: 140px 140px;
+}
+
+.view-stage.aura-no-particles .stage-aura-grain {
+  display: none;
 }
 
 .stage-aura-vignette {

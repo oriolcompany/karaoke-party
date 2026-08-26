@@ -59,6 +59,10 @@ from .lyrics import (
     lyrics_status_and_source,
     save_aligned_cached,
     save_cached,
+    save_manual_lyrics,
+    maybe_embed_lyrics,
+    payload_to_text,
+    read_local_lyrics,
 )
 from .syllables import expand_syllable_tokens, has_syllable_glue, refine_syllable_timings
 from .stems import (
@@ -187,6 +191,11 @@ class ResyncLyricsBody(BaseModel):
     """scope: all = every track; missing = only songs without lyrics now."""
 
     scope: str = "all"
+
+
+class SaveLyricsBody(BaseModel):
+    track_id: str
+    text: str
 
 
 class YoutubeSearchBody(BaseModel):
@@ -393,6 +402,7 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
                 album=track.album,
                 duration=track.duration,
                 cache_dir=cache_dir(),
+                audio_path=track.path,
             )
         )
         if not payload.lines:
@@ -617,6 +627,7 @@ def _library_snapshot() -> dict:
             track.duration,
             lyrics_cache=lyrics_path,
             aligned_cache=aligned_path,
+            audio_path=track.path,
         )
         if status is True:
             playable_tracks.append(track)
@@ -718,6 +729,7 @@ def _run_lyrics_probe(track_ids: list[str], generation: int) -> None:
             duration=track.duration,
             cache_dir=lyrics_path,
             timeout=PROBE_TIMEOUT,
+            audio_path=track.path,
         )
         return bool(payload.lines)
 
@@ -816,6 +828,7 @@ def _ensure_lyrics_probe(
                     track.duration,
                     lyrics_cache=lyrics_path,
                     aligned_cache=aligned_path,
+                    audio_path=track.path,
                 )[0]
                 is None
             ]
@@ -891,7 +904,7 @@ def whisper_status() -> dict:
 
 @app.get("/api/library")
 def library() -> dict:
-    # Basic LRCLIB sync is manual (settings) or the first step of Whisper align —
+    # Basic lyrics lookup is manual (settings) or the first step of Whisper align —
     # never kicked off just by opening the library.
     return _library_snapshot()
 
@@ -937,7 +950,7 @@ def _wait_for_probe_idle() -> None:
 
 @app.post("/api/library/lyrics/resync")
 def resync_basic_lyrics(body: ResyncLyricsBody | None = None) -> dict:
-    """Force re-fetch of basic LRCLIB lyrics.
+    """Force re-fetch of basic lyrics (local files, LRCLIB, lyrics.ovh).
 
     scope=all: every scanned track.
     scope=missing: only tracks that currently have no lyrics.
@@ -964,6 +977,7 @@ def resync_basic_lyrics(body: ResyncLyricsBody | None = None) -> dict:
                 track.duration,
                 lyrics_cache=lyrics_path,
                 aligned_cache=aligned_path,
+                audio_path=track.path,
             )
             if status is True:
                 continue
@@ -1396,8 +1410,51 @@ async def lyrics(track_id: str = Query(...)):
         album=track.album,
         duration=track.duration,
         cache_dir=cache_dir(),
+        audio_path=track.path,
     )
     return _lyrics_response(track, track_id, payload, aligned=False)
+
+
+@app.get("/api/lyrics/local")
+def local_lyrics(track_id: str = Query(...)) -> dict:
+    """Lyrics stored on the audio file (sidecar or tags) for the editor."""
+    track = _resolve_track(track_id)
+    payload = read_local_lyrics(track.path)
+    if payload is None:
+        cached = load_cached(
+            cache_dir(), cache_key(track.artist, track.title, track.duration)
+        )
+        if cached is not None and cached.lines:
+            maybe_embed_lyrics(track.path, cached)
+            payload = read_local_lyrics(track.path)
+    return {
+        "track_id": track_id,
+        "title": track.title,
+        "artist": track.artist,
+        "source": payload.source if payload else "",
+        "synced": bool(payload and payload.synced),
+        "text": payload_to_text(payload),
+    }
+
+
+@app.post("/api/lyrics")
+def save_lyrics(body: SaveLyricsBody) -> dict:
+    """Store pasted lyrics on the audio file and drop stale Whisper alignment."""
+    track = _resolve_track(body.track_id)
+    try:
+        payload = save_manual_lyrics(
+            cache_dir(),
+            artist=track.artist,
+            title=track.title,
+            album=track.album,
+            duration=track.duration,
+            text=body.text,
+            aligned_cache=aligned_cache_dir(),
+            audio_path=track.path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _lyrics_response(track, body.track_id, payload, aligned=False)
 
 
 @app.get("/api/youtube")

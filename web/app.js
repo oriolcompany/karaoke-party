@@ -42,6 +42,16 @@ const coverIndex = document.getElementById("coverIndex");
 const coverPrev = document.getElementById("coverPrev");
 const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
+const pasteLyricsBtn = document.getElementById("pasteLyricsBtn");
+const stagePasteLyricsBtn = document.getElementById("stagePasteLyricsBtn");
+const lyricsPasteModal = document.getElementById("lyricsPasteModal");
+const lyricsPasteCloseBtn = document.getElementById("lyricsPasteCloseBtn");
+const lyricsPasteCancelBtn = document.getElementById("lyricsPasteCancelBtn");
+const lyricsPasteSaveBtn = document.getElementById("lyricsPasteSaveBtn");
+const lyricsPasteInput = document.getElementById("lyricsPasteInput");
+const lyricsPasteMeta = document.getElementById("lyricsPasteMeta");
+const lyricsPasteStatus = document.getElementById("lyricsPasteStatus");
+const lyricsPasteTitle = document.getElementById("lyricsPasteTitle");
 const modeCoverBtn = document.getElementById("modeCover");
 const modeGridBtn = document.getElementById("modeGrid");
 const syncStatusBtn = document.getElementById("syncStatusBtn");
@@ -61,6 +71,8 @@ const muteOffBtn = document.getElementById("muteOffBtn");
 const muteOnBtn = document.getElementById("muteOnBtn");
 const lyricsLayoutStackBtn = document.getElementById("lyricsLayoutStackBtn");
 const lyricsLayoutDualBtn = document.getElementById("lyricsLayoutDualBtn");
+const auraParticlesOnBtn = document.getElementById("auraParticlesOnBtn");
+const auraParticlesOffBtn = document.getElementById("auraParticlesOffBtn");
 const audioModeToggle = document.getElementById("audioModeToggle");
 const audioModeOriginalBtn = document.getElementById("audioModeOriginalBtn");
 const audioModeInstrumentalBtn = document.getElementById("audioModeInstrumentalBtn");
@@ -108,6 +120,7 @@ const ALIGN_MODE_KEY = "karaoke-align-mode";
 const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
 const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
+const AURA_PARTICLES_KEY = "karaoke-aura-particles";
 const AUDIO_MODE_KEY = "karaoke-audio-mode";
 const STAGE_VIDEO_KEY = "karaoke-stage-video";
 const STAGE_BG_KEY = "karaoke-stage-bg";
@@ -117,6 +130,10 @@ let coverBust = 0;
 function loadLyricsLayout() {
   const stored = localStorage.getItem(LYRICS_LAYOUT_KEY);
   return stored === "dual" ? "dual" : "stack";
+}
+
+function loadAuraParticlesEnabled() {
+  return localStorage.getItem(AURA_PARTICLES_KEY) !== "0";
 }
 
 function loadAudioMode() {
@@ -179,6 +196,7 @@ let libraryBrowseMode =
 let lyricsFilterMode = loadLyricsFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
+let auraParticlesEnabled = loadAuraParticlesEnabled();
 let audioMode = loadAudioMode();
 let stageBgMode = loadStageBgMode();
 let bootLibraryReady = false;
@@ -192,6 +210,8 @@ let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
 let lyricLines = [];
+let lastLyricsPlain = "";
+let lyricsPasteTrackId = "";
 let lyricsAligned = false;
 let activeLineIndex = -1;
 let wordNodes = [];
@@ -380,6 +400,25 @@ function setLyricsLayout(mode) {
   }
 }
 
+function applyAuraParticles() {
+  const on = auraParticlesEnabled;
+  auraParticlesOnBtn?.classList.toggle("is-active", on);
+  auraParticlesOffBtn?.classList.toggle("is-active", !on);
+  auraParticlesOnBtn?.setAttribute("aria-pressed", on ? "true" : "false");
+  auraParticlesOffBtn?.setAttribute("aria-pressed", on ? "false" : "true");
+  viewStage?.classList.toggle("aura-no-particles", !on);
+  if (!on) auraParticles = [];
+  else if (auraRunning && !auraParticles.length) {
+    seedAuraParticles(Math.min(240, Math.floor((auraW * auraH) / 9000) + 90));
+  }
+}
+
+function setAuraParticlesEnabled(enabled) {
+  auraParticlesEnabled = Boolean(enabled);
+  localStorage.setItem(AURA_PARTICLES_KEY, auraParticlesEnabled ? "1" : "0");
+  applyAuraParticles();
+}
+
 function audioUrlFor(trackId, mode) {
   const base = `/api/audio/${encodeURI(trackId)}`;
   return mode === "instrumental" ? `${base}?mode=instrumental` : base;
@@ -503,6 +542,8 @@ function drawAuraFrame(ts) {
   auraCtx.globalCompositeOperation = "lighter";
   for (const spec of AURA_RIBBONS) drawAuraRibbon(t, spec, live);
 
+  if (!auraParticlesEnabled) return;
+
   const palette = [
     [255, 45, 106],
     [255, 225, 74],
@@ -545,7 +586,9 @@ function startAuraEngine() {
     auraCtx.fillStyle = "#030208";
     auraCtx.fillRect(0, 0, auraW, auraH);
   }
-  if (!auraParticles.length) seedAuraParticles(Math.min(240, Math.floor((auraW * auraH) / 9000) + 90));
+  if (auraParticlesEnabled && !auraParticles.length) {
+    seedAuraParticles(Math.min(240, Math.floor((auraW * auraH) / 9000) + 90));
+  }
   if (!auraT0) auraT0 = performance.now();
   if (auraReduceMotion()) {
     if (auraCtx) {
@@ -1956,6 +1999,7 @@ function showAlignBadges() {
 }
 
 function updatePrimaryAction() {
+  updatePasteLyricsButton();
   const item = selectedBrowseItem();
   const track = selectedTrack();
   const syncActions = isSyncActionMode();
@@ -2001,6 +2045,24 @@ function updatePrimaryAction() {
     singBtn.textContent = "Sincronitzar";
   }
   updateSyncQueueMeta();
+}
+
+function updatePasteLyricsButton() {
+  const track = isAlbumListView() ? null : selectedTrack();
+  const showBrowse = Boolean(track);
+  if (pasteLyricsBtn) {
+    pasteLyricsBtn.hidden = !showBrowse;
+    pasteLyricsBtn.disabled = !showBrowse;
+    pasteLyricsBtn.classList.toggle(
+      "is-needed",
+      Boolean(showBrowse && track.has_lyrics === false && !track.lyrics_pending)
+    );
+  }
+  const onStage = Boolean(currentId && viewStage && !viewStage.classList.contains("hidden"));
+  const missingOnStage = onStage && !lyricLines.length;
+  if (stagePasteLyricsBtn) {
+    stagePasteLyricsBtn.hidden = !missingOnStage;
+  }
 }
 
 function applyAlignStatusMode() {
@@ -2897,6 +2959,7 @@ function setLyricsAligned(aligned) {
 
 function renderLyrics(payload) {
   lyricLines = payload.lines || [];
+  lastLyricsPlain = payload.plain || lyricLines.map((line) => line.text).join("\n");
   activeLineIndex = -1;
   wordNodes = [];
   setLyricsAligned(payload.aligned);
@@ -2913,10 +2976,12 @@ function renderLyrics(payload) {
     p.className = "lyrics-empty";
     p.textContent = "No s’ha trobat lletra per a aquesta cançó.";
     lineCurrentEl.appendChild(p);
+    updatePasteLyricsButton();
     return;
   }
 
   showLyricsLayout(0, false);
+  updatePasteLyricsButton();
 }
 
 function setActiveLine(index) {
@@ -3396,7 +3461,7 @@ async function openSong(trackId) {
     const payload = await api(`/api/lyrics?track_id=${encodeURIComponent(trackId)}`);
     renderLyrics(payload);
     if (!payload.lines.length) {
-      lyricsStatus.textContent = "No hi ha lletra a LRCLIB";
+      lyricsStatus.textContent = "No s’ha trobat lletra";
     } else if (payload.aligned) {
       lyricsStatus.textContent = `Alineat per paraules · ${payload.source}`;
       markTrackAligned(trackId);
@@ -3505,6 +3570,134 @@ coverNext.addEventListener("click", () => setSelectedIndex(selectedIndex + 1));
 modeCoverBtn.addEventListener("click", () => setBrowseMode("cover"));
 modeGridBtn.addEventListener("click", () => setBrowseMode("grid"));
 syncStatusBtn.addEventListener("click", () => cycleAlignMode());
+
+function isLyricsPasteOpen() {
+  return (
+    lyricsPasteModal &&
+    !lyricsPasteModal.classList.contains("hidden") &&
+    !lyricsPasteModal.hidden
+  );
+}
+
+function setLyricsPasteStatus(text, tone = "") {
+  if (!lyricsPasteStatus) return;
+  lyricsPasteStatus.textContent = text || "";
+  lyricsPasteStatus.classList.toggle("is-running", tone === "running");
+  lyricsPasteStatus.classList.toggle("is-ok", tone === "ok");
+  lyricsPasteStatus.classList.toggle("is-error", tone === "error");
+}
+
+function trackForLyricsPaste() {
+  if (lyricsPasteTrackId) {
+    return (
+      tracks.find((item) => item.id === lyricsPasteTrackId) ||
+      playableTracks.find((item) => item.id === lyricsPasteTrackId) ||
+      hiddenTracks.find((item) => item.id === lyricsPasteTrackId) ||
+      pendingTracks.find((item) => item.id === lyricsPasteTrackId) ||
+      null
+    );
+  }
+  return selectedTrack();
+}
+
+function openLyricsPasteModal(trackId) {
+  const track =
+    (trackId &&
+      (tracks.find((item) => item.id === trackId) ||
+        playableTracks.find((item) => item.id === trackId) ||
+        hiddenTracks.find((item) => item.id === trackId) ||
+        pendingTracks.find((item) => item.id === trackId))) ||
+    selectedTrack();
+  if (!track || track.kind === "album") return;
+  lyricsPasteTrackId = track.id;
+  if (lyricsPasteTitle) {
+    lyricsPasteTitle.textContent = "Editar lletra";
+  }
+  if (lyricsPasteMeta) {
+    lyricsPasteMeta.textContent = `${track.artist || "Artista desconegut"} · ${track.title || track.relpath}. Es desa al fitxer d’àudio.`;
+  }
+  if (lyricsPasteInput) lyricsPasteInput.value = "";
+  setLyricsPasteStatus("Carregant la lletra del fitxer…", "running");
+  if (!lyricsPasteModal) return;
+  lyricsPasteModal.hidden = false;
+  lyricsPasteModal.classList.remove("hidden");
+  lyricsPasteInput?.focus();
+  loadLocalLyricsIntoEditor(track.id);
+}
+
+async function loadLocalLyricsIntoEditor(trackId) {
+  try {
+    const data = await api(`/api/lyrics/local?track_id=${encodeURIComponent(trackId)}`);
+    if (lyricsPasteTrackId !== trackId || !isLyricsPasteOpen()) return;
+    if (lyricsPasteInput) lyricsPasteInput.value = data.text || "";
+    lastLyricsPlain = data.text || "";
+    if (data.text) {
+      const src = data.source ? ` · ${data.source}` : "";
+      setLyricsPasteStatus(`Lletra del fitxer${src}`, "ok");
+    } else {
+      setLyricsPasteStatus("El fitxer encara no té lletra", "");
+    }
+  } catch (err) {
+    if (lyricsPasteTrackId !== trackId || !isLyricsPasteOpen()) return;
+    setLyricsPasteStatus(err.message || "No s’ha pogut llegir la lletra del fitxer", "error");
+  }
+}
+
+function closeLyricsPasteModal() {
+  if (!lyricsPasteModal || !isLyricsPasteOpen()) return;
+  lyricsPasteModal.classList.add("hidden");
+  lyricsPasteModal.hidden = true;
+  lyricsPasteTrackId = "";
+}
+
+async function savePastedLyrics() {
+  const track = trackForLyricsPaste();
+  const text = (lyricsPasteInput?.value || "").trim();
+  if (!track) {
+    setLyricsPasteStatus("Tria una cançó", "error");
+    return;
+  }
+  if (!text) {
+    setLyricsPasteStatus("Enganxa la lletra abans de desar", "error");
+    lyricsPasteInput?.focus();
+    return;
+  }
+  if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = true;
+  setLyricsPasteStatus("Desant la lletra…", "running");
+  try {
+    const payload = await api("/api/lyrics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: track.id, text }),
+    });
+    const savedId = track.id;
+    if (lyricsFilterMode === "hidden") {
+      lyricsFilterMode = "lyrics";
+      localStorage.setItem(LYRICS_FILTER_KEY, lyricsFilterMode);
+    }
+    await loadLibrary();
+    closeLyricsPasteModal();
+    const idx = findBrowseIndexByTrackId(savedId);
+    if (idx >= 0) {
+      selectedIndex = idx;
+      layoutCovers();
+      layoutGridSelection();
+      updateCoverMeta();
+    }
+    if (currentId === savedId) {
+      renderLyrics(payload);
+      lyricsStatus.textContent = payload.synced
+        ? `Mode karaoke · ${payload.source}`
+        : `Temps aproximat · ${payload.source}`;
+      startAlignment(savedId);
+    }
+    libraryMeta.textContent = `Lletra desada al fitxer per “${track.title}”`;
+  } catch (err) {
+    setLyricsPasteStatus(err.message || "No s’ha pogut desar la lletra", "error");
+  } finally {
+    if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = false;
+  }
+}
 
 function isSettingsOpen() {
   return settingsModal && !settingsModal.classList.contains("hidden") && !settingsModal.hidden;
@@ -3935,6 +4128,8 @@ muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
 muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
 lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
 lyricsLayoutDualBtn?.addEventListener("click", () => setLyricsLayout("dual"));
+auraParticlesOnBtn?.addEventListener("click", () => setAuraParticlesEnabled(true));
+auraParticlesOffBtn?.addEventListener("click", () => setAuraParticlesEnabled(false));
 audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
 audioModeInstrumentalBtn?.addEventListener("click", () => setAudioMode("instrumental"));
 videoModeOnBtn?.addEventListener("click", () => setStageBgMode("video"));
@@ -3949,9 +4144,20 @@ applyLyricsFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
 applyLyricsLayout();
+applyAuraParticles();
 applyAudioModeButtons();
 applyVideoModeButtons();
 
+pasteLyricsBtn?.addEventListener("click", () => openLyricsPasteModal());
+stagePasteLyricsBtn?.addEventListener("click", () => openLyricsPasteModal(currentId));
+lyricsPasteModal?.addEventListener("click", (event) => {
+  if (event.target?.hasAttribute?.("data-lyrics-paste-close")) closeLyricsPasteModal();
+});
+lyricsPasteCloseBtn?.addEventListener("click", () => closeLyricsPasteModal());
+lyricsPasteCancelBtn?.addEventListener("click", () => closeLyricsPasteModal());
+lyricsPasteSaveBtn?.addEventListener("click", () => {
+  savePastedLyrics().catch(() => {});
+});
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
 });
@@ -3970,6 +4176,16 @@ coverTrack.addEventListener(
 window.addEventListener(
   "keydown",
   (event) => {
+    if (isLyricsPasteOpen()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLyricsPasteModal();
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        savePastedLyrics().catch(() => {});
+      }
+      return;
+    }
     if (event.key === "Escape" && isSettingsOpen()) {
       event.preventDefault();
       closeSettings();
@@ -3987,7 +4203,7 @@ window.addEventListener(
       }
       return;
     }
-    if (isSettingsOpen()) return;
+    if (isLyricsPasteOpen() || isSettingsOpen()) return;
     if (viewMenu.classList.contains("hidden")) return;
     if (!browseList().length) return;
 
