@@ -21,6 +21,7 @@ from karaoke_party.video import (
     ass_timestamp,
     build_ass_document,
     build_ffmpeg_command,
+    build_copy_mux_command,
     build_mux_command,
     choose_audio,
     choose_background,
@@ -177,6 +178,26 @@ def test_mux_command_maps_stage_video_and_original_audio() -> None:
     assert "384k" in command
     assert "48000" in command
     assert "+faststart" in command
+
+
+def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
+    command = build_copy_mux_command(
+        video_name="stage.h264",
+        audio_name="audio.mp3",
+        output_name="out.mp4",
+        duration=12.5,
+    )
+    assert command[0] == "ffmpeg"
+    assert command[command.index("-c:v") + 1] == "copy"
+    assert command[command.index("-f") + 1] == "h264"
+    assert command[command.index("-r") + 1] == "30"
+    assert command.index("-r") < command.index("stage.h264")
+    assert command[command.index("-c:a") + 1] == "aac"
+    assert command[command.index("-t") + 1] == "12.500"
+    assert "libx264" not in command
+    assert "+faststart" in command
+    # -shortest would make ffmpeg drop the buffered audio of a copied raw stream.
+    assert "-shortest" not in command
 
 
 def test_choose_audio_uses_original_even_with_instrumental(tmp_path: Path) -> None:

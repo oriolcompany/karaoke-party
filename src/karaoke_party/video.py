@@ -30,7 +30,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 7
+KARAOKE_RENDER_VERSION = 10
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
 # Stage palette (styles.css): ink, gold, cyan, bg.
@@ -388,22 +388,25 @@ def build_ffmpeg_command(
 
 
 def probe_duration(path: Path) -> float:
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return 0.0
     try:
         value = float((result.stdout or "").strip())
     except ValueError:
@@ -511,6 +514,59 @@ def build_mux_command(
     ]
 
 
+def build_copy_mux_command(
+    *,
+    video_name: str,
+    audio_name: str,
+    output_name: str,
+    duration: float,
+) -> list[str]:
+    """Wrap an already encoded H.264 stream: no second generation of losses."""
+    duration = max(float(duration), 0.2)
+    return [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-fflags",
+        "+genpts",
+        "-r",
+        str(VIDEO_FPS),
+        "-f",
+        "h264",
+        "-i",
+        video_name,
+        "-i",
+        audio_name,
+        "-t",
+        f"{duration:.3f}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        YOUTUBE_AUDIO_BITRATE,
+        "-ar",
+        str(YOUTUBE_AUDIO_RATE),
+        "-ac",
+        "2",
+        # No -shortest here: with a copied raw H.264 stream ffmpeg considers the
+        # video finished and drops the audio packets the encoder still had
+        # buffered, leaving a silent file. -t already bounds the output.
+        "-movflags",
+        "+faststart",
+        output_name,
+    ]
+
+
 def mux_stage_recording(
     *,
     video_path: Path,
@@ -525,11 +581,15 @@ def mux_stage_recording(
         raise VideoRenderError("No s’ha rebut la gravació de l’escenari")
     if not Path(audio_path).is_file():
         raise VideoRenderError("No s’ha trobat l’àudio de la cançó")
+    suffix = Path(video_path).suffix.lower()
+    stream_copy = suffix == ".h264"
     duration = max(float(duration), 0.2)
-    if duration < 1.0:
-        probed = probe_duration(Path(audio_path))
-        if probed > duration:
-            duration = probed
+    # The tagged duration can round down, and -t decides where the song is cut,
+    # so always trust the audio file itself when it turns out to be longer.
+    probed_audio = probe_duration(Path(audio_path))
+    if probed_audio > duration:
+        duration = probed_audio
+    if duration < 1.0 and not stream_copy:
         probed_video = probe_duration(Path(video_path))
         if probed_video > duration:
             duration = probed_video
@@ -538,12 +598,13 @@ def mux_stage_recording(
         shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        video_name = f"stage{Path(video_path).suffix.lower() or '.webm'}"
+        video_name = f"stage{suffix or '.webm'}"
         audio_name = f"audio{Path(audio_path).suffix.lower() or '.mp3'}"
         shutil.copy2(video_path, work_dir / video_name)
         shutil.copy2(audio_path, work_dir / audio_name)
         out_name = "out.mp4"
-        command = build_mux_command(
+        build = build_copy_mux_command if stream_copy else build_mux_command
+        command = build(
             video_name=video_name,
             audio_name=audio_name,
             output_name=out_name,

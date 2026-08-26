@@ -1938,7 +1938,7 @@ async def upload_stage_video(
         raise HTTPException(status_code=400, detail="Cal ffmpeg per crear el vídeo karaoke")
 
     suffix = Path(file.filename or "stage.webm").suffix.lower()
-    if suffix not in {".webm", ".mp4", ".mkv"}:
+    if suffix not in {".h264", ".webm", ".mp4", ".mkv"}:
         suffix = ".webm"
     work_root = app_cache_root() / "video-work"
     work_root.mkdir(parents=True, exist_ok=True)

@@ -45,6 +45,9 @@ const singBtn = document.getElementById("singBtn");
 const exportVideoBtn = document.getElementById("exportVideoBtn");
 const exportVideoStatus = document.getElementById("exportVideoStatus");
 const exportCaptureBadge = document.getElementById("exportCaptureBadge");
+const exportOverlay = document.getElementById("exportOverlay");
+const exportOverlayDetail = document.getElementById("exportOverlayDetail");
+const exportCancelBtn = document.getElementById("exportCancelBtn");
 const pasteLyricsBtn = document.getElementById("pasteLyricsBtn");
 const stagePasteLyricsBtn = document.getElementById("stagePasteLyricsBtn");
 const lyricsPasteModal = document.getElementById("lyricsPasteModal");
@@ -231,8 +234,28 @@ let stageCapture = null;
 const EXPORT_VIDEO_W = 1920;
 const EXPORT_VIDEO_H = 1080;
 const EXPORT_VIDEO_FPS = 30;
-const EXPORT_SUPER = 1;
-const EXPORT_AURA_DPR = 2;
+// 1:1 with the output frame: supersampling the aura cost four times the fill
+// work and bought nothing once the video was scaled back down to 1080p.
+const EXPORT_AURA_DPR = 1;
+const EXPORT_VIDEO_BITRATE = 24_000_000;
+const EXPORT_QUEUE_LIMIT = 48;
+const EXPORT_ENCODER_STALLED = "El codificador de vídeo s’ha encallat";
+const EXPORT_CODECS = [
+  "avc1.640029",
+  "avc1.64002a",
+  "avc1.640028",
+  "avc1.4d0029",
+  "avc1.42002a",
+];
+/** Virtual export clock in seconds; null while the stage runs in real time. */
+let exportClock = null;
+let exportAborted = false;
+const exportTimers = [];
+const exportAnimationStarts = new WeakMap();
+/** @type {object[]} */
+const videoQueue = [];
+const videoQueuedIds = new Set();
+let videoQueueDone = 0;
 let stageOutroTimer = 0;
 let youtubeToken = 0;
 let youtubeApiPromise = null;
@@ -346,6 +369,7 @@ function showTitleScreen() {
 }
 
 function showMenu() {
+  if (exportClock !== null) return;
   if (stageCapture && !stageCapture.aborted) {
     abortStageCapture("S’ha cancel·lat la gravació");
   }
@@ -491,12 +515,15 @@ let auraH = 0;
 let auraDpr = 1;
 let auraParticles = [];
 let auraT0 = 0;
+let auraLastTs = 0;
 
 function auraReduceMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function auraLive() {
+  // The offline export never plays the audio, so the stage is always "singing".
+  if (exportClock !== null) return true;
   return Boolean(viewStage?.classList.contains("is-live"));
 }
 
@@ -554,9 +581,16 @@ function drawAuraRibbon(t, spec, live) {
 function drawAuraFrame(ts) {
   if (!auraCtx || !auraW) return;
   const t = (ts - auraT0) / 1000;
+  // Live, drift and trails advance once per animation frame, as they always have.
+  // The export walks a virtual clock in 30 fps steps, so only there we scale by
+  // elapsed time to keep the aura moving at the speed of a 60 Hz stage.
+  const frameMs = 1000 / 60;
+  const elapsed = auraLastTs ? Math.min(Math.max(ts - auraLastTs, 1), 100) : frameMs;
+  auraLastTs = ts;
+  const step = exportClock === null ? 1 : elapsed / frameMs;
   const live = auraLive();
   auraCtx.globalCompositeOperation = "source-over";
-  auraCtx.fillStyle = "rgba(3, 2, 8, 0.22)";
+  auraCtx.fillStyle = `rgba(3, 2, 8, ${(1 - 0.78 ** step).toFixed(4)})`;
   auraCtx.fillRect(0, 0, auraW, auraH);
 
   auraCtx.globalCompositeOperation = "lighter";
@@ -570,8 +604,8 @@ function drawAuraFrame(ts) {
     [61, 231, 255],
   ];
   for (const p of auraParticles) {
-    p.x += p.vx * (live ? 1.8 : 1) + Math.sin(t * 0.6 + p.y * 12) * 0.00012;
-    p.y += p.vy * (live ? 1.6 : 1);
+    p.x += (p.vx * (live ? 1.8 : 1) + Math.sin(t * 0.6 + p.y * 12) * 0.00012) * step;
+    p.y += p.vy * (live ? 1.6 : 1) * step;
     if (p.y < -0.04) p.y = 1.04;
     if (p.x < -0.04) p.x = 1.04;
     if (p.x > 1.04) p.x = -0.04;
@@ -610,6 +644,7 @@ function startAuraEngine() {
     seedAuraParticles(Math.min(240, Math.floor((auraW * auraH) / 9000) + 90));
   }
   if (!auraT0) auraT0 = performance.now();
+  auraLastTs = 0;
   if (auraReduceMotion()) {
     if (auraCtx) {
       auraCtx.fillStyle = "#030208";
@@ -632,7 +667,6 @@ function syncAuraEngine() {
 
 window.addEventListener("resize", () => {
   if (document.body.classList.contains("is-exporting-video")) {
-    applyExportStageLayout();
     resizeAuraCanvas();
     return;
   }
@@ -2098,20 +2132,28 @@ function updateExportVideoButton() {
     exportVideoBtn.textContent = "Desar vídeo";
     return;
   }
-  if (exportVideoBusy) {
-    exportVideoBtn.disabled = true;
-    exportVideoBtn.textContent = "Creant…";
-    return;
-  }
   if (track.has_lyrics === false && !track.lyrics_pending) {
     exportVideoBtn.disabled = true;
     exportVideoBtn.textContent = "Desar vídeo";
     exportVideoBtn.title = "Cal lletra per crear el vídeo karaoke";
     return;
   }
+  const pending = videoQueue.length + (exportVideoTrackId ? 1 : 0);
   exportVideoBtn.disabled = false;
-  exportVideoBtn.textContent = "Desar vídeo";
-  exportVideoBtn.title = "Sincronitza la lletra si cal i desa un MP4 de l’escenari karaoke";
+  if (exportVideoTrackId === track.id) {
+    exportVideoBtn.textContent = "Aturar vídeo";
+    exportVideoBtn.title = "Atura la creació d’aquest vídeo i la resta de la cua";
+    return;
+  }
+  if (videoQueuedIds.has(track.id)) {
+    exportVideoBtn.textContent = "Treure de la cua";
+    exportVideoBtn.title = "Aquesta cançó ja espera torn";
+    return;
+  }
+  exportVideoBtn.textContent = pending ? `Desar vídeo (+${pending})` : "Desar vídeo";
+  exportVideoBtn.title = exportVideoBusy
+    ? "Els vídeos es creen un darrere l’altre en segon pla"
+    : "Sincronitza la lletra si cal i desa un MP4 de l’escenari karaoke";
 }
 
 function videoPhaseLabel(phase, progress, stemPhase) {
@@ -2186,15 +2228,10 @@ async function waitVideoJob(jobId) {
   }
 }
 
-function setExportCaptureBadge(text) {
-  if (!exportCaptureBadge) return;
-  if (!text) {
-    exportCaptureBadge.hidden = true;
-    exportCaptureBadge.textContent = "Gravant l’escenari…";
-    return;
-  }
-  exportCaptureBadge.hidden = false;
-  exportCaptureBadge.textContent = text;
+function setExportCaptureBadge(text, detail = "") {
+  if (exportOverlay) exportOverlay.hidden = !text;
+  if (exportCaptureBadge) exportCaptureBadge.textContent = text || "Preparant…";
+  if (exportOverlayDetail) exportOverlayDetail.textContent = text ? detail : "";
 }
 
 function waitAnimationFrames(count) {
@@ -2265,31 +2302,6 @@ function makeExportGrainTile() {
   return tile;
 }
 
-function applyExportStageLayout() {
-  const scale = Math.min(
-    window.innerWidth / EXPORT_VIDEO_W,
-    window.innerHeight / EXPORT_VIDEO_H,
-    1
-  );
-  document.documentElement.style.setProperty("--export-stage-scale", String(scale));
-}
-
-function clearExportStageLayout() {
-  document.documentElement.style.removeProperty("--export-stage-scale");
-}
-
-function toExportLayoutRect(rect) {
-  const visual = viewStage.getBoundingClientRect();
-  const sx = Math.max(0.001, visual.width / EXPORT_VIDEO_W);
-  const sy = Math.max(0.001, visual.height / EXPORT_VIDEO_H);
-  return {
-    left: (rect.left - visual.left) / sx,
-    top: (rect.top - visual.top) / sy,
-    width: rect.width / sx,
-    height: rect.height / sy,
-  };
-}
-
 function canvasFontFrom(style) {
   return `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
 }
@@ -2320,15 +2332,16 @@ function elementOpacity(el) {
   return opacity;
 }
 
+const EXPORT_TEXT_SHADOWS = [
+  { x: 0, y: 1, blur: 0, color: "rgba(0,0,0,0.7)" },
+  { x: 0, y: 2, blur: 8, color: "rgba(0,0,0,0.85)" },
+  { x: 0, y: 0, blur: 18, color: "rgba(0,0,0,0.8)" },
+  { x: 0, y: 0, blur: 36, color: "rgba(0,0,0,0.55)" },
+];
+
 function drawShadowedText(ctx, text, x, y, fill, withAuraShadow) {
   if (withAuraShadow) {
-    const layers = [
-      { x: 0, y: 1, blur: 0, color: "rgba(0,0,0,0.7)" },
-      { x: 0, y: 2, blur: 8, color: "rgba(0,0,0,0.85)" },
-      { x: 0, y: 0, blur: 18, color: "rgba(0,0,0,0.8)" },
-      { x: 0, y: 0, blur: 36, color: "rgba(0,0,0,0.55)" },
-    ];
-    for (const layer of layers) {
+    for (const layer of EXPORT_TEXT_SHADOWS) {
       ctx.shadowOffsetX = layer.x;
       ctx.shadowOffsetY = layer.y;
       ctx.shadowBlur = layer.blur;
@@ -2363,123 +2376,277 @@ function glyphBaseline(ctx, text, glyph) {
   );
 }
 
-function drawExportElementText(ctx, el, { auraShadow = false } = {}) {
+function measuredTextItem(ctx, { text, style, glyph, color, opacity, shadow, clip, fill }) {
+  const font = canvasFontFrom(style);
+  ctx.font = font;
+  applyCanvasLetterSpacing(ctx, style);
+  return {
+    text,
+    font,
+    spacing: style.letterSpacing || "0px",
+    color,
+    opacity,
+    shadow,
+    clip,
+    fill,
+    x: glyph.left,
+    y: glyphBaseline(ctx, text, glyph),
+  };
+}
+
+function collectExportElementText(ctx, items, el, { shadow, clip = null }) {
   if (!el) return;
   const opacity = elementOpacity(el);
   if (opacity < 0.02) return;
   const style = getComputedStyle(el);
   const text = transformedElementText(el, style).trim();
   if (!text) return;
-  const glyph = toExportLayoutRect(textClientRect(el));
+  const glyph = textClientRect(el);
   if (glyph.width < 0.5 || glyph.height < 0.5) return;
-  ctx.save();
-  ctx.globalAlpha *= opacity;
-  ctx.font = canvasFontFrom(style);
-  applyCanvasLetterSpacing(ctx, style);
-  ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  drawShadowedText(ctx, text, glyph.left, glyphBaseline(ctx, text, glyph), style.color, auraShadow);
-  ctx.restore();
+  items.push(
+    measuredTextItem(ctx, {
+      text,
+      style,
+      glyph,
+      color: style.color,
+      opacity,
+      shadow,
+      clip,
+      fill: null,
+    })
+  );
 }
 
-function drawExportWord(ctx, wordEl) {
+function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
   const opacity = elementOpacity(wordEl);
   if (opacity < 0.02) return;
   const base = wordEl.querySelector(".k-word-base") || wordEl;
-  const fill = wordEl.querySelector(".k-word-fill");
   const style = getComputedStyle(wordEl);
   const baseStyle = getComputedStyle(base);
   const text = (base.textContent || "").trim();
   if (!text) return;
-  const glyph = toExportLayoutRect(textClientRect(base));
+  const glyph = textClientRect(base);
   if (glyph.width < 0.5 || glyph.height < 0.5) return;
-  ctx.save();
-  ctx.globalAlpha *= opacity;
-  ctx.font = canvasFontFrom(style);
-  applyCanvasLetterSpacing(ctx, style);
-  ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  const x = glyph.left;
-  const y = glyphBaseline(ctx, text, glyph);
-  const auraShadow = viewStage.classList.contains("has-aura");
-  drawShadowedText(ctx, text, x, y, baseStyle.color || style.color, auraShadow);
-  if (fill) {
-    const fillStyle = getComputedStyle(fill);
+  let fill = null;
+  const fillEl = wordEl.querySelector(".k-word-fill");
+  if (fillEl) {
+    const fillStyle = getComputedStyle(fillEl);
     if (fillStyle.display !== "none" && fillStyle.visibility !== "hidden") {
-      const fillRect = toExportLayoutRect(fill.getBoundingClientRect());
-      if (fillRect.width > 0.5) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(fillRect.left, fillRect.top, fillRect.width, fillRect.height);
-        ctx.clip();
-        ctx.shadowColor = "transparent";
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = fillStyle.color;
-        ctx.fillText(text, x, y);
-        ctx.restore();
-      }
+      const rect = fillEl.getBoundingClientRect();
+      if (rect.width > 0.5) fill = { rect, color: fillStyle.color };
     }
   }
-  ctx.restore();
+  items.push(
+    measuredTextItem(ctx, {
+      text,
+      style,
+      glyph,
+      color: baseStyle.color || style.color,
+      opacity,
+      shadow,
+      clip,
+      fill,
+    })
+  );
 }
 
-function drawExportLyrics(ctx) {
-  if (!lyricsEl) return;
-  const board = toExportLayoutRect(lyricsEl.getBoundingClientRect());
-  ctx.save();
+function collectExportText(ctx) {
+  const items = [];
+  const shadow = viewStage.classList.contains("has-aura");
+  collectExportElementText(ctx, items, songArtist, { shadow });
+  collectExportElementText(ctx, items, songTitle, { shadow });
+  if (lyricsEl) {
+    const clip = lyricsEl.getBoundingClientRect();
+    lyricsEl
+      .querySelectorAll(".k-word")
+      .forEach((node) => collectExportWord(ctx, items, node, { shadow, clip }));
+    const empty = lyricsEl.querySelector(".lyrics-empty");
+    if (empty) collectExportElementText(ctx, items, empty, { shadow: false, clip });
+  }
+  return items;
+}
+
+function clipTextItem(ctx, item) {
+  if (!item.clip) return;
   ctx.beginPath();
-  ctx.rect(board.left, board.top, board.width, board.height);
+  ctx.rect(item.clip.left, item.clip.top, item.clip.width, item.clip.height);
   ctx.clip();
-  lyricsEl.querySelectorAll(".k-word").forEach((node) => drawExportWord(ctx, node));
-  const empty = lyricsEl.querySelector(".lyrics-empty");
-  if (empty) drawExportElementText(ctx, empty, { auraShadow: false });
-  ctx.restore();
+}
+
+function prepareTextItem(ctx, item) {
+  ctx.globalAlpha = item.opacity;
+  ctx.font = item.font;
+  if (typeof ctx.letterSpacing === "string") ctx.letterSpacing = item.spacing;
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+}
+
+/** Everything but the gold fill: the part that only changes when the line does. */
+function exportTextSignature(items) {
+  let signature = "";
+  for (const item of items) {
+    signature += `${item.text}|${item.font}|${item.spacing}|${item.color}|${item.shadow ? 1 : 0}`;
+    signature += `|${item.opacity.toFixed(3)}|${item.x.toFixed(2)}|${item.y.toFixed(2)}`;
+    if (item.clip) {
+      signature += `|${item.clip.left.toFixed(1)},${item.clip.top.toFixed(1)}`;
+      signature += `,${item.clip.width.toFixed(1)},${item.clip.height.toFixed(1)}`;
+    }
+    signature += "\n";
+  }
+  return signature;
+}
+
+function drawExportTextLayer(ctx, items) {
+  for (const item of items) {
+    ctx.save();
+    clipTextItem(ctx, item);
+    prepareTextItem(ctx, item);
+    drawShadowedText(ctx, item.text, item.x, item.y, item.color, item.shadow);
+    ctx.restore();
+  }
+}
+
+function drawExportTextFills(ctx, items) {
+  for (const item of items) {
+    if (!item.fill) continue;
+    ctx.save();
+    clipTextItem(ctx, item);
+    prepareTextItem(ctx, item);
+    ctx.beginPath();
+    ctx.rect(item.fill.rect.left, item.fill.rect.top, item.fill.rect.width, item.fill.rect.height);
+    ctx.clip();
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = item.fill.color;
+    ctx.fillText(item.text, item.x, item.y);
+    ctx.restore();
+  }
+}
+
+/**
+ * The four blurred shadow passes per word dominate the frame cost, and they only
+ * change when the line changes. Keep them in a full resolution layer and blit it
+ * back 1:1, so the cached pixels are identical to drawing them again.
+ */
+function paintExportText(ctx, view) {
+  const items = collectExportText(ctx);
+  const layer = stageCapture?.textLayer;
+  if (!layer) {
+    drawExportTextLayer(ctx, items);
+    drawExportTextFills(ctx, items);
+    return;
+  }
+  const signature = exportTextSignature(items);
+  if (signature !== layer.signature) {
+    exportProfile.rebuilds += 1;
+    layer.signature = signature;
+    layer.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    layer.ctx.clearRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+    layer.ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+    layer.ctx.imageSmoothingEnabled = true;
+    if (layer.ctx.imageSmoothingQuality) layer.ctx.imageSmoothingQuality = "high";
+    drawExportTextLayer(layer.ctx, items);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(layer.canvas, 0, 0);
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+  drawExportTextFills(ctx, items);
+}
+
+// Map the stage layout onto the 1920x1080 frame. Text is drawn through the same
+// transform, so glyphs are rasterised at output resolution instead of upscaled.
+function applyStageExportTransform(ctx) {
+  const stage = viewStage.getBoundingClientRect();
+  const scale = Math.min(
+    EXPORT_VIDEO_W / Math.max(1, stage.width),
+    EXPORT_VIDEO_H / Math.max(1, stage.height)
+  );
+  const tx = (EXPORT_VIDEO_W - stage.width * scale) / 2 - stage.left * scale;
+  const ty = (EXPORT_VIDEO_H - stage.height * scale) / 2 - stage.top * scale;
+  ctx.setTransform(scale, 0, 0, scale, tx, ty);
+  return { stage, scale, tx, ty };
+}
+
+const exportProfile = {
+  frames: 0,
+  rebuilds: 0,
+  karaoke: 0,
+  anim: 0,
+  aura: 0,
+  bg: 0,
+  text: 0,
+  encode: 0,
+  wait: 0,
+  queue: 0,
+  outputs: 0,
+};
+
+function resetExportProfile() {
+  for (const key of Object.keys(exportProfile)) exportProfile[key] = 0;
+}
+
+function exportProfileDetail() {
+  const frames = Math.max(1, exportProfile.frames);
+  const per = (value) => (value / frames).toFixed(1);
+  return [
+    `lletra ${per(exportProfile.karaoke)}`,
+    `anim ${per(exportProfile.anim)}`,
+    `aura ${per(exportProfile.aura)}`,
+    `fons ${per(exportProfile.bg)}`,
+    `text ${per(exportProfile.text)}`,
+    `codif ${per(exportProfile.encode)}`,
+    `espera ${per(exportProfile.wait)} ms/f`,
+    `${exportProfile.rebuilds} refets`,
+    `cua ${exportProfile.queue}`,
+    `sortides ${exportProfile.outputs}`,
+  ].join(" · ");
 }
 
 function paintExportFrame() {
   if (!stageCapture?.ctx || !viewStage) return;
   const ctx = stageCapture.ctx;
-  const outW = EXPORT_VIDEO_W * EXPORT_SUPER;
-  const outH = EXPORT_VIDEO_H * EXPORT_SUPER;
+  const startedAt = performance.now();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
-  ctx.fillStyle = "#07060b";
-  ctx.fillRect(0, 0, outW, outH);
-  ctx.setTransform(EXPORT_SUPER, 0, 0, EXPORT_SUPER, 0, 0);
-  ctx.imageSmoothingEnabled = true;
-  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
   ctx.fillStyle = "#030208";
   ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
 
+  const view = applyStageExportTransform(ctx);
+  const stage = view.stage;
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+
   if (stageAuraEl && viewStage.classList.contains("has-aura")) {
+    const aura = stageAuraEl.getBoundingClientRect();
     if (stageAuraCanvas && stageAuraCanvas.width && stageAuraCanvas.height) {
-      ctx.drawImage(stageAuraCanvas, 0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+      ctx.drawImage(stageAuraCanvas, aura.left, aura.top, aura.width, aura.height);
     }
-    if (auraParticlesEnabled && stageCapture.grain) {
+    if (auraParticlesEnabled && stageCapture.grainPattern) {
       ctx.save();
       ctx.globalAlpha = 0.18;
       ctx.globalCompositeOperation = "overlay";
-      if (!stageCapture.grainPattern) {
-        stageCapture.grainPattern = ctx.createPattern(stageCapture.grain, "repeat");
-      }
-      ctx.fillStyle = stageCapture.grainPattern || "#fff";
-      ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+      ctx.fillStyle = stageCapture.grainPattern;
+      ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
       ctx.restore();
     }
-    const vignette = ctx.createLinearGradient(0, 0, 0, EXPORT_VIDEO_H);
+    const vignette = ctx.createLinearGradient(0, aura.top, 0, aura.top + aura.height);
     vignette.addColorStop(0, "rgba(0,0,0,0.38)");
     vignette.addColorStop(0.16, "rgba(0,0,0,0)");
     vignette.addColorStop(0.84, "rgba(0,0,0,0)");
     vignette.addColorStop(1, "rgba(0,0,0,0.5)");
     ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+    ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
+  } else {
+    ctx.fillStyle = "#07060b";
+    ctx.fillRect(stage.left, stage.top, stage.width, stage.height);
   }
 
-  const auraShadow = viewStage.classList.contains("has-aura");
-  drawExportElementText(ctx, songArtist, { auraShadow });
-  drawExportElementText(ctx, songTitle, { auraShadow });
-  drawExportLyrics(ctx);
+  const afterBackground = performance.now();
+  exportProfile.bg += afterBackground - startedAt;
+  paintExportText(ctx, view);
+  exportProfile.text += performance.now() - afterBackground;
 }
 
 function stopExportPaintLoop() {
@@ -2518,7 +2685,6 @@ function detachStageCapture() {
   stageCapture = null;
   document.body.classList.remove("is-exporting-video");
   viewStage?.classList.remove("is-exporting");
-  clearExportStageLayout();
   setExportCaptureBadge("");
 }
 
@@ -2548,17 +2714,53 @@ function finishStageCapture() {
   }
 }
 
+function createExportCanvas() {
+  document.querySelectorAll(".export-capture-canvas").forEach((node) => node.remove());
+  const canvas = document.createElement("canvas");
+  canvas.width = EXPORT_VIDEO_W;
+  canvas.height = EXPORT_VIDEO_H;
+  canvas.className = "export-capture-canvas";
+  canvas.setAttribute("aria-hidden", "true");
+  document.body.appendChild(canvas);
+  return canvas;
+}
+
+function makeExportTextLayer() {
+  const canvas = document.createElement("canvas");
+  canvas.width = EXPORT_VIDEO_W;
+  canvas.height = EXPORT_VIDEO_H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  return { canvas, ctx, signature: "" };
+}
+
+function attachStageCanvas(canvas, ctx, extra = {}) {
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+  const grain = auraParticlesEnabled ? makeExportGrainTile() : null;
+  stageCapture = {
+    canvas,
+    ctx,
+    grain,
+    grainPattern: grain ? ctx.createPattern(grain, "repeat") : null,
+    textLayer: makeExportTextLayer(),
+    raf: 0,
+    nextFrameAt: 0,
+    aborted: false,
+    abortError: null,
+    resolve: null,
+    reject: null,
+    ...extra,
+  };
+  return stageCapture;
+}
+
 function prepareStageCapture() {
   const mime = exportRecorderMime();
   if (!window.MediaRecorder || !mime) {
     throw new Error("Aquest navegador no pot gravar l’escenari");
   }
-  const canvas = document.createElement("canvas");
-  canvas.width = EXPORT_VIDEO_W * EXPORT_SUPER;
-  canvas.height = EXPORT_VIDEO_H * EXPORT_SUPER;
-  canvas.className = "export-capture-canvas";
-  canvas.setAttribute("aria-hidden", "true");
-  document.body.appendChild(canvas);
+  const canvas = createExportCanvas();
   const ctx = canvas.getContext("2d", { alpha: false, desynchronized: false });
   if (!ctx || typeof canvas.captureStream !== "function") {
     canvas.remove();
@@ -2588,25 +2790,7 @@ function prepareStageCapture() {
   } catch {
     recorder = new MediaRecorder(stream, { mimeType: mime });
   }
-  stageCapture = {
-    canvas,
-    ctx,
-    recorder,
-    videoTrack,
-    mime,
-    chunks: [],
-    grain: auraParticlesEnabled ? makeExportGrainTile() : null,
-    grainPattern: null,
-    raf: 0,
-    nextFrameAt: 0,
-    aborted: false,
-    abortError: null,
-    resolve: null,
-    reject: null,
-  };
-  if (stageCapture.grain) {
-    stageCapture.grainPattern = ctx.createPattern(stageCapture.grain, "repeat");
-  }
+  attachStageCanvas(canvas, ctx, { recorder, videoTrack, mime, chunks: [] });
   paintExportFrame();
 }
 
@@ -2649,14 +2833,294 @@ function recordStageUntilEnded() {
   });
 }
 
-async function uploadStageRecording(track, blob, mime) {
-  const ext = (mime || blob.type || "").includes("mp4") ? "mp4" : "webm";
+async function uploadStageRecording(track, blob, filename) {
   const form = new FormData();
-  form.append("file", blob, `stage.${ext}`);
+  form.append("file", blob, filename);
   return api(`/api/video/upload?track_id=${encodeURIComponent(track.id)}`, {
     method: "POST",
     body: form,
   });
+}
+
+function yieldToBrowser() {
+  if (typeof scheduler !== "undefined" && typeof scheduler.yield === "function") {
+    return scheduler.yield();
+  }
+  // A message task is not throttled the way timers are in a hidden tab.
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
+}
+
+async function pickExportEncoderConfig(preferences = ["prefer-hardware", "no-preference"]) {
+  if (typeof window.VideoEncoder !== "function") return null;
+  // Ask for the GPU encoder first; only fall back to the software one if the
+  // machine has no usable hardware H.264 encoder.
+  for (const hardwareAcceleration of preferences) {
+    for (const codec of EXPORT_CODECS) {
+      const config = {
+        codec,
+        width: EXPORT_VIDEO_W,
+        height: EXPORT_VIDEO_H,
+        bitrate: EXPORT_VIDEO_BITRATE,
+        framerate: EXPORT_VIDEO_FPS,
+        hardwareAcceleration,
+        latencyMode: "quality",
+        avc: { format: "annexb" },
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(config);
+        if (support?.supported) return config;
+      } catch {
+        /* try the next codec */
+      }
+    }
+  }
+  return null;
+}
+
+/** The muxer trims to the shortest stream, so never render less than the audio. */
+function probeAudioSeconds(trackId) {
+  return new Promise((resolve) => {
+    const probe = new Audio();
+    probe.preload = "metadata";
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve(Number(probe.duration) || 0);
+    };
+    probe.addEventListener("loadedmetadata", done, { once: true });
+    probe.addEventListener("error", done, { once: true });
+    probe.src = audioUrlFor(trackId, "original");
+    setTimeout(done, 5000);
+  });
+}
+
+function exportSongSeconds(track, probedSeconds) {
+  let lyricsEnd = 0;
+  for (const line of lyricLines) {
+    for (const word of lineWords(line)) {
+      lyricsEnd = Math.max(lyricsEnd, Number(word.end) || 0);
+    }
+  }
+  return Math.max(Number(track?.duration) || 0, probedSeconds || 0, lyricsEnd + 1.5, 1);
+}
+
+/** Lay the stage out offscreen: no audio, no playback, nothing for the user to watch. */
+async function openStageForExport(track) {
+  stopAlignPoll();
+  stopStemPoll();
+  clearStageOutro();
+  stopPreview();
+  setStageBgMode("aura", { persist: false });
+  viewMenu.classList.add("hidden");
+  viewStage.classList.remove("hidden");
+  viewStage.classList.add("is-exporting");
+  document.body.classList.add("is-exporting-video");
+  songArtist.textContent = track.artist || "Artista desconegut";
+  songTitle.textContent = track.title;
+
+  const payload = await api(`/api/lyrics?track_id=${encodeURIComponent(track.id)}`);
+  if (!payload.lines?.length) throw new Error("No hi ha lletra per al vídeo");
+  if (!payload.aligned) throw new Error("La lletra encara no està sincronitzada");
+
+  exportClock = 0;
+  exportTimers.length = 0;
+  renderLyrics(payload);
+
+  // Same seeding as the live stage, then take over the clock ourselves.
+  startAuraEngine();
+  stopAuraEngine();
+  await document.fonts.ready.catch(() => {});
+  return payload;
+}
+
+function closeStageForExport(previousBgMode) {
+  exportClock = null;
+  exportTimers.length = 0;
+  clearLineRoll();
+  resumeStageAnimations();
+  detachStageCapture();
+  if (!currentId) {
+    viewStage.classList.add("hidden");
+    viewMenu.classList.remove("hidden");
+  }
+  if (previousBgMode) setStageBgMode(previousBgMode, { persist: false });
+  syncAuraEngine();
+}
+
+function flushEncoder(encoder, timeoutMs = 12000) {
+  let timer = 0;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(EXPORT_ENCODER_STALLED)), timeoutMs);
+  });
+  return Promise.race([encoder.flush(), guard]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Keep a bounded number of frames in flight without ever waiting forever.
+ * Hardware encoders buffer a pipeline and some only emit once they receive more
+ * input, so a strict queue limit deadlocks: we stop feeding waiting for output
+ * that will not come until we feed. When the queue stops moving, flush it.
+ */
+async function relieveEncoder(encoder, state, frame) {
+  const primed = state.outputs > 0 || frame < EXPORT_QUEUE_LIMIT;
+  if (encoder.encodeQueueSize < EXPORT_QUEUE_LIMIT && primed) return;
+  const deadline = performance.now() + 400;
+  while (encoder.encodeQueueSize >= EXPORT_QUEUE_LIMIT && !state.error) {
+    if (performance.now() > deadline) break;
+    await yieldToBrowser();
+  }
+  if (state.error) return;
+  if (encoder.encodeQueueSize >= EXPORT_QUEUE_LIMIT || state.outputs === 0) {
+    await flushEncoder(encoder);
+    if (state.outputs === 0) throw new Error(EXPORT_ENCODER_STALLED);
+  }
+}
+
+/**
+ * Render the stage frame by frame on a virtual clock and encode it directly.
+ * Faster than the song, and the browser encode is the only compression step.
+ */
+async function renderStageOffline(track, config, onProgress) {
+  const canvas = createExportCanvas();
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) {
+    canvas.remove();
+    throw new Error("Aquest navegador no pot preparar el vídeo");
+  }
+  attachStageCanvas(canvas, ctx);
+
+  const parts = [];
+  const state = { error: null, outputs: 0 };
+  const encoder = new VideoEncoder({
+    output: (chunk) => {
+      const bytes = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(bytes);
+      parts.push(bytes);
+      state.outputs += 1;
+    },
+    error: (err) => {
+      state.error = err;
+    },
+  });
+  encoder.configure(config);
+
+  const totalSeconds = exportSongSeconds(track, await probeAudioSeconds(track.id));
+  const totalFrames = Math.max(1, Math.round(totalSeconds * EXPORT_VIDEO_FPS));
+  // A keyframe every two seconds instead of every half second: fewer bits spent
+  // on repeated keyframes leaves more for the picture at the same bitrate.
+  const gop = EXPORT_VIDEO_FPS * 2;
+  const frameDuration = Math.round(1e6 / EXPORT_VIDEO_FPS);
+  const staticAura = auraReduceMotion();
+  let windowStartedAt = performance.now();
+  let windowStartFrame = 0;
+  resetExportProfile();
+
+  try {
+    for (let frame = 0; frame < totalFrames; frame += 1) {
+      if (state.error) throw state.error;
+      if (exportAborted) throw new Error("S’ha cancel·lat el vídeo");
+
+      const seconds = frame / EXPORT_VIDEO_FPS;
+      const markStart = performance.now();
+      exportClock = seconds;
+      runDueStageSteps(seconds);
+      syncKaraoke();
+      const markKaraoke = performance.now();
+      stepStageAnimations(seconds * 1000);
+      const markAnim = performance.now();
+      drawAuraFrame(auraT0 + (staticAura ? 0 : seconds * 1000));
+      const markAura = performance.now();
+      paintExportFrame();
+      const markPaint = performance.now();
+
+      const videoFrame = new VideoFrame(canvas, {
+        timestamp: Math.round(seconds * 1e6),
+        duration: frameDuration,
+      });
+      encoder.encode(videoFrame, { keyFrame: frame % gop === 0 });
+      videoFrame.close();
+
+      exportProfile.frames += 1;
+      exportProfile.karaoke += markKaraoke - markStart;
+      exportProfile.anim += markAnim - markKaraoke;
+      exportProfile.aura += markAura - markAnim;
+      exportProfile.encode += performance.now() - markPaint;
+      exportProfile.queue = encoder.encodeQueueSize;
+      exportProfile.outputs = state.outputs;
+
+      if (frame % 10 === 0) {
+        const windowSeconds = (performance.now() - windowStartedAt) / 1000;
+        const rendered = (frame - windowStartFrame) / EXPORT_VIDEO_FPS;
+        onProgress(frame / totalFrames, windowSeconds > 0.4 ? rendered / windowSeconds : 0);
+        await yieldToBrowser();
+      }
+      const markWait = performance.now();
+      await relieveEncoder(encoder, state, frame);
+      exportProfile.wait += performance.now() - markWait;
+
+      // Report on a recent window so a slow start does not hide the real pace.
+      if (frame - windowStartFrame >= EXPORT_VIDEO_FPS * 3) {
+        windowStartFrame = frame;
+        windowStartedAt = performance.now();
+        resetExportProfile();
+      }
+    }
+    await flushEncoder(encoder);
+    if (state.error) throw state.error;
+  } finally {
+    try {
+      encoder.close();
+    } catch {
+      /* already closed */
+    }
+  }
+
+  const blob = new Blob(parts, { type: "video/h264" });
+  if (!blob.size) throw new Error("No s’ha generat cap fotograma");
+  return blob;
+}
+
+async function buildKaraokeVideo(track, label) {
+  let config = await pickExportEncoderConfig();
+  if (!config) {
+    // No WebCodecs: fall back to recording the stage in real time.
+    return captureAndMuxStage(track);
+  }
+  const previousBgMode = stageBgMode;
+  setExportCaptureBadge(`${trackLabel(track)} · preparant…`);
+  const onProgress = (ratio, speed) => {
+    const pct = Math.round(ratio * 100);
+    const rate = speed > 0 ? ` · ×${speed.toFixed(1)}` : "";
+    setExportVideoStatus(`${label} · creant el vídeo ${pct}%${rate}`, "running");
+    setExportCaptureBadge(`${trackLabel(track)} · ${pct}%${rate}`, exportProfileDetail());
+  };
+  try {
+    let blob = null;
+    for (let attempt = 0; attempt < 2 && !blob; attempt += 1) {
+      await openStageForExport(track);
+      try {
+        blob = await renderStageOffline(track, config, onProgress);
+      } catch (err) {
+        // Some drivers accept the config and then never emit a frame. Retry once
+        // on the software encoder rather than leaving the user stuck.
+        const stalled = err?.message === EXPORT_ENCODER_STALLED;
+        const software = stalled ? await pickExportEncoderConfig(["prefer-software"]) : null;
+        if (!software || attempt > 0) throw err;
+        setExportVideoStatus(`${label} · el codificador de la GPU falla, reintentant…`, "running");
+        config = software;
+      }
+    }
+    setExportVideoStatus(`${label} · muntant l’àudio original…`, "running");
+    setExportCaptureBadge("Muntant l’àudio…");
+    return await uploadStageRecording(track, blob, "stage.h264");
+  } finally {
+    closeStageForExport(previousBgMode);
+  }
 }
 
 async function captureAndMuxStage(track) {
@@ -2675,7 +3139,6 @@ async function captureAndMuxStage(track) {
     player.currentTime = 0;
     viewStage.classList.add("is-exporting");
     document.body.classList.add("is-exporting-video");
-    applyExportStageLayout();
     resizeAuraCanvas();
     syncAuraEngine();
     await document.fonts.ready.catch(() => {});
@@ -2697,7 +3160,8 @@ async function captureAndMuxStage(track) {
     const blob = await blobPromise;
     setExportCaptureBadge("Muntant l’àudio…");
     setExportVideoStatus(`${trackLabel(track)} · muntant l’àudio original…`, "running");
-    return await uploadStageRecording(track, blob, mime);
+    const ext = (mime || blob.type || "").includes("mp4") ? "mp4" : "webm";
+    return await uploadStageRecording(track, blob, `stage.${ext}`);
   } finally {
     const stillOnStage = Boolean(viewStage && !viewStage.classList.contains("hidden"));
     detachStageCapture();
@@ -2711,50 +3175,110 @@ async function captureAndMuxStage(track) {
   }
 }
 
-async function exportSelectedKaraokeVideo() {
-  const track = selectedTrack();
-  if (!track || isAlbumListView() || exportVideoBusy) return;
-  if (track.has_lyrics === false && !track.lyrics_pending) return;
-  exportVideoBusy = true;
-  exportVideoTrackId = track.id;
-  updateExportVideoButton();
-  setExportVideoStatus(`${trackLabel(track)} · comprovant la sincronització…`, "running");
-  try {
-    const job = await api("/api/video", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        track_id: track.id,
-        language: "ca",
-        lyrics_layout: lyricsLayout === "dual" ? "dual" : "stack",
-      }),
-    });
-    if (job.status === "unavailable") {
-      throw new Error(job.error || "No s’ha pogut crear el vídeo");
-    }
-    let ready = job;
-    if (job.status !== "done" && job.status !== "ready") {
-      if (!job.job_id) throw new Error(job.error || "El vídeo no s’ha iniciat");
-      setExportVideoStatus(
-        `${trackLabel(track)} · ${videoPhaseLabel(job.phase, job.progress, job.stem_phase)}`,
-        "running"
-      );
-      ready = await waitVideoJob(job.job_id);
-    }
-    markTrackAligned(track.id);
-    if (ready.status === "ready") {
-      ready = await captureAndMuxStage(track);
-    }
-    const name = await downloadVideoFile(ready);
-    setExportVideoStatus(`Vídeo desat · ${name}`, "ok");
-    loadLibrary().catch(() => {});
-  } catch (err) {
-    setExportVideoStatus(err.message || "Error creant el vídeo", "error");
-  } finally {
-    exportVideoBusy = false;
-    exportVideoTrackId = "";
-    updateExportVideoButton();
+function exportQueuePrefix() {
+  const total = videoQueueDone + videoQueue.length + 1;
+  if (total < 2) return "";
+  return `Vídeo ${videoQueueDone + 1}/${total} · `;
+}
+
+async function exportKaraokeVideo(track) {
+  const label = `${exportQueuePrefix()}${trackLabel(track)}`;
+  setExportVideoStatus(`${label} · comprovant la sincronització…`, "running");
+  const job = await api("/api/video", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      track_id: track.id,
+      language: "ca",
+      lyrics_layout: lyricsLayout === "dual" ? "dual" : "stack",
+    }),
+  });
+  if (job.status === "unavailable") {
+    throw new Error(job.error || "No s’ha pogut crear el vídeo");
   }
+  let ready = job;
+  if (job.status !== "done" && job.status !== "ready") {
+    if (!job.job_id) throw new Error(job.error || "El vídeo no s’ha iniciat");
+    setExportVideoStatus(
+      `${label} · ${videoPhaseLabel(job.phase, job.progress, job.stem_phase)}`,
+      "running"
+    );
+    ready = await waitVideoJob(job.job_id);
+  }
+  markTrackAligned(track.id);
+  if (ready.status === "ready") {
+    ready = await buildKaraokeVideo(track, label);
+  }
+  const name = await downloadVideoFile(ready);
+  setExportVideoStatus(`Vídeo desat · ${name}`, "ok");
+  loadLibrary().catch(() => {});
+}
+
+async function runVideoQueue() {
+  if (exportVideoBusy) return;
+  exportVideoBusy = true;
+  videoQueueDone = 0;
+  while (videoQueue.length) {
+    const track = videoQueue.shift();
+    videoQueuedIds.delete(track.id);
+    exportAborted = false;
+    exportVideoTrackId = track.id;
+    updateExportVideoButton();
+    try {
+      await exportKaraokeVideo(track);
+    } catch (err) {
+      setExportVideoStatus(
+        `${trackLabel(track)} · ${err.message || "error creant el vídeo"}`,
+        "error"
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+    }
+    videoQueueDone += 1;
+  }
+  videoQueueDone = 0;
+  exportVideoBusy = false;
+  exportVideoTrackId = "";
+  updateExportVideoButton();
+}
+
+function cancelVideoQueue() {
+  exportAborted = true;
+  videoQueue.length = 0;
+  videoQueuedIds.clear();
+  if (stageCapture && !stageCapture.aborted) {
+    abortStageCapture("S’ha aturat el vídeo");
+  }
+  setExportVideoStatus("S’ha aturat la creació de vídeos", "error");
+  updateExportVideoButton();
+}
+
+function exportSelectedKaraokeVideo() {
+  const track = selectedTrack();
+  if (!track || isAlbumListView()) return;
+  if (track.has_lyrics === false && !track.lyrics_pending) return;
+  if (exportVideoTrackId === track.id) {
+    cancelVideoQueue();
+    return;
+  }
+  if (videoQueuedIds.has(track.id)) {
+    videoQueuedIds.delete(track.id);
+    const index = videoQueue.findIndex((item) => item.id === track.id);
+    if (index >= 0) videoQueue.splice(index, 1);
+    setExportVideoStatus(`${trackLabel(track)} · fora de la cua`, "running");
+    updateExportVideoButton();
+    return;
+  }
+  videoQueue.push(track);
+  videoQueuedIds.add(track.id);
+  updateExportVideoButton();
+  if (exportVideoBusy) {
+    setExportVideoStatus(
+      `${trackLabel(track)} · a la cua (${videoQueue.length} pendents)`,
+      "running"
+    );
+    return;
+  }
+  runVideoQueue();
 }
 
 function updatePasteLyricsButton() {
@@ -2814,6 +3338,10 @@ function activateSelectedTrack() {
   if (item.has_lyrics === false && !item.lyrics_pending) return;
   if (isSyncActionMode()) {
     enqueueSync(item);
+    return;
+  }
+  if (exportVideoBusy) {
+    setExportVideoStatus("Espera que acabi el vídeo per cantar", "error");
     return;
   }
   openSong(item.id);
@@ -3402,13 +3930,106 @@ function lineWords(line) {
   return [{ time: line.time, end: line.time + 1.5, text: line.text }];
 }
 
+function karaokeNow() {
+  return exportClock === null ? player.currentTime : exportClock;
+}
+
+/** setTimeout on the live stage, virtual-clock step while exporting. */
+function scheduleStageStep(delayMs, fn) {
+  if (exportClock === null) return setTimeout(fn, delayMs);
+  const token = { at: exportClock + delayMs / 1000, fn };
+  exportTimers.push(token);
+  return token;
+}
+
+function cancelStageStep(handle) {
+  if (!handle) return;
+  if (typeof handle === "number") {
+    clearTimeout(handle);
+    return;
+  }
+  const index = exportTimers.indexOf(handle);
+  if (index >= 0) exportTimers.splice(index, 1);
+}
+
+function runDueStageSteps(seconds) {
+  for (let guard = 0; guard < 8 && exportTimers.length; guard += 1) {
+    const due = exportTimers.filter((item) => item.at <= seconds);
+    if (!due.length) return;
+    for (const item of due) cancelStageStep(item);
+    for (const item of due) item.fn();
+  }
+}
+
+// The live stage waits two frames so the browser keeps the "from" style and the
+// transition runs. Offline there is no next frame, so force the recalc instead.
+function afterStyleFlush(fn) {
+  if (exportClock !== null) {
+    void document.body.offsetHeight;
+    fn();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
+/** Only the subtrees the compositor actually draws; the rest never reaches the video. */
+function drawnStageAnimations() {
+  const roots = [songArtist, songTitle, lyricsEl];
+  const animations = [];
+  for (const root of roots) {
+    if (!root?.getAnimations) continue;
+    for (const animation of root.getAnimations({ subtree: true })) animations.push(animation);
+  }
+  if (viewStage?.getAnimations) {
+    for (const animation of viewStage.getAnimations()) animations.push(animation);
+  }
+  return animations;
+}
+
+/** Drive CSS transitions from the virtual clock so frames are reproducible. */
+function stepStageAnimations(virtualMs) {
+  let animations = [];
+  try {
+    animations = drawnStageAnimations();
+  } catch {
+    return;
+  }
+  for (const animation of animations) {
+    let startedAt = exportAnimationStarts.get(animation);
+    if (startedAt === undefined) {
+      startedAt = virtualMs;
+      exportAnimationStarts.set(animation, startedAt);
+      try {
+        animation.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      animation.currentTime = Math.max(0, virtualMs - startedAt);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function resumeStageAnimations() {
+  try {
+    for (const animation of drawnStageAnimations()) {
+      if (animation.playState === "paused") animation.play();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function clearLineRoll() {
   if (lineSwapTimer) {
-    clearTimeout(lineSwapTimer);
+    cancelStageStep(lineSwapTimer);
     lineSwapTimer = null;
   }
   if (dualRefreshTimer) {
-    clearTimeout(dualRefreshTimer);
+    cancelStageStep(dualRefreshTimer);
     dualRefreshTimer = null;
   }
   dualPending = null;
@@ -3533,8 +4154,8 @@ function refreshSlotSoft(slotEl, line) {
     return;
   }
   slotEl.classList.add("is-refreshing");
-  if (dualRefreshTimer) clearTimeout(dualRefreshTimer);
-  dualRefreshTimer = setTimeout(() => {
+  if (dualRefreshTimer) cancelStageStep(dualRefreshTimer);
+  dualRefreshTimer = scheduleStageStep(160, () => {
     slotEl.innerHTML = "";
     slotEl.classList.remove("is-empty", "is-rising", "is-entering");
     if (!line) {
@@ -3547,11 +4168,9 @@ function refreshSlotSoft(slotEl, line) {
       slotEl.appendChild(buildWordNode(word));
     }
     setSlotRole(slotEl, "idle");
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => slotEl.classList.remove("is-refreshing"));
-    });
+    afterStyleFlush(() => slotEl.classList.remove("is-refreshing"));
     dualRefreshTimer = null;
-  }, 160);
+  });
 }
 
 function showStackLines(index, animate) {
@@ -3565,7 +4184,7 @@ function showStackLines(index, animate) {
     clearLineRoll();
     fillSlot(lineCurrentEl, current, { trackWords: true });
     fillSlot(lineNextEl, next);
-    syncWordFills(player.currentTime);
+    syncWordFills(karaokeNow());
     return;
   }
 
@@ -3588,19 +4207,17 @@ function showStackLines(index, animate) {
   fillSlot(lineNextEl, next);
   lineNextEl.classList.add("is-entering");
 
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      kStackEl.classList.add("is-rolling");
-      lineCurrentEl.classList.remove("is-rising");
-      lineNextEl.classList.remove("is-entering");
-      syncWordFills(player.currentTime);
-    });
+  afterStyleFlush(() => {
+    kStackEl.classList.add("is-rolling");
+    lineCurrentEl.classList.remove("is-rising");
+    lineNextEl.classList.remove("is-entering");
+    syncWordFills(karaokeNow());
   });
 
-  lineSwapTimer = setTimeout(() => {
+  lineSwapTimer = scheduleStageStep(580, () => {
     clearLineRoll();
-    syncWordFills(player.currentTime);
-  }, 580);
+    syncWordFills(karaokeNow());
+  });
 }
 
 function showDualLines(index, sequential) {
@@ -3610,7 +4227,7 @@ function showDualLines(index, sequential) {
   const activeOnTop = index % 2 === 0;
   const activeSlot = activeOnTop ? lineCurrentEl : lineNextEl;
   const idleSlot = activeOnTop ? lineNextEl : lineCurrentEl;
-  const t = player.currentTime;
+  const t = karaokeNow();
 
   clearLineRoll();
 
@@ -3743,7 +4360,7 @@ async function togglePlayback() {
 
 function syncKaraoke() {
   if (!lyricLines.length) return;
-  const t = player.currentTime;
+  const t = karaokeNow();
 
   let lineIndex = 0;
   for (let i = 0; i < lyricLines.length; i += 1) {
@@ -4870,7 +5487,10 @@ lyricsPasteSaveBtn?.addEventListener("click", () => {
   savePastedLyrics().catch(() => {});
 });
 exportVideoBtn?.addEventListener("click", () => {
-  exportSelectedKaraokeVideo().catch(() => {});
+  exportSelectedKaraokeVideo();
+});
+exportCancelBtn?.addEventListener("click", () => {
+  cancelVideoQueue();
 });
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();

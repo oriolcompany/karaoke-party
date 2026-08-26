@@ -1704,41 +1704,104 @@ button:hover {
   pointer-events: none;
 }
 
-body.is-exporting-video {
-  background: #030208;
+/* None of this reaches the video, but its infinite animations would still be
+   ticked and restyled for every rendered frame. Keep the boxes, drop the motion. */
+.view-stage.is-exporting .stage-fx,
+.view-stage.is-exporting .stage-fx *,
+.view-stage.is-exporting .stage-back-layer,
+.view-stage.is-exporting .stage-back-layer *,
+.view-stage.is-exporting .stage-dock-layer,
+.view-stage.is-exporting .stage-dock-layer * {
+  animation: none !important;
+  transition: none !important;
 }
 
-body.is-exporting-video .fx {
-  visibility: hidden;
-  opacity: 0;
-}
-
+/* A 16:9 box exactly as wide as the viewport: the lyric type is sized in vw, so
+   only a box of full viewport width keeps the same text-to-frame proportion as a
+   fullscreen live stage. Parked offscreen so the export stays invisible while
+   the user keeps browsing. The compositor scales the box down to 1080p. */
 body.is-exporting-video .view-stage.is-exporting {
   position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 1920px;
-  height: 1080px;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: calc(100vw * 9 / 16);
   max-height: none;
-  transform: translate(-50%, -50%) scale(var(--export-stage-scale, 1));
-  transform-origin: center center;
+  transform: translateX(-250vw);
+  transform-origin: top left;
+  pointer-events: none;
+  z-index: -1;
 }
 
-.export-capture-badge {
+/* While a video renders the browse view is taken out of the layout: a library
+   with hundreds of animated cards costs more per frame than the render itself. */
+body.is-exporting-video .fx {
+  visibility: hidden;
+}
+
+.export-overlay {
   position: fixed;
-  top: 0.85rem;
-  right: 0.9rem;
-  z-index: 40;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: #07060b;
+}
+
+.export-overlay[hidden] {
+  display: none;
+}
+
+.export-overlay-card {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 2rem 2.4rem;
+  border-radius: 20px;
+  background: rgba(20, 14, 28, 0.92);
+  border: 1px solid rgba(255, 246, 234, 0.14);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.export-overlay-title {
   margin: 0;
-  padding: 0.35rem 0.7rem;
-  border-radius: 999px;
-  background: rgba(7, 6, 11, 0.72);
-  border: 1px solid rgba(255, 246, 234, 0.16);
-  color: var(--ink);
   font-size: 0.78rem;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 246, 234, 0.6);
+}
+
+.export-overlay-status {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.export-overlay-detail {
+  margin: 0;
+  font-size: 0.72rem;
   letter-spacing: 0.04em;
-  pointer-events: none;
+  color: rgba(255, 246, 234, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-overlay-cancel {
+  margin-top: 0.35rem;
+  padding: 0.5rem 1.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 246, 234, 0.22);
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.export-overlay-cancel:hover {
+  border-color: rgba(255, 246, 234, 0.45);
 }
 
 .export-capture-canvas {
