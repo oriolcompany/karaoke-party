@@ -42,6 +42,9 @@ const coverIndex = document.getElementById("coverIndex");
 const coverPrev = document.getElementById("coverPrev");
 const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
+const exportVideoBtn = document.getElementById("exportVideoBtn");
+const exportVideoStatus = document.getElementById("exportVideoStatus");
+const exportCaptureBadge = document.getElementById("exportCaptureBadge");
 const pasteLyricsBtn = document.getElementById("pasteLyricsBtn");
 const stagePasteLyricsBtn = document.getElementById("stagePasteLyricsBtn");
 const lyricsPasteModal = document.getElementById("lyricsPasteModal");
@@ -222,6 +225,14 @@ let dualPending = null;
 let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
+let exportVideoBusy = false;
+let exportVideoTrackId = "";
+let stageCapture = null;
+const EXPORT_VIDEO_W = 1920;
+const EXPORT_VIDEO_H = 1080;
+const EXPORT_VIDEO_FPS = 30;
+const EXPORT_SUPER = 1;
+const EXPORT_AURA_DPR = 2;
 let stageOutroTimer = 0;
 let youtubeToken = 0;
 let youtubeApiPromise = null;
@@ -335,6 +346,9 @@ function showTitleScreen() {
 }
 
 function showMenu() {
+  if (stageCapture && !stageCapture.aborted) {
+    abortStageCapture("S’ha cancel·lat la gravació");
+  }
   clearStageOutro();
   viewLanding?.classList.add("hidden");
   viewTitle?.classList.add("hidden");
@@ -499,10 +513,16 @@ function seedAuraParticles(count) {
 
 function resizeAuraCanvas() {
   if (!stageAuraCanvas || !stageAuraEl) return;
-  const rect = stageAuraEl.getBoundingClientRect();
-  auraDpr = Math.min(window.devicePixelRatio || 1, 1.5);
-  auraW = Math.max(1, Math.floor(rect.width));
-  auraH = Math.max(1, Math.floor(rect.height));
+  if (document.body.classList.contains("is-exporting-video")) {
+    auraDpr = EXPORT_AURA_DPR;
+    auraW = EXPORT_VIDEO_W;
+    auraH = EXPORT_VIDEO_H;
+  } else {
+    const rect = stageAuraEl.getBoundingClientRect();
+    auraDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    auraW = Math.max(1, Math.floor(rect.width));
+    auraH = Math.max(1, Math.floor(rect.height));
+  }
   stageAuraCanvas.width = Math.floor(auraW * auraDpr);
   stageAuraCanvas.height = Math.floor(auraH * auraDpr);
   auraCtx = stageAuraCanvas.getContext("2d", { alpha: false });
@@ -611,6 +631,11 @@ function syncAuraEngine() {
 }
 
 window.addEventListener("resize", () => {
+  if (document.body.classList.contains("is-exporting-video")) {
+    applyExportStageLayout();
+    resizeAuraCanvas();
+    return;
+  }
   if (!auraRunning && stageBgMode !== "aura") return;
   resizeAuraCanvas();
 });
@@ -649,10 +674,10 @@ function applyVideoModeButtons() {
   syncAuraEngine();
 }
 
-function setStageBgMode(mode) {
+function setStageBgMode(mode, { persist = true } = {}) {
   if (mode === "video" && !youtubeVideoReady()) return;
   stageBgMode = STAGE_BG_MODES.has(mode) ? mode : "stage";
-  localStorage.setItem(STAGE_BG_KEY, stageBgMode);
+  if (persist) localStorage.setItem(STAGE_BG_KEY, stageBgMode);
   applyVideoModeButtons();
   if (stageBgMode === "video" && youtubeCurrent?.video_id) {
     const ids = youtubeCandidateIds(youtubeCurrent);
@@ -2000,6 +2025,7 @@ function showAlignBadges() {
 
 function updatePrimaryAction() {
   updatePasteLyricsButton();
+  updateExportVideoButton();
   const item = selectedBrowseItem();
   const track = selectedTrack();
   const syncActions = isSyncActionMode();
@@ -2045,6 +2071,690 @@ function updatePrimaryAction() {
     singBtn.textContent = "Sincronitzar";
   }
   updateSyncQueueMeta();
+}
+
+function setExportVideoStatus(text, kind) {
+  if (!exportVideoStatus) return;
+  if (!text) {
+    exportVideoStatus.hidden = true;
+    exportVideoStatus.textContent = "";
+    exportVideoStatus.removeAttribute("data-kind");
+    return;
+  }
+  exportVideoStatus.hidden = false;
+  exportVideoStatus.textContent = text;
+  if (kind) exportVideoStatus.dataset.kind = kind;
+  else exportVideoStatus.removeAttribute("data-kind");
+}
+
+function updateExportVideoButton() {
+  if (!exportVideoBtn) return;
+  const album = isAlbumListView();
+  const track = album ? null : selectedTrack();
+  exportVideoBtn.hidden = album || !track;
+  exportVideoBtn.classList.toggle("is-busy", exportVideoBusy);
+  if (!track) {
+    exportVideoBtn.disabled = true;
+    exportVideoBtn.textContent = "Desar vídeo";
+    return;
+  }
+  if (exportVideoBusy) {
+    exportVideoBtn.disabled = true;
+    exportVideoBtn.textContent = "Creant…";
+    return;
+  }
+  if (track.has_lyrics === false && !track.lyrics_pending) {
+    exportVideoBtn.disabled = true;
+    exportVideoBtn.textContent = "Desar vídeo";
+    exportVideoBtn.title = "Cal lletra per crear el vídeo karaoke";
+    return;
+  }
+  exportVideoBtn.disabled = false;
+  exportVideoBtn.textContent = "Desar vídeo";
+  exportVideoBtn.title = "Sincronitza la lletra si cal i desa un MP4 de l’escenari karaoke";
+}
+
+function videoPhaseLabel(phase, progress, stemPhase) {
+  if (phase === "render") {
+    const pct =
+      typeof progress === "number" && progress > 0 ? ` ${Math.round(progress * 100)}%` : "";
+    return `Creant el vídeo${pct}`;
+  }
+  if (phase === "capture") return "Gravant l’escenari";
+  const sync = syncPhaseLabel(phase, stemPhase);
+  if (sync) return `Sincronitzant · ${sync}`;
+  if (phase === "done") return "Vídeo a punt";
+  if (phase === "ready") return "Escenari a punt";
+  return "Preparant el vídeo…";
+}
+
+async function downloadVideoFile(job) {
+  const jobId = job.job_id;
+  const response = await fetch(`/api/video/${encodeURIComponent(jobId)}/file`);
+  if (!response.ok) {
+    let detail = "No s’ha pogut descarregar el vídeo";
+    try {
+      const payload = await response.json();
+      if (payload?.detail) detail = payload.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(disposition);
+  const name = match
+    ? decodeURIComponent(match[1].replace(/"/g, ""))
+    : job.filename || "karaoke.mp4";
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  return name;
+}
+
+async function waitVideoJob(jobId) {
+  const started = Date.now();
+  const maxMs = 40 * 60 * 1000;
+  let marked = false;
+  for (;;) {
+    if (Date.now() - started > maxMs) {
+      throw new Error("La creació del vídeo ha trigat massa");
+    }
+    const job = await api(`/api/video/${encodeURIComponent(jobId)}`);
+    const track =
+      allLibraryTracks().find((t) => t.id === exportVideoTrackId) ||
+      tracks.find((t) => t.id === exportVideoTrackId);
+    if (!marked && (job.status === "ready" || job.status === "done")) {
+      marked = true;
+      if (exportVideoTrackId) markTrackAligned(exportVideoTrackId);
+    }
+    setExportVideoStatus(
+      `${trackLabel(track) || "Cançó"} · ${videoPhaseLabel(job.phase, job.progress, job.stem_phase)}`,
+      "running"
+    );
+    if (job.status === "done" || job.status === "ready") return job;
+    if (job.status === "error" || job.status === "unavailable") {
+      throw new Error(job.error || "No s’ha pogut crear el vídeo");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+}
+
+function setExportCaptureBadge(text) {
+  if (!exportCaptureBadge) return;
+  if (!text) {
+    exportCaptureBadge.hidden = true;
+    exportCaptureBadge.textContent = "Gravant l’escenari…";
+    return;
+  }
+  exportCaptureBadge.hidden = false;
+  exportCaptureBadge.textContent = text;
+}
+
+function waitAnimationFrames(count) {
+  return new Promise((resolve) => {
+    const step = () => {
+      if (count <= 1) {
+        resolve();
+        return;
+      }
+      count -= 1;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+async function waitForLyricsAligned(timeoutMs = 180000) {
+  const started = Date.now();
+  while (!lyricsAligned) {
+    if (!currentId) throw new Error("S’ha sortit de l’escenari");
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("La sincronització no ha acabat");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+async function waitForPlayerReady(timeoutMs = 20000) {
+  if (player.readyState >= 2) return;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("L’àudio no s’ha carregat")), timeoutMs);
+    const done = () => {
+      clearTimeout(timer);
+      player.removeEventListener("canplay", done);
+      resolve();
+    };
+    player.addEventListener("canplay", done);
+  });
+}
+
+function exportRecorderMime() {
+  const types = [
+    "video/webm;codecs=h264",
+    "video/mp4;codecs=avc1",
+    "video/mp4",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  return types.find((type) => window.MediaRecorder?.isTypeSupported?.(type)) || "";
+}
+
+function makeExportGrainTile() {
+  const tile = document.createElement("canvas");
+  tile.width = 140;
+  tile.height = 140;
+  const grain = tile.getContext("2d");
+  const pixels = grain.createImageData(140, 140);
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const on = Math.random() < 0.22;
+    const n = 234 + Math.random() * 21;
+    pixels.data[i] = n;
+    pixels.data[i + 1] = n * 0.96;
+    pixels.data[i + 2] = n * 0.9;
+    pixels.data[i + 3] = on ? 40 : 0;
+  }
+  grain.putImageData(pixels, 0, 0);
+  return tile;
+}
+
+function applyExportStageLayout() {
+  const scale = Math.min(
+    window.innerWidth / EXPORT_VIDEO_W,
+    window.innerHeight / EXPORT_VIDEO_H,
+    1
+  );
+  document.documentElement.style.setProperty("--export-stage-scale", String(scale));
+}
+
+function clearExportStageLayout() {
+  document.documentElement.style.removeProperty("--export-stage-scale");
+}
+
+function toExportLayoutRect(rect) {
+  const visual = viewStage.getBoundingClientRect();
+  const sx = Math.max(0.001, visual.width / EXPORT_VIDEO_W);
+  const sy = Math.max(0.001, visual.height / EXPORT_VIDEO_H);
+  return {
+    left: (rect.left - visual.left) / sx,
+    top: (rect.top - visual.top) / sy,
+    width: rect.width / sx,
+    height: rect.height / sy,
+  };
+}
+
+function canvasFontFrom(style) {
+  return `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+}
+
+function applyCanvasLetterSpacing(ctx, style) {
+  if (typeof ctx.letterSpacing === "string") {
+    ctx.letterSpacing = style.letterSpacing || "0px";
+  }
+}
+
+function transformedElementText(el, style) {
+  let text = el.textContent || "";
+  if (style.textTransform === "uppercase") return text.toLocaleUpperCase("ca");
+  if (style.textTransform === "lowercase") return text.toLocaleLowerCase("ca");
+  return text;
+}
+
+function elementOpacity(el) {
+  let opacity = 1;
+  let node = el;
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return 0;
+    opacity *= Number(style.opacity);
+    if (node === viewStage) break;
+    node = node.parentElement;
+  }
+  return opacity;
+}
+
+function drawShadowedText(ctx, text, x, y, fill, withAuraShadow) {
+  if (withAuraShadow) {
+    const layers = [
+      { x: 0, y: 1, blur: 0, color: "rgba(0,0,0,0.7)" },
+      { x: 0, y: 2, blur: 8, color: "rgba(0,0,0,0.85)" },
+      { x: 0, y: 0, blur: 18, color: "rgba(0,0,0,0.8)" },
+      { x: 0, y: 0, blur: 36, color: "rgba(0,0,0,0.55)" },
+    ];
+    for (const layer of layers) {
+      ctx.shadowOffsetX = layer.x;
+      ctx.shadowOffsetY = layer.y;
+      ctx.shadowBlur = layer.blur;
+      ctx.shadowColor = layer.color;
+      ctx.fillStyle = fill;
+      ctx.fillText(text, x, y);
+    }
+  }
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.fillStyle = fill;
+  ctx.fillText(text, x, y);
+}
+
+function textClientRect(el) {
+  if (!el) return { left: 0, top: 0, width: 0, height: 0 };
+  if (!el.firstChild) return el.getBoundingClientRect();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const rects = range.getClientRects();
+  if (rects.length) return rects[0];
+  return range.getBoundingClientRect();
+}
+
+function glyphBaseline(ctx, text, glyph) {
+  const metrics = ctx.measureText(text);
+  return (
+    glyph.top +
+    (metrics.fontBoundingBoxAscent || metrics.actualBoundingBoxAscent || glyph.height * 0.8)
+  );
+}
+
+function drawExportElementText(ctx, el, { auraShadow = false } = {}) {
+  if (!el) return;
+  const opacity = elementOpacity(el);
+  if (opacity < 0.02) return;
+  const style = getComputedStyle(el);
+  const text = transformedElementText(el, style).trim();
+  if (!text) return;
+  const glyph = toExportLayoutRect(textClientRect(el));
+  if (glyph.width < 0.5 || glyph.height < 0.5) return;
+  ctx.save();
+  ctx.globalAlpha *= opacity;
+  ctx.font = canvasFontFrom(style);
+  applyCanvasLetterSpacing(ctx, style);
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  drawShadowedText(ctx, text, glyph.left, glyphBaseline(ctx, text, glyph), style.color, auraShadow);
+  ctx.restore();
+}
+
+function drawExportWord(ctx, wordEl) {
+  const opacity = elementOpacity(wordEl);
+  if (opacity < 0.02) return;
+  const base = wordEl.querySelector(".k-word-base") || wordEl;
+  const fill = wordEl.querySelector(".k-word-fill");
+  const style = getComputedStyle(wordEl);
+  const baseStyle = getComputedStyle(base);
+  const text = (base.textContent || "").trim();
+  if (!text) return;
+  const glyph = toExportLayoutRect(textClientRect(base));
+  if (glyph.width < 0.5 || glyph.height < 0.5) return;
+  ctx.save();
+  ctx.globalAlpha *= opacity;
+  ctx.font = canvasFontFrom(style);
+  applyCanvasLetterSpacing(ctx, style);
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  const x = glyph.left;
+  const y = glyphBaseline(ctx, text, glyph);
+  const auraShadow = viewStage.classList.contains("has-aura");
+  drawShadowedText(ctx, text, x, y, baseStyle.color || style.color, auraShadow);
+  if (fill) {
+    const fillStyle = getComputedStyle(fill);
+    if (fillStyle.display !== "none" && fillStyle.visibility !== "hidden") {
+      const fillRect = toExportLayoutRect(fill.getBoundingClientRect());
+      if (fillRect.width > 0.5) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(fillRect.left, fillRect.top, fillRect.width, fillRect.height);
+        ctx.clip();
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = fillStyle.color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawExportLyrics(ctx) {
+  if (!lyricsEl) return;
+  const board = toExportLayoutRect(lyricsEl.getBoundingClientRect());
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(board.left, board.top, board.width, board.height);
+  ctx.clip();
+  lyricsEl.querySelectorAll(".k-word").forEach((node) => drawExportWord(ctx, node));
+  const empty = lyricsEl.querySelector(".lyrics-empty");
+  if (empty) drawExportElementText(ctx, empty, { auraShadow: false });
+  ctx.restore();
+}
+
+function paintExportFrame() {
+  if (!stageCapture?.ctx || !viewStage) return;
+  const ctx = stageCapture.ctx;
+  const outW = EXPORT_VIDEO_W * EXPORT_SUPER;
+  const outH = EXPORT_VIDEO_H * EXPORT_SUPER;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = "#07060b";
+  ctx.fillRect(0, 0, outW, outH);
+  ctx.setTransform(EXPORT_SUPER, 0, 0, EXPORT_SUPER, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+  ctx.fillStyle = "#030208";
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+
+  if (stageAuraEl && viewStage.classList.contains("has-aura")) {
+    if (stageAuraCanvas && stageAuraCanvas.width && stageAuraCanvas.height) {
+      ctx.drawImage(stageAuraCanvas, 0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+    }
+    if (auraParticlesEnabled && stageCapture.grain) {
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.globalCompositeOperation = "overlay";
+      if (!stageCapture.grainPattern) {
+        stageCapture.grainPattern = ctx.createPattern(stageCapture.grain, "repeat");
+      }
+      ctx.fillStyle = stageCapture.grainPattern || "#fff";
+      ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+      ctx.restore();
+    }
+    const vignette = ctx.createLinearGradient(0, 0, 0, EXPORT_VIDEO_H);
+    vignette.addColorStop(0, "rgba(0,0,0,0.38)");
+    vignette.addColorStop(0.16, "rgba(0,0,0,0)");
+    vignette.addColorStop(0.84, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.5)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  }
+
+  const auraShadow = viewStage.classList.contains("has-aura");
+  drawExportElementText(ctx, songArtist, { auraShadow });
+  drawExportElementText(ctx, songTitle, { auraShadow });
+  drawExportLyrics(ctx);
+}
+
+function stopExportPaintLoop() {
+  if (stageCapture?.raf) {
+    cancelAnimationFrame(stageCapture.raf);
+    stageCapture.raf = 0;
+  }
+}
+
+function startExportPaintLoop() {
+  const capture = stageCapture;
+  if (!capture) return;
+  const track = capture.videoTrack;
+  const frameMs = 1000 / EXPORT_VIDEO_FPS;
+  capture.nextFrameAt = performance.now();
+  const tickPaint = (now) => {
+    if (!stageCapture) return;
+    if (now >= capture.nextFrameAt) {
+      paintExportFrame();
+      if (typeof track?.requestFrame === "function") track.requestFrame();
+      capture.nextFrameAt += frameMs;
+      if (now - capture.nextFrameAt > frameMs * 3) {
+        capture.nextFrameAt = now + frameMs;
+      }
+    }
+    capture.raf = requestAnimationFrame(tickPaint);
+  };
+  paintExportFrame();
+  if (typeof track?.requestFrame === "function") track.requestFrame();
+  capture.raf = requestAnimationFrame(tickPaint);
+}
+
+function detachStageCapture() {
+  stopExportPaintLoop();
+  if (stageCapture?.canvas) stageCapture.canvas.remove();
+  stageCapture = null;
+  document.body.classList.remove("is-exporting-video");
+  viewStage?.classList.remove("is-exporting");
+  clearExportStageLayout();
+  setExportCaptureBadge("");
+}
+
+function abortStageCapture(message) {
+  if (!stageCapture || stageCapture.aborted) return;
+  stageCapture.aborted = true;
+  stageCapture.abortError = new Error(message || "S’ha cancel·lat la gravació");
+  try {
+    if (stageCapture.recorder && stageCapture.recorder.state === "recording") {
+      stageCapture.recorder.stop();
+    } else {
+      stageCapture.reject?.(stageCapture.abortError);
+    }
+  } catch {
+    stageCapture.reject?.(stageCapture.abortError);
+  }
+}
+
+function finishStageCapture() {
+  if (!stageCapture || stageCapture.aborted) return;
+  try {
+    if (stageCapture.recorder && stageCapture.recorder.state === "recording") {
+      stageCapture.recorder.stop();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function prepareStageCapture() {
+  const mime = exportRecorderMime();
+  if (!window.MediaRecorder || !mime) {
+    throw new Error("Aquest navegador no pot gravar l’escenari");
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = EXPORT_VIDEO_W * EXPORT_SUPER;
+  canvas.height = EXPORT_VIDEO_H * EXPORT_SUPER;
+  canvas.className = "export-capture-canvas";
+  canvas.setAttribute("aria-hidden", "true");
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: false });
+  if (!ctx || typeof canvas.captureStream !== "function") {
+    canvas.remove();
+    throw new Error("Aquest navegador no pot gravar l’escenari");
+  }
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+  let stream;
+  try {
+    stream = canvas.captureStream(0);
+    const probe = stream.getVideoTracks?.()?.[0];
+    if (typeof probe?.requestFrame !== "function") {
+      stream.getTracks().forEach((track) => track.stop());
+      stream = canvas.captureStream(EXPORT_VIDEO_FPS);
+    }
+  } catch {
+    stream = canvas.captureStream(EXPORT_VIDEO_FPS);
+  }
+  const videoTrack = stream.getVideoTracks()[0] || null;
+  if (videoTrack && "contentHint" in videoTrack) videoTrack.contentHint = "detail";
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, {
+      mimeType: mime,
+      videoBitsPerSecond: 12_000_000,
+    });
+  } catch {
+    recorder = new MediaRecorder(stream, { mimeType: mime });
+  }
+  stageCapture = {
+    canvas,
+    ctx,
+    recorder,
+    videoTrack,
+    mime,
+    chunks: [],
+    grain: auraParticlesEnabled ? makeExportGrainTile() : null,
+    grainPattern: null,
+    raf: 0,
+    nextFrameAt: 0,
+    aborted: false,
+    abortError: null,
+    resolve: null,
+    reject: null,
+  };
+  if (stageCapture.grain) {
+    stageCapture.grainPattern = ctx.createPattern(stageCapture.grain, "repeat");
+  }
+  paintExportFrame();
+}
+
+function recordStageUntilEnded() {
+  return new Promise((resolve, reject) => {
+    const capture = stageCapture;
+    if (!capture?.recorder) {
+      reject(new Error("No s’ha pogut gravar l’escenari"));
+      return;
+    }
+    capture.resolve = resolve;
+    capture.reject = reject;
+    const recorder = capture.recorder;
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size) capture.chunks.push(event.data);
+    };
+    recorder.onerror = () => {
+      capture.aborted = true;
+      capture.abortError = new Error("No s’ha pogut gravar l’escenari");
+    };
+    recorder.onstop = () => {
+      stopExportPaintLoop();
+      if (capture.aborted) {
+        reject(capture.abortError || new Error("S’ha cancel·lat la gravació"));
+        return;
+      }
+      const blob = new Blob(capture.chunks, { type: capture.mime || "video/webm" });
+      if (!blob.size) {
+        reject(new Error("La gravació de l’escenari és buida"));
+        return;
+      }
+      resolve(blob);
+    };
+    startExportPaintLoop();
+    try {
+      recorder.start(250);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error("No s’ha pogut gravar l’escenari"));
+    }
+  });
+}
+
+async function uploadStageRecording(track, blob, mime) {
+  const ext = (mime || blob.type || "").includes("mp4") ? "mp4" : "webm";
+  const form = new FormData();
+  form.append("file", blob, `stage.${ext}`);
+  return api(`/api/video/upload?track_id=${encodeURIComponent(track.id)}`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+async function captureAndMuxStage(track) {
+  const prevAudio = audioMode;
+  const prevBg = stageBgMode;
+  try {
+    await setAudioMode("original", { persist: false });
+    setStageBgMode("aura", { persist: false });
+    await openSong(track.id, { autoplay: false });
+    if (currentId !== track.id) throw new Error("S’ha sortit de l’escenari");
+    if (!lyricLines.length) throw new Error("No hi ha lletra per al vídeo");
+    setExportVideoStatus(`${trackLabel(track)} · esperant la sincronització…`, "running");
+    await waitForLyricsAligned();
+    await waitForPlayerReady();
+    player.pause();
+    player.currentTime = 0;
+    viewStage.classList.add("is-exporting");
+    document.body.classList.add("is-exporting-video");
+    applyExportStageLayout();
+    resizeAuraCanvas();
+    syncAuraEngine();
+    await document.fonts.ready.catch(() => {});
+    await waitAnimationFrames(3);
+    syncKaraoke();
+    setExportCaptureBadge("Gravant l’escenari…");
+    setExportVideoStatus(`${trackLabel(track)} · gravant l’escenari…`, "running");
+    prepareStageCapture();
+    const mime = stageCapture.mime;
+    const blobPromise = recordStageUntilEnded();
+    try {
+      await player.play();
+    } catch {
+      abortStageCapture("No s’ha pogut reproduir la cançó");
+      await blobPromise.catch(() => {});
+      throw new Error("No s’ha pogut reproduir la cançó");
+    }
+    updatePlayButton();
+    const blob = await blobPromise;
+    setExportCaptureBadge("Muntant l’àudio…");
+    setExportVideoStatus(`${trackLabel(track)} · muntant l’àudio original…`, "running");
+    return await uploadStageRecording(track, blob, mime);
+  } finally {
+    const stillOnStage = Boolean(viewStage && !viewStage.classList.contains("hidden"));
+    detachStageCapture();
+    try {
+      await setAudioMode(prevAudio, { persist: false });
+    } catch {
+      /* keep going */
+    }
+    setStageBgMode(prevBg, { persist: false });
+    if (stillOnStage) showMenu();
+  }
+}
+
+async function exportSelectedKaraokeVideo() {
+  const track = selectedTrack();
+  if (!track || isAlbumListView() || exportVideoBusy) return;
+  if (track.has_lyrics === false && !track.lyrics_pending) return;
+  exportVideoBusy = true;
+  exportVideoTrackId = track.id;
+  updateExportVideoButton();
+  setExportVideoStatus(`${trackLabel(track)} · comprovant la sincronització…`, "running");
+  try {
+    const job = await api("/api/video", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_id: track.id,
+        language: "ca",
+        lyrics_layout: lyricsLayout === "dual" ? "dual" : "stack",
+      }),
+    });
+    if (job.status === "unavailable") {
+      throw new Error(job.error || "No s’ha pogut crear el vídeo");
+    }
+    let ready = job;
+    if (job.status !== "done" && job.status !== "ready") {
+      if (!job.job_id) throw new Error(job.error || "El vídeo no s’ha iniciat");
+      setExportVideoStatus(
+        `${trackLabel(track)} · ${videoPhaseLabel(job.phase, job.progress, job.stem_phase)}`,
+        "running"
+      );
+      ready = await waitVideoJob(job.job_id);
+    }
+    markTrackAligned(track.id);
+    if (ready.status === "ready") {
+      ready = await captureAndMuxStage(track);
+    }
+    const name = await downloadVideoFile(ready);
+    setExportVideoStatus(`Vídeo desat · ${name}`, "ok");
+    loadLibrary().catch(() => {});
+  } catch (err) {
+    setExportVideoStatus(err.message || "Error creant el vídeo", "error");
+  } finally {
+    exportVideoBusy = false;
+    exportVideoTrackId = "";
+    updateExportVideoButton();
+  }
 }
 
 function updatePasteLyricsButton() {
@@ -3021,6 +3731,7 @@ function updatePlayButton() {
 }
 
 async function togglePlayback() {
+  if (stageCapture) return;
   if (!player.src) return;
   if (player.paused || player.ended) {
     await player.play().catch(() => {});
@@ -3438,7 +4149,7 @@ async function setRoot() {
   }
 }
 
-async function openSong(trackId) {
+async function openSong(trackId, { autoplay = true } = {}) {
   const track = tracks.find((t) => t.id === trackId);
   if (!track) return;
   stopAlignPoll();
@@ -3472,7 +4183,7 @@ async function openSong(trackId) {
       lyricsStatus.textContent = `Temps aproximat · ${payload.source}`;
       startAlignment(trackId);
     }
-    await player.play().catch(() => {});
+    if (autoplay) await player.play().catch(() => {});
     updatePlayButton();
   } catch (err) {
     renderLyrics({ lines: [] });
@@ -4158,6 +4869,9 @@ lyricsPasteCancelBtn?.addEventListener("click", () => closeLyricsPasteModal());
 lyricsPasteSaveBtn?.addEventListener("click", () => {
   savePastedLyrics().catch(() => {});
 });
+exportVideoBtn?.addEventListener("click", () => {
+  exportSelectedKaraokeVideo().catch(() => {});
+});
 singBtn.addEventListener("click", () => {
   activateSelectedTrack();
 });
@@ -4270,6 +4984,10 @@ player.addEventListener("seeked", () => {
 });
 player.addEventListener("ended", () => {
   syncWordFills(Number.POSITIVE_INFINITY);
+  if (stageCapture && !stageCapture.aborted) {
+    finishStageCapture();
+    return;
+  }
   beginStageOutro();
 });
 

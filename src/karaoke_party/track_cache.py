@@ -8,6 +8,7 @@ One folder holds everything for a song so export/import is a single copy:
 - ``instrumental.mp3`` / ``vocals.mp3`` — stem separation
 - ``cover.<ext>`` — artwork bytes
 - ``youtube.json`` — YouTube clip id for the stage background
+- ``karaoke.mp4`` — exported karaoke video (cover + lyric fill)
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ INSTRUMENTAL_NAME = "instrumental.mp3"
 VOCALS_NAME = "vocals.mp3"
 COVER_PREFIX = "cover"
 YOUTUBE_NAME = "youtube.json"
+KARAOKE_NAME = "karaoke.mp4"
+KARAOKE_META_NAME = "karaoke.json"
 
 CACHE_SCOPES = frozenset({"lyrics", "aligned", "stems", "cover", "youtube"})
 
@@ -73,6 +76,14 @@ def vocals_path(tracks_root: Path, key: str) -> Path:
 
 def youtube_path(tracks_root: Path, key: str) -> Path:
     return track_dir(tracks_root, key) / YOUTUBE_NAME
+
+
+def karaoke_path(tracks_root: Path, key: str) -> Path:
+    return track_dir(tracks_root, key) / KARAOKE_NAME
+
+
+def karaoke_meta_path(tracks_root: Path, key: str) -> Path:
+    return track_dir(tracks_root, key) / KARAOKE_META_NAME
 
 
 def find_cover_path(tracks_root: Path, key: str) -> Path | None:
@@ -173,6 +184,9 @@ def clear_track_files(tracks_root: Path, key: str, scopes: set[str]) -> dict[str
         removed["lyrics"] = _unlink(lyrics_path(tracks_root, key))
     if "aligned" in scopes:
         removed["aligned"] = _unlink(aligned_path(tracks_root, key))
+        # Stale karaoke video would keep old syllable timings.
+        _unlink(karaoke_path(tracks_root, key))
+        _unlink(karaoke_meta_path(tracks_root, key))
     if "stems" in scopes:
         removed["stems"] = _unlink(instrumental_path(tracks_root, key)) + _unlink(
             vocals_path(tracks_root, key)

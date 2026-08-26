@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=48" />
+    <link rel="stylesheet" href="/styles.css?v=53" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -195,12 +195,22 @@
         </div>
         <div class="cover-actions">
           <button id="albumBackBtn" class="album-back-btn" type="button" hidden>← Àlbums</button>
+          <button
+            id="exportVideoBtn"
+            class="export-video-btn"
+            type="button"
+            hidden
+            title="Crear i desar un vídeo MP4 del karaoke"
+          >
+            Desar vídeo
+          </button>
           <button id="singBtn" class="sing-btn" type="button">Cantar</button>
           <button id="pasteLyricsBtn" class="paste-lyrics-btn" type="button" hidden>
             Editar lletra
           </button>
           <button id="resyncCoverBtn" class="resync-cover-btn" type="button" hidden>Nova portada</button>
           <p id="syncQueueMeta" class="sync-queue-meta" hidden></p>
+          <p id="exportVideoStatus" class="sync-queue-meta" hidden></p>
         </div>
       </div>
     </section>
@@ -746,6 +756,8 @@
       </div>
     </section>
 
-    <script src="/app.js?v=71"></script>
+    <p id="exportCaptureBadge" class="export-capture-badge" hidden>Gravant l’escenari…</p>
+
+    <script src="/app.js?v=76"></script>
   </body>
 </html>

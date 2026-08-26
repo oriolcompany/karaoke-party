@@ -1528,6 +1528,37 @@ button:hover {
   text-transform: uppercase;
 }
 
+.export-video-btn {
+  min-width: 9rem;
+  padding: 0.95rem 1.4rem;
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.export-video-btn:hover:not(:disabled) {
+  color: var(--cyan);
+  border-color: var(--cyan);
+}
+
+.export-video-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.export-video-btn[hidden] {
+  display: none !important;
+}
+
+.export-video-btn.is-busy {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
 .resync-cover-btn {
   display: none !important;
   min-width: 8rem;
@@ -1592,8 +1623,12 @@ button:hover {
   min-height: 1.1em;
 }
 
-.sync-queue-meta[hidden] {
-  display: none !important;
+.sync-queue-meta[data-kind="error"] {
+  color: #ff6b8a;
+}
+
+.sync-queue-meta[data-kind="ok"] {
+  color: #2fd67b;
 }
 
 .cover-empty {
@@ -1659,6 +1694,61 @@ button:hover {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease;
+}
+
+.view-stage.is-exporting .stage-back-layer,
+.view-stage.is-exporting .stage-dock-layer,
+.view-stage.is-exporting .stage-paste-lyrics-btn {
+  opacity: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.is-exporting-video {
+  background: #030208;
+}
+
+body.is-exporting-video .fx {
+  visibility: hidden;
+  opacity: 0;
+}
+
+body.is-exporting-video .view-stage.is-exporting {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 1920px;
+  height: 1080px;
+  max-height: none;
+  transform: translate(-50%, -50%) scale(var(--export-stage-scale, 1));
+  transform-origin: center center;
+}
+
+.export-capture-badge {
+  position: fixed;
+  top: 0.85rem;
+  right: 0.9rem;
+  z-index: 40;
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(7, 6, 11, 0.72);
+  border: 1px solid rgba(255, 246, 234, 0.16);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+.export-capture-canvas {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1920px;
+  height: 1080px;
+  pointer-events: none;
+  opacity: 0;
 }
 
 .stage-fx {
