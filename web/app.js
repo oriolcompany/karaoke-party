@@ -556,7 +556,7 @@ function resizeAuraCanvas() {
   if (auraCtx) auraCtx.setTransform(auraDpr, 0, 0, auraDpr, 0, 0);
 }
 
-function drawAuraRibbon(t, spec, live) {
+function drawAuraRibbon(t, spec, live, glow) {
   if (!auraCtx) return;
   const steps = 48;
   const [r, g, b] = spec.rgb;
@@ -572,7 +572,7 @@ function drawAuraRibbon(t, spec, live) {
     if (i === 0) auraCtx.moveTo(x, y);
     else auraCtx.lineTo(x, y);
   }
-  auraCtx.strokeStyle = `rgba(${r},${g},${b},${live ? 0.28 : 0.18})`;
+  auraCtx.strokeStyle = `rgba(${r},${g},${b},${(live ? 0.28 : 0.18) * glow})`;
   auraCtx.lineWidth = spec.width * (live ? 1.25 : 1);
   auraCtx.lineCap = "round";
   auraCtx.stroke();
@@ -589,12 +589,19 @@ function drawAuraFrame(ts) {
   auraLastTs = ts;
   const step = exportClock === null ? 1 : elapsed / frameMs;
   const live = auraLive();
+  // Trails fade a fixed fraction per tick; brightness settles at stroke/fade.
+  // Export ticks at 30 fps with a stronger fade so motion stays at 60 Hz, which
+  // would leave the glow at ~56% of the live stage. Boost the additive stroke
+  // by the same ratio instead of ticking twice (that path flickered).
+  const trailKeep = 0.78;
+  const fade = 1 - trailKeep ** step;
+  const glow = fade / (1 - trailKeep);
   auraCtx.globalCompositeOperation = "source-over";
-  auraCtx.fillStyle = `rgba(3, 2, 8, ${(1 - 0.78 ** step).toFixed(4)})`;
+  auraCtx.fillStyle = `rgba(3, 2, 8, ${fade.toFixed(4)})`;
   auraCtx.fillRect(0, 0, auraW, auraH);
 
   auraCtx.globalCompositeOperation = "lighter";
-  for (const spec of AURA_RIBBONS) drawAuraRibbon(t, spec, live);
+  for (const spec of AURA_RIBBONS) drawAuraRibbon(t, spec, live, glow);
 
   if (!auraParticlesEnabled) return;
 
@@ -611,7 +618,7 @@ function drawAuraFrame(ts) {
     if (p.x > 1.04) p.x = -0.04;
     const [r, g, b] = palette[p.hue];
     const s = (live ? 2.0 : 1.4) * p.z;
-    auraCtx.fillStyle = `rgba(${r},${g},${b},${0.12 + p.z * 0.32})`;
+    auraCtx.fillStyle = `rgba(${r},${g},${b},${(0.12 + p.z * 0.32) * glow})`;
     auraCtx.beginPath();
     auraCtx.arc(p.x * auraW, p.y * auraH, s, 0, Math.PI * 2);
     auraCtx.fill();

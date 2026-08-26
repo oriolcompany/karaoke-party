@@ -30,7 +30,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 10
+KARAOKE_RENDER_VERSION = 11
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
 # Stage palette (styles.css): ink, gold, cyan, bg.
