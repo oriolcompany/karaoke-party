@@ -2689,25 +2689,31 @@ function paintExportIntro(ctx, t, track) {
   ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
   const cx = EXPORT_VIDEO_W / 2;
   const logoSize = 220 + (1 - card) * 160;
-  const logoY = 48 + (1 - card) * 24;
+  const artistSize = 28;
+  const titleSize = fitExportFont(ctx, title, "Bebas Neue, sans-serif", 88, 44, 1600);
+  const subSize = 22;
+  const gap = 36;
+  const textH = artistSize + 16 + titleSize + 44 + subSize;
+  const stackH = logoSize + card * (gap + textH);
+  const logoY = (EXPORT_VIDEO_H - stackH) / 2;
   ctx.globalAlpha = alpha;
   drawExportBrandMark(ctx, cx - logoSize / 2, logoY, logoSize);
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
   ctx.globalAlpha = alpha * card;
+  const artistY = logoY + logoSize + gap + artistSize;
   setExportLetterSpacing(ctx, 7);
-  ctx.font = "700 28px Outfit, sans-serif";
+  ctx.font = `700 ${artistSize}px Outfit, sans-serif`;
   ctx.fillStyle = "#ffe14a";
-  fillExportHeadline(ctx, artist, cx, 340);
+  fillExportHeadline(ctx, artist, cx, artistY);
   setExportLetterSpacing(ctx, 2);
-  const titleSize = fitExportFont(ctx, title, "Bebas Neue, sans-serif", 88, 44, 1600);
   ctx.font = `${titleSize}px Bebas Neue, sans-serif`;
   ctx.fillStyle = "#fff6ea";
-  fillExportHeadline(ctx, title, cx, 340 + titleSize + 16);
+  fillExportHeadline(ctx, title, cx, artistY + 16 + titleSize);
   setExportLetterSpacing(ctx, 4);
-  ctx.font = "500 22px Outfit, sans-serif";
+  ctx.font = `500 ${subSize}px Outfit, sans-serif`;
   ctx.fillStyle = "#3de7ff";
-  fillExportHeadline(ctx, "KARAOKE", cx, 340 + titleSize + 60);
+  fillExportHeadline(ctx, "KARAOKE", cx, artistY + titleSize + 60);
   ctx.restore();
 }
 

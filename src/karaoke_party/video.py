@@ -30,7 +30,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 15
+KARAOKE_RENDER_VERSION = 17
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
 # YouTube bumpers painted by the browser encoder. Keep in sync with app.js.
