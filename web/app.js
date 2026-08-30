@@ -39,6 +39,8 @@ const playBtn = document.getElementById("playBtn");
 const coverArtist = document.getElementById("coverArtist");
 const coverTitle = document.getElementById("coverTitle");
 const coverIndex = document.getElementById("coverIndex");
+const songRating = document.getElementById("songRating");
+const stageRating = document.getElementById("stageRating");
 const coverPrev = document.getElementById("coverPrev");
 const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
@@ -73,6 +75,7 @@ const libraryBrowseAlbumBtn = document.getElementById("libraryBrowseAlbumBtn");
 const lyricsFilterLyricsBtn = document.getElementById("lyricsFilterLyricsBtn");
 const lyricsFilterHiddenBtn = document.getElementById("lyricsFilterHiddenBtn");
 const lyricsFilterAllBtn = document.getElementById("lyricsFilterAllBtn");
+const ratingFilterToggle = document.getElementById("ratingFilterToggle");
 const muteOffBtn = document.getElementById("muteOffBtn");
 const muteOnBtn = document.getElementById("muteOnBtn");
 const lyricsLayoutStackBtn = document.getElementById("lyricsLayoutStackBtn");
@@ -125,6 +128,7 @@ const VIEW_MODE_KEY = "karaoke-browse-mode";
 const ALIGN_MODE_KEY = "karaoke-align-mode";
 const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
+const RATING_FILTER_KEY = "karaoke-rating-filter";
 const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
 const AURA_PARTICLES_KEY = "karaoke-aura-particles";
 const AUDIO_MODE_KEY = "karaoke-audio-mode";
@@ -162,6 +166,14 @@ function loadLyricsFilterMode() {
   return "lyrics";
 }
 
+function loadRatingFilterMode() {
+  const stored = localStorage.getItem(RATING_FILTER_KEY);
+  if (stored === "all" || stored === "none") return stored;
+  const n = Number(stored);
+  if (n >= 1 && n <= 5) return n;
+  return "all";
+}
+
 const ICON_SYNCED =
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 5.4 12.8l1.4-1.4 2.4 2.4 7-7 1.4 1.4z"/></svg>`;
 const ICON_CLOCK =
@@ -170,6 +182,145 @@ const ICON_QUEUE =
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 6h16v2H4zm0 5h16v2H4zm0 5h10v2H4z"/></svg>`;
 const ICON_RUNNING =
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 14h2v4H4zm3.5-4h2v8h-2zm3.5-5h2v13h-2zm3.5 3h2v10h-2zm3.5 2h2v8h-2z"/></svg>`;
+const ICON_STAR =
+  `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2.8 14.8 9l6.7.6-5.1 4.4 1.6 6.6L12 17.2 6 20.6l1.6-6.6L2.5 9.6 9.2 9z"/></svg>`;
+
+function clampRating(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(5, Math.round(n)));
+}
+
+function ratingLabel(rating) {
+  const value = clampRating(rating);
+  if (!value) return "Sense puntuació";
+  return `${value} de 5 estrelles`;
+}
+
+function findTrackById(trackId) {
+  if (!trackId) return null;
+  return (
+    tracks.find((item) => item.id === trackId) ||
+    playableTracks.find((item) => item.id === trackId) ||
+    hiddenTracks.find((item) => item.id === trackId) ||
+    pendingTracks.find((item) => item.id === trackId) ||
+    null
+  );
+}
+
+function paintRatingWidget(root, rating) {
+  if (!root) return;
+  const value = clampRating(rating);
+  root.dataset.rating = String(value);
+  root.querySelectorAll(".rating-star").forEach((btn) => {
+    const n = Number(btn.dataset.value);
+    const on = n <= value;
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", n === value && value > 0 ? "true" : "false");
+    btn.title = n === value && value ? "Treure puntuació" : `${n} estrella${n === 1 ? "" : "es"}`;
+  });
+  root.setAttribute("aria-label", `Puntuació: ${ratingLabel(value)}`);
+}
+
+function previewRatingWidget(root, hover) {
+  if (!root) return;
+  root.querySelectorAll(".rating-star").forEach((btn) => {
+    btn.classList.toggle("is-on", Number(btn.dataset.value) <= hover);
+  });
+}
+
+function fillRatingWidget(root, { compact = false, asButtons = true } = {}) {
+  if (!root || root.dataset.ready === "1") return root;
+  root.dataset.ready = "1";
+  root.classList.toggle("is-compact", compact);
+  root.replaceChildren();
+  for (let n = 1; n <= 5; n += 1) {
+    const btn = document.createElement(asButtons ? "button" : "span");
+    if (asButtons) btn.type = "button";
+    else {
+      btn.setAttribute("role", "button");
+      btn.tabIndex = 0;
+    }
+    btn.className = "rating-star";
+    btn.dataset.value = String(n);
+    btn.innerHTML = ICON_STAR;
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const trackId = root.dataset.trackId;
+      if (!trackId) return;
+      const current = clampRating(root.dataset.rating);
+      setTrackRating(trackId, current === n ? 0 : n);
+    });
+    btn.addEventListener("mouseenter", () => previewRatingWidget(root, n));
+    btn.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      btn.click();
+    });
+    root.appendChild(btn);
+  }
+  root.addEventListener("mouseleave", () => {
+    paintRatingWidget(root, root.dataset.rating);
+  });
+  return root;
+}
+
+function bindRatingWidget(root, track, { compact = false, asButtons = true } = {}) {
+  if (!root) return;
+  fillRatingWidget(root, { compact, asButtons });
+  if (!track?.id) {
+    root.hidden = true;
+    root.dataset.trackId = "";
+    paintRatingWidget(root, 0);
+    return;
+  }
+  root.hidden = false;
+  root.dataset.trackId = track.id;
+  paintRatingWidget(root, track.rating);
+}
+
+function applyTrackRating(trackId, rating) {
+  const value = clampRating(rating);
+  for (const list of [playableTracks, hiddenTracks, pendingTracks, tracks]) {
+    const track = list.find((item) => item.id === trackId);
+    if (track) track.rating = value;
+  }
+  document.querySelectorAll(".song-rating[data-track-id]").forEach((el) => {
+    if (el.dataset.trackId === trackId) paintRatingWidget(el, value);
+  });
+  if (ratingFilterMode === "all") return;
+  const previousId = selectedTrack()?.id;
+  applyLyricsFilterMode();
+  renderSongs(searchEl?.value || "", { play: false });
+  if (previousId) {
+    const idx = findBrowseIndexByTrackId(previousId);
+    if (idx >= 0) {
+      selectedIndex = idx;
+      layoutCovers();
+      layoutGridSelection();
+      updateCoverMeta();
+    }
+  }
+  refreshLibraryMetaLabel();
+}
+
+async function setTrackRating(trackId, rating) {
+  const previous = clampRating(findTrackById(trackId)?.rating);
+  const value = clampRating(rating);
+  applyTrackRating(trackId, value);
+  try {
+    const result = await api("/api/rating", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: trackId, rating: value }),
+    });
+    applyTrackRating(trackId, result.rating);
+  } catch {
+    applyTrackRating(trackId, previous);
+  }
+}
 
 function loadAlignMode() {
   const stored = localStorage.getItem(ALIGN_MODE_KEY);
@@ -200,6 +351,7 @@ let browseMode = localStorage.getItem(VIEW_MODE_KEY) === "grid" ? "grid" : "cove
 let libraryBrowseMode =
   localStorage.getItem(LIBRARY_BROWSE_KEY) === "album" ? "album" : "song";
 let lyricsFilterMode = loadLyricsFilterMode();
+let ratingFilterMode = loadRatingFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
 let auraParticlesEnabled = loadAuraParticlesEnabled();
@@ -1804,6 +1956,35 @@ function tracksForLyricsFilter() {
   return [...playableTracks, ...pendingTracks].sort(compareTracks);
 }
 
+function trackMatchesRatingFilter(track) {
+  const rating = clampRating(track?.rating);
+  if (ratingFilterMode === "all") return true;
+  if (ratingFilterMode === "none") return rating === 0;
+  return rating >= ratingFilterMode;
+}
+
+function tracksForLibraryFilters() {
+  return tracksForLyricsFilter().filter(trackMatchesRatingFilter);
+}
+
+function ratingFilterLabel() {
+  if (ratingFilterMode === "none") return "sense puntuació";
+  if (typeof ratingFilterMode === "number") {
+    return ratingFilterMode === 5 ? "5 estrelles" : `${ratingFilterMode}+ estrelles`;
+  }
+  return "";
+}
+
+function applyRatingFilterMode() {
+  const mode = String(ratingFilterMode);
+  ratingFilterToggle?.querySelectorAll("[data-rating-filter]").forEach((btn) => {
+    const active = btn.dataset.ratingFilter === mode;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (browsePanel) browsePanel.dataset.ratingFilter = mode;
+}
+
 function applyLyricsFilterMode() {
   const mode = lyricsFilterMode;
   lyricsFilterLyricsBtn?.classList.toggle("is-active", mode === "lyrics");
@@ -1813,7 +1994,24 @@ function applyLyricsFilterMode() {
   lyricsFilterHiddenBtn?.setAttribute("aria-pressed", mode === "hidden" ? "true" : "false");
   lyricsFilterAllBtn?.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
   browsePanel.dataset.lyricsFilter = mode;
-  tracks = tracksForLyricsFilter();
+  applyRatingFilterMode();
+  tracks = tracksForLibraryFilters();
+}
+
+function setRatingFilterMode(mode) {
+  if (mode === "all" || mode === "none") {
+    ratingFilterMode = mode;
+  } else {
+    const n = Number(mode);
+    ratingFilterMode = n >= 1 && n <= 5 ? n : "all";
+  }
+  localStorage.setItem(RATING_FILTER_KEY, String(ratingFilterMode));
+  openedAlbum = null;
+  selectedIndex = 0;
+  applyLyricsFilterMode();
+  applyLibraryBrowseMode();
+  renderSongs(searchEl.value, { play: false });
+  refreshLibraryMetaLabel();
 }
 
 function setLyricsFilterMode(mode) {
@@ -1854,6 +2052,7 @@ function updateCoverMeta() {
     coverArtist.textContent = "";
     coverTitle.textContent = "";
     coverIndex.textContent = "";
+    bindRatingWidget(songRating, null);
     resyncCoverBtn.hidden = true;
     updatePrimaryAction();
     return;
@@ -1864,6 +2063,7 @@ function updateCoverMeta() {
     coverTitle.textContent = item.album || "Sense àlbum";
     const year = item.year ? ` · ${item.year}` : "";
     coverIndex.textContent = `${selectedIndex + 1}/${list.length} · ${item.tracks.length} cançons${year}`;
+    bindRatingWidget(songRating, null);
     resyncCoverBtn.hidden = true;
   } else {
     coverArtist.textContent = openedAlbum
@@ -1873,6 +2073,7 @@ function updateCoverMeta() {
     coverIndex.textContent = openedAlbum
       ? `${selectedIndex + 1}/${list.length} · ${item.artist || ""}`
       : `${selectedIndex + 1}/${list.length}`;
+    bindRatingWidget(songRating, item);
     resyncCoverBtn.hidden = true;
   }
   updatePrimaryAction();
@@ -3837,7 +4038,9 @@ function itemAriaLabel(item) {
   if (item?.kind === "album") {
     return `${item.artist || "Artista"} — ${item.album || "Àlbum"}`;
   }
-  return `${item?.artist || "Artista"} — ${item?.title || item?.relpath || ""}`;
+  const rating = clampRating(item?.rating);
+  const score = rating ? ` · ${rating} de 5` : "";
+  return `${item?.artist || "Artista"} — ${item?.title || item?.relpath || ""}${score}`;
 }
 
 function renderCoverflowItems() {
@@ -3881,7 +4084,14 @@ function renderGridItems() {
       item.kind === "album"
         ? item.album || "Sense àlbum"
         : item.title || item.relpath;
-    btn.append(artist, title);
+    if (item.kind !== "album") {
+      const rating = document.createElement("div");
+      rating.className = "song-rating";
+      bindRatingWidget(rating, item, { compact: true, asButtons: false });
+      btn.append(artist, title, rating);
+    } else {
+      btn.append(artist, title);
+    }
     btn.addEventListener("click", () => {
       if (index === selectedIndex) {
         activateSelectedTrack();
@@ -3935,10 +4145,15 @@ function renderSongs(filter = "", options = { play: true }) {
       ? alignMode === "synced"
         ? "Cap cançó sincronitzada"
         : "Cap resultat"
+      : tracksForLyricsFilter().length && ratingFilterMode !== "all"
+        ? ratingFilterMode === "none"
+          ? "Cap cançó sense nota"
+          : `Cap cançó amb ${ratingFilterLabel()}`
       : lyricsFilterMode === "hidden"
         ? "Cap cançó oculta"
         : "Sense cançons";
     coverIndex.textContent = "";
+    bindRatingWidget(songRating, null);
     resyncCoverBtn.hidden = true;
     updatePrimaryAction();
     const empty = document.createElement("p");
@@ -3949,6 +4164,10 @@ function renderSongs(filter = "", options = { play: true }) {
         : isAlbumListView()
           ? "Cap àlbum amb aquesta cerca."
           : "Cap resultat amb aquesta cerca."
+      : tracksForLyricsFilter().length && ratingFilterMode !== "all"
+        ? ratingFilterMode === "none"
+          ? "No hi ha cançons sense puntuació."
+          : `No hi ha cançons amb ${ratingFilterLabel()}.`
       : lyricsFilterMode === "hidden"
         ? "No hi ha cançons amagades sense lletra."
         : "Carrega una carpeta de música per començar.";
@@ -4583,12 +4802,20 @@ function refreshLibraryMetaLabel() {
     libraryMeta.textContent = "Carrega una carpeta de MP3s etiquetats per començar la nit";
     return;
   }
+  const ratingBit = ratingFilterLabel();
+  const visibleCount = tracks.length;
   if (lyricsFilterMode === "hidden") {
     const count = hiddenTracks.length;
     if (!count) {
       libraryMeta.textContent = `Cap cançó oculta (de ${total} al disc)`;
+    } else if (ratingBit && !visibleCount) {
+      libraryMeta.textContent = `Cap cançó oculta amb ${ratingBit} (de ${count})`;
     } else {
-      const bits = [`${count} cançons ocultes sense lletra`];
+      const bits = [
+        ratingBit
+          ? `${visibleCount} ocultes · ${ratingBit}`
+          : `${count} cançons ocultes sense lletra`,
+      ];
       if (errors) bits.push(`${errors} amb error de connexió`);
       if (pending) bits.push(`${pending} sense comprovar`);
       libraryMeta.textContent = bits.join(" · ");
@@ -4599,8 +4826,10 @@ function refreshLibraryMetaLabel() {
     const count = playableTracks.length + hiddenTracks.length + pendingTracks.length;
     if (!count) {
       libraryMeta.textContent = `Cap cançó a la biblioteca (de ${total} al disc)`;
+    } else if (ratingBit && !visibleCount) {
+      libraryMeta.textContent = `Cap cançó amb ${ratingBit} (de ${count})`;
     } else {
-      const bits = [`${count} cançons`];
+      const bits = [ratingBit ? `${visibleCount} cançons · ${ratingBit}` : `${count} cançons`];
       if (playableTracks.length) bits.push(`${playableTracks.length} amb lletra`);
       if (hiddenTracks.length) bits.push(`${hiddenTracks.length} sense lletra`);
       if (pendingTracks.length) bits.push(`${pendingTracks.length} sense comprovar`);
@@ -4615,14 +4844,22 @@ function refreshLibraryMetaLabel() {
     libraryMeta.textContent = `No s’ha pogut connectar a LRCLIB per ${errors} cançons · Configuració → Reintentar lletres`;
   } else if (!playableTracks.length) {
     libraryMeta.textContent = `Cap cançó amb lletra (de ${total} al disc)`;
+  } else if (ratingBit && !visibleCount) {
+    libraryMeta.textContent = `Cap cançó amb ${ratingBit} (de ${playableTracks.length} amb lletra)`;
   } else if (hidden || pending || errors) {
-    const bits = [`${playableTracks.length} cançons amb lletra`];
+    const bits = [
+      ratingBit
+        ? `${visibleCount} cançons · ${ratingBit}`
+        : `${playableTracks.length} cançons amb lletra`,
+    ];
     if (hidden - errors > 0) bits.push(`${hidden - errors} amagades sense lletra`);
     if (errors) bits.push(`${errors} amb error de connexió`);
     if (pending) bits.push(`${pending} sense comprovar`);
     libraryMeta.textContent = bits.join(" · ");
   } else {
-    libraryMeta.textContent = `${playableTracks.length} cançons a punt · tria’n una per cantar`;
+    libraryMeta.textContent = ratingBit
+      ? `${visibleCount} cançons · ${ratingBit}`
+      : `${playableTracks.length} cançons a punt · tria’n una per cantar`;
   }
 }
 
@@ -4930,6 +5167,7 @@ async function openSong(trackId, { autoplay = true } = {}) {
   setStageCover(trackId);
   songTitle.textContent = track.title;
   songArtist.textContent = track.artist || "Artista desconegut";
+  bindRatingWidget(stageRating, track);
   // Fall back to the original mix while the instrumental is still cooking.
   const wantsInstrumental = audioMode === "instrumental" && stemsAvailable;
   const useInstrumental = wantsInstrumental && !!track.has_instrumental;
@@ -5606,6 +5844,11 @@ libraryBrowseAlbumBtn?.addEventListener("click", () => setLibraryBrowseMode("alb
 lyricsFilterLyricsBtn?.addEventListener("click", () => setLyricsFilterMode("lyrics"));
 lyricsFilterHiddenBtn?.addEventListener("click", () => setLyricsFilterMode("hidden"));
 lyricsFilterAllBtn?.addEventListener("click", () => setLyricsFilterMode("all"));
+ratingFilterToggle?.addEventListener("click", (event) => {
+  const btn = event.target?.closest?.("[data-rating-filter]");
+  if (!btn || !ratingFilterToggle.contains(btn)) return;
+  setRatingFilterMode(btn.dataset.ratingFilter);
+});
 muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
 muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
 lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
@@ -5622,7 +5865,10 @@ generateStemsBtn?.addEventListener("click", () => startStemsGeneration());
 searchYoutubeMissingBtn?.addEventListener("click", () => startYoutubeSearch("missing"));
 searchYoutubeAllBtn?.addEventListener("click", () => startYoutubeSearch("all"));
 albumBackBtn?.addEventListener("click", () => closeAlbum());
+fillRatingWidget(songRating);
+fillRatingWidget(stageRating);
 applyLyricsFilterMode();
+applyRatingFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
 applyLyricsLayout();

@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=57" />
+    <link rel="stylesheet" href="/styles.css?v=59" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -191,6 +191,13 @@
         <div class="cover-meta">
           <p id="coverArtist" class="cover-artist"></p>
           <h2 id="coverTitle" class="cover-title"></h2>
+          <div
+            id="songRating"
+            class="song-rating"
+            hidden
+            role="group"
+            aria-label="Puntuació de la cançó"
+          ></div>
           <p id="coverIndex" class="cover-index"></p>
         </div>
         <div class="cover-actions">
@@ -365,6 +372,64 @@
                       aria-pressed="false"
                     >
                       Totes
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
+                    Mostra totes les cançons, només les sense nota, o a partir d’un nombre d’estrelles.
+                  </p>
+                  <div
+                    id="ratingFilterToggle"
+                    class="settings-toggle is-wrap"
+                    role="group"
+                    aria-label="Filtre per puntuació"
+                  >
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      data-rating-filter="all"
+                      aria-pressed="true"
+                    >
+                      Totes
+                    </button>
+                    <button type="button" class="settings-toggle-btn" data-rating-filter="none">
+                      Sense
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-compact"
+                      data-rating-filter="1"
+                    >
+                      1+
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-compact"
+                      data-rating-filter="2"
+                    >
+                      2+
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-compact"
+                      data-rating-filter="3"
+                    >
+                      3+
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-compact"
+                      data-rating-filter="4"
+                    >
+                      4+
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-compact"
+                      data-rating-filter="5"
+                    >
+                      5
                     </button>
                   </div>
                 </div>
@@ -679,6 +744,13 @@
       <div class="stage-meta">
         <p id="songArtist" class="stage-artist"></p>
         <h2 id="songTitle" class="stage-title"></h2>
+        <div
+          id="stageRating"
+          class="song-rating song-rating-stage"
+          hidden
+          role="group"
+          aria-label="Puntuació de la cançó"
+        ></div>
       </div>
 
       <div id="lyrics" class="karaoke-board" aria-live="polite">
@@ -768,6 +840,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=89"></script>
+    <script src="/app.js?v=91"></script>
   </body>
 </html>

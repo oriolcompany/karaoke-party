@@ -44,6 +44,7 @@ from .covers import (
 )
 from .folder_picker import pick_music_folder
 from .library import TrackInfo, _sort_key, scan_library
+from .ratings import get_rating, load_ratings, normalize_rating, set_rating
 from .lyrics import (
     PROBE_ERROR_SOURCE,
     PROBE_TIMEOUT,
@@ -215,6 +216,11 @@ class ResyncLyricsBody(BaseModel):
 class SaveLyricsBody(BaseModel):
     track_id: str
     text: str
+
+
+class RatingBody(BaseModel):
+    track_id: str
+    rating: int
 
 
 class YoutubeSearchBody(BaseModel):
@@ -825,6 +831,7 @@ def _library_snapshot() -> dict:
     hidden_tracks.sort(key=_sort_key)
     pending_tracks.sort(key=_sort_key)
     stems_path = stems_cache_dir()
+    ratings = load_ratings()
     playable: list[dict] = []
     for track in playable_tracks:
         item = asdict(track)
@@ -832,21 +839,26 @@ def _library_snapshot() -> dict:
         item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
         item["has_lyrics"] = True
         item["has_instrumental"] = has_instrumental(stems_path, key)
+        item["rating"] = get_rating(key, ratings)
         playable.append(item)
 
     hidden_items: list[dict] = []
     for track in hidden_tracks:
         item = asdict(track)
+        key = cache_key(track.artist, track.title, track.duration)
         item["whisper_aligned"] = False
         item["has_lyrics"] = False
+        item["rating"] = get_rating(key, ratings)
         hidden_items.append(item)
 
     pending_items: list[dict] = []
     for track in pending_tracks:
         item = asdict(track)
+        key = cache_key(track.artist, track.title, track.duration)
         item["whisper_aligned"] = False
         item["has_lyrics"] = False
         item["lyrics_pending"] = True
+        item["rating"] = get_rating(key, ratings)
         pending_items.append(item)
 
     with _probe_lock:
@@ -1611,6 +1623,19 @@ def local_lyrics(track_id: str = Query(...)) -> dict:
         "synced": bool(payload and payload.synced),
         "text": payload_to_text(payload),
     }
+
+
+@app.post("/api/rating")
+def save_rating(body: RatingBody) -> dict:
+    """Set or clear the 0–5 star rating for a song (0 removes it)."""
+    try:
+        rating = normalize_rating(body.rating)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    track = _resolve_track(body.track_id)
+    key = cache_key(track.artist, track.title, track.duration)
+    stored = set_rating(key, rating)
+    return {"track_id": track.id, "rating": stored}
 
 
 @app.post("/api/lyrics")

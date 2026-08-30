@@ -1079,6 +1079,18 @@ button:hover {
   border: 1px solid var(--line);
 }
 
+.settings-toggle.is-wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 22rem;
+  border-radius: 1.15rem;
+}
+
+.settings-toggle-btn.is-compact {
+  min-width: 2.35rem;
+  padding: 0.5rem 0.65rem;
+}
+
 .settings-toggle-btn {
   margin: 0;
   padding: 0.55rem 0.95rem;
@@ -1504,6 +1516,86 @@ button:hover {
   font-size: 0.8rem;
   font-weight: 700;
   letter-spacing: 0.08em;
+}
+
+.song-rating {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.08rem;
+  margin: 0.4rem 0 0;
+  min-height: 1.7rem;
+}
+
+.song-rating[hidden] {
+  display: none !important;
+}
+
+.song-rating.is-compact {
+  margin: 0.1rem 0 0;
+  min-height: 1.15rem;
+  justify-content: flex-start;
+}
+
+.rating-star {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: rgba(255, 246, 234, 0.22);
+  cursor: pointer;
+  filter: none;
+  line-height: 0;
+}
+
+.rating-star:hover,
+.rating-star:focus-visible {
+  filter: none;
+  color: var(--gold);
+}
+
+.rating-star:focus-visible {
+  outline: 1px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.rating-star svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  display: block;
+}
+
+.rating-star.is-on {
+  color: var(--gold);
+  filter: drop-shadow(0 0 6px rgba(255, 225, 74, 0.35));
+}
+
+.song-rating.is-compact .rating-star {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.song-rating.is-compact .rating-star svg {
+  width: 0.92rem;
+  height: 0.92rem;
+}
+
+.song-rating-stage {
+  margin-top: 0.45rem;
+}
+
+.song-rating-stage .rating-star {
+  color: rgba(255, 246, 234, 0.28);
+}
+
+.grid-card .song-rating {
+  pointer-events: auto;
 }
 
 .cover-actions {
