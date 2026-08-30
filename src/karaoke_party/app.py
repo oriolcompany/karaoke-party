@@ -40,6 +40,7 @@ from .gpu_setup import diagnose as diagnose_gpu
 from .covers import (
     covers_cache_dir,
     migrate_cached_covers_into_audio,
+    refresh_track_cover_cache,
     resolve_cover,
 )
 from .folder_picker import pick_music_folder
@@ -148,6 +149,17 @@ _cover_resync_state: dict = {
     "updated": 0,
 }
 _cover_resync_thread: threading.Thread | None = None
+_cover_refresh_lock = threading.Lock()
+_cover_refresh_state: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "updated": 0,
+    "same": 0,
+    "missing": 0,
+    "failed": 0,
+}
+_cover_refresh_thread: threading.Thread | None = None
 COVER_RESYNC_CONCURRENCY = 3
 _stem_jobs: dict[str, dict] = {}
 _stem_lock = threading.Lock()
@@ -865,6 +877,8 @@ def _library_snapshot() -> dict:
         probe = dict(_probe_state)
     with _cover_resync_lock:
         covers_resync = dict(_cover_resync_state)
+    with _cover_refresh_lock:
+        covers_refresh = dict(_cover_refresh_state)
     with _stem_lock:
         stems_state = dict(_stem_bulk_state)
         stems_state["queued"] = len(_stem_queue)
@@ -886,6 +900,7 @@ def _library_snapshot() -> dict:
         "errors": errors,
         "probe": probe,
         "covers_resync": covers_resync,
+        "covers_refresh": covers_refresh,
         "stems": stems_state,
         "stems_available": separation_available(),
         "youtube": youtube_state,
@@ -1233,6 +1248,96 @@ def _run_cover_resync(track_ids: list[str]) -> None:
     finally:
         with _cover_resync_lock:
             _cover_resync_state["running"] = False
+
+
+def _run_cover_refresh(track_ids: list[str]) -> None:
+    """Re-read embedded covers into the disk cache. Never writes audio tags."""
+    cache = covers_cache_dir()
+    try:
+        for tid in track_ids:
+            track = _tracks.get(tid)
+            status = "failed"
+            if track is not None:
+                try:
+                    status = refresh_track_cover_cache(
+                        Path(track.path),
+                        cache,
+                        artist=track.artist,
+                        title=track.title,
+                        duration=track.duration,
+                        album=track.album,
+                    )
+                except Exception:
+                    status = "failed"
+            with _cover_refresh_lock:
+                _cover_refresh_state["done"] += 1
+                if status == "updated":
+                    _cover_refresh_state["updated"] += 1
+                elif status == "same":
+                    _cover_refresh_state["same"] += 1
+                elif status == "missing":
+                    _cover_refresh_state["missing"] += 1
+                elif status == "failed":
+                    _cover_refresh_state["failed"] += 1
+    finally:
+        with _cover_refresh_lock:
+            _cover_refresh_state["running"] = False
+
+
+@app.post("/api/library/covers/refresh")
+def refresh_library_covers() -> dict:
+    """User-triggered re-read of embedded artwork into the cover cache."""
+    global _cover_refresh_thread
+    if _music_root is None:
+        raise HTTPException(status_code=400, detail="Cap carpeta carregada")
+    if not _tracks:
+        _reload_library(_music_root, reset_probe=False)
+    track_ids = [track.id for track in sorted(_tracks.values(), key=_sort_key)]
+    with _cover_refresh_lock:
+        if _cover_refresh_state["running"]:
+            return dict(_cover_refresh_state)
+        if _cover_refresh_thread is not None and _cover_refresh_thread.is_alive():
+            return dict(_cover_refresh_state)
+        if not track_ids:
+            return {
+                "running": False,
+                "done": 0,
+                "total": 0,
+                "updated": 0,
+                "same": 0,
+                "missing": 0,
+                "failed": 0,
+            }
+        _cover_refresh_state.update(
+            {
+                "running": True,
+                "done": 0,
+                "total": len(track_ids),
+                "updated": 0,
+                "same": 0,
+                "missing": 0,
+                "failed": 0,
+            }
+        )
+        thread = threading.Thread(
+            target=_run_cover_refresh,
+            args=(track_ids,),
+            daemon=True,
+            name="cover-refresh",
+        )
+        _cover_refresh_thread = thread
+        state = dict(_cover_refresh_state)
+    thread.start()
+    return state
+
+
+@app.get("/api/library/covers")
+def library_covers_state() -> dict:
+    with _cover_refresh_lock:
+        refresh = dict(_cover_refresh_state)
+    with _cover_resync_lock:
+        resync = dict(_cover_resync_state)
+    return {"refresh": refresh, "resync": resync}
 
 
 @app.post("/api/library/covers/resync")

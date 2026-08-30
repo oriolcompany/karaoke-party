@@ -20,6 +20,8 @@ const loadBtn = document.getElementById("loadBtn");
 const retryLyricsBtn = document.getElementById("retryLyricsBtn");
 const resyncLyricsMissingBtn = document.getElementById("resyncLyricsMissingBtn");
 const syncLyricsWhisperBtn = document.getElementById("syncLyricsWhisperBtn");
+const refreshCoversBtn = document.getElementById("refreshCoversBtn");
+const coversSettingsStatus = document.getElementById("coversSettingsStatus");
 const resyncCoverBtn = document.getElementById("resyncCoverBtn");
 const backBtn = document.getElementById("backBtn");
 const player = document.getElementById("player");
@@ -373,6 +375,7 @@ let stemsAvailable = false;
 let stemsJobTimer = 0;
 let stemsBulkTimer = 0;
 let youtubeBulkTimer = 0;
+let coversRefreshTimer = 0;
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
@@ -1567,6 +1570,99 @@ function pollYoutubeBulk() {
   }, 1500);
 }
 
+function coversRefreshLabel(state) {
+  const running = !!state.running;
+  const done = state.done || 0;
+  const total = state.total || 0;
+  const updated = state.updated || 0;
+  const same = state.same || 0;
+  const missing = state.missing || 0;
+  const failed = state.failed || 0;
+  if (running) {
+    return `Refrescant portades… ${done}/${total}`;
+  }
+  if (!total) return "No hi ha cançons per refrescar";
+  const bits = [`Cau de portades actualitzada · ${updated} canviades`];
+  if (same) bits.push(`${same} iguals`);
+  if (missing) bits.push(`${missing} sense imatge`);
+  if (failed) bits.push(`${failed} amb error`);
+  return bits.join(" · ");
+}
+
+function applyCoversRefreshAvailability(data) {
+  if (!refreshCoversBtn) return;
+  const bulk = data.covers_refresh || {};
+  if (bulk.running) {
+    refreshCoversBtn.disabled = true;
+    pollCoversRefresh();
+    setSettingsStatus(coversSettingsStatus, coversRefreshLabel(bulk), "running");
+    return;
+  }
+  refreshCoversBtn.disabled = !data.root || !(data.total || 0);
+}
+
+function startCoversRefresh() {
+  if (!refreshCoversBtn) return;
+  refreshCoversBtn.disabled = true;
+  setSettingsStatus(coversSettingsStatus, "Llegint les portades incrustades…", "running");
+  api("/api/library/covers/refresh", { method: "POST" })
+    .then((res) => {
+      if (!res.running && !(res.total || 0)) {
+        setSettingsStatus(coversSettingsStatus, coversRefreshLabel(res), "ok");
+        if (lastLibraryData) {
+          lastLibraryData.covers_refresh = { ...(lastLibraryData.covers_refresh || {}), ...res };
+          applyCoversRefreshAvailability(lastLibraryData);
+        } else {
+          refreshCoversBtn.disabled = false;
+        }
+        return;
+      }
+      pollCoversRefresh();
+    })
+    .catch((err) => {
+      setSettingsStatus(
+        coversSettingsStatus,
+        err.message || "Error en refrescar les portades",
+        "error"
+      );
+      refreshCoversBtn.disabled = false;
+    });
+}
+
+function pollCoversRefresh() {
+  if (coversRefreshTimer) return;
+  coversRefreshTimer = setInterval(async () => {
+    try {
+      const payload = await api("/api/library/covers");
+      const state = payload.refresh || payload;
+      if (state.running) {
+        setSettingsStatus(coversSettingsStatus, coversRefreshLabel(state), "running");
+        if (lastLibraryData) {
+          lastLibraryData.covers_refresh = state;
+          refreshLibraryMetaLabel();
+        }
+        return;
+      }
+      clearInterval(coversRefreshTimer);
+      coversRefreshTimer = 0;
+      const failed = state.failed || 0;
+      setSettingsStatus(coversSettingsStatus, coversRefreshLabel(state), failed ? "error" : "ok");
+      refreshCoverImages();
+      if (lastLibraryData) {
+        lastLibraryData.covers_refresh = state;
+        applyCoversRefreshAvailability(lastLibraryData);
+        refreshLibraryMetaLabel();
+      } else if (refreshCoversBtn) {
+        refreshCoversBtn.disabled = false;
+      }
+    } catch {
+      clearInterval(coversRefreshTimer);
+      coversRefreshTimer = 0;
+      if (refreshCoversBtn) refreshCoversBtn.disabled = false;
+    }
+  }, 500);
+}
+
 function applyAudioMute() {
   muteOffBtn?.classList.toggle("is-active", !audioMuted);
   muteOnBtn?.classList.toggle("is-active", audioMuted);
@@ -1864,8 +1960,17 @@ function selectedTrack() {
   return item;
 }
 
+function foldAlbumName(text) {
+  return (text || "")
+    .normalize("NFKC")
+    .replace(/[\u2018\u2019\u201A\u201B\u02BB\u02BC\u02C8\u00B4\u0060]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function albumKey(artist, album) {
-  return `${(artist || "").toLowerCase()}::${(album || "").toLowerCase()}`;
+  return `${foldAlbumName(artist)}::${foldAlbumName(album)}`;
 }
 
 function pickAlbumCoverTrack(albumTracks) {
@@ -1933,10 +2038,10 @@ function buildAlbums(sourceTracks) {
     entry.coverTrack = pickAlbumCoverTrack(entry.tracks);
   }
   return [...map.values()].sort((a, b) => {
-    const artistCmp = a.artist.localeCompare(b.artist, "ca", { sensitivity: "base" });
+    const artistCmp = foldAlbumName(a.artist).localeCompare(foldAlbumName(b.artist), "ca");
     if (artistCmp) return artistCmp;
     if ((b.year || 0) !== (a.year || 0)) return (b.year || 0) - (a.year || 0);
-    return a.album.localeCompare(b.album, "ca", { sensitivity: "base" });
+    return foldAlbumName(a.album).localeCompare(foldAlbumName(b.album), "ca");
   });
 }
 
@@ -1968,14 +2073,10 @@ function setLibraryBrowseMode(mode) {
 }
 
 function compareTracks(a, b) {
-  const artistCmp = (a.artist || "").localeCompare(b.artist || "", "ca", {
-    sensitivity: "base",
-  });
+  const artistCmp = foldAlbumName(a.artist).localeCompare(foldAlbumName(b.artist), "ca");
   if (artistCmp) return artistCmp;
   if ((b.year || 0) !== (a.year || 0)) return (b.year || 0) - (a.year || 0);
-  const albumCmp = (a.album || "").localeCompare(b.album || "", "ca", {
-    sensitivity: "base",
-  });
+  const albumCmp = foldAlbumName(a.album).localeCompare(foldAlbumName(b.album), "ca");
   if (albumCmp) return albumCmp;
   if ((a.disc || 0) !== (b.disc || 0)) return (a.disc || 0) - (b.disc || 0);
   const at = a.track > 0 ? a.track : 10 ** 9;
@@ -5248,7 +5349,14 @@ function refreshLibraryMetaLabel() {
   const total = data.total || 0;
   const errors = data.errors || 0;
   const coversResync = data.covers_resync || {};
+  const coversRefresh = data.covers_refresh || {};
 
+  if (coversRefresh.running) {
+    const done = coversRefresh.done || 0;
+    const coverTotal = coversRefresh.total || 0;
+    libraryMeta.textContent = `Refrescant portades… ${done}/${coverTotal}`;
+    return;
+  }
   if (coversResync.running) {
     const done = coversResync.done || 0;
     const coverTotal = coversResync.total || 0;
@@ -5345,6 +5453,7 @@ function updateLibraryMeta(data) {
       !data.root || !whisperSyncCandidates().length || syncRunning;
   }
   applyStemsAvailability(data);
+  applyCoversRefreshAvailability(data);
   const cacheSectionOpen =
     isSettingsOpen() &&
     settingsModal?.querySelector(".settings-nav-btn.is-active")?.dataset?.settingsSection ===
@@ -5708,6 +5817,7 @@ function startBasicLyricsResync() {
 }
 
 resyncLyricsMissingBtn?.addEventListener("click", () => startBasicLyricsResync());
+refreshCoversBtn?.addEventListener("click", () => startCoversRefresh());
 syncLyricsWhisperBtn?.addEventListener("click", () => {
   syncLyricsWhisperBtn.disabled = true;
   try {

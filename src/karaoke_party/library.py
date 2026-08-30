@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +11,10 @@ from mutagen import File as MutagenFile
 from .config import AUDIO_EXTENSIONS
 from .covers import covers_cache_dir, extract_embedded_cover, find_cached_cover
 from .lyrics import cache_key
+
+# Typographic apostrophes that should match a plain ASCII one for grouping.
+_APOSTROPHE_MAP = dict.fromkeys(map(ord, "‘’‚‛ʻʼˈ´`"), "'")
+_SPACE_RE = re.compile(r"\s+")
 
 
 @dataclass
@@ -56,6 +62,16 @@ def _tag(audio: MutagenFile, *keys: str) -> str:
     return ""
 
 
+def fold_name(text: str) -> str:
+    """Case-fold a tag so curly quotes and spacing do not split an album."""
+    folded = unicodedata.normalize("NFKC", text or "").translate(_APOSTROPHE_MAP)
+    return _SPACE_RE.sub(" ", folded).strip().casefold()
+
+
+def album_group_key(artist: str, album: str) -> str:
+    return f"{fold_name(artist)}::{fold_name(album)}"
+
+
 def _parse_number(value: str) -> int:
     """Parse tags like '3', '3/12', or 'A3' into an int (0 if unknown)."""
     if not value:
@@ -82,9 +98,9 @@ def _parse_year(value: str) -> int:
 def _sort_key(track: TrackInfo) -> tuple:
     # Artist A–Z; within artist, newest album first; then disc/track order.
     return (
-        track.artist.casefold(),
+        fold_name(track.artist),
         -track.year,
-        track.album.casefold(),
+        fold_name(track.album),
         track.disc,
         track.track if track.track > 0 else 10**9,
         track.title.casefold(),
@@ -146,9 +162,9 @@ def scan_library(root: Path) -> list[TrackInfo]:
     # Use the best year seen on any track of the album so mates stay together.
     album_years: dict[tuple[str, str], int] = {}
     for track in tracks:
-        key = (track.artist.casefold(), track.album.casefold())
+        key = album_group_key(track.artist, track.album)
         album_years[key] = max(album_years.get(key, 0), track.year)
     for track in tracks:
-        track.year = album_years[(track.artist.casefold(), track.album.casefold())]
+        track.year = album_years[album_group_key(track.artist, track.album)]
     tracks.sort(key=_sort_key)
     return tracks

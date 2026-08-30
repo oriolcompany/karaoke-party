@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from karaoke_party.library import TrackInfo, _cover_hash_for, _parse_number, _parse_year, _sort_key
+from karaoke_party.library import (
+    TrackInfo,
+    _cover_hash_for,
+    _parse_number,
+    _parse_year,
+    _sort_key,
+    album_group_key,
+    fold_name,
+)
 
 
 def test_parse_number() -> None:
@@ -65,6 +73,33 @@ def test_missing_track_number_sorts_after_numbered() -> None:
     ]
     ordered = sorted(tracks, key=_sort_key)
     assert [t.title for t in ordered] == ["One", "Unknown"]
+
+
+def test_fold_name_treats_curly_apostrophes_as_plain() -> None:
+    assert fold_name("Lax\u2019n\u2019Busto") == fold_name("Lax'n'Busto")
+    assert album_group_key("Lax\u2019n\u2019Busto", "Llença't") == album_group_key(
+        "Lax'n'Busto", "Llença't"
+    )
+
+
+def test_sort_key_groups_album_mates_despite_apostrophes() -> None:
+    tracks = [
+        TrackInfo("a", "a", "Llença't", "Lax'n'Busto", "Llença't", 1.0, "a", track=1, year=2000),
+        TrackInfo(
+            "b",
+            "b",
+            "Trepitja fort",
+            "Lax\u2019n\u2019Busto",
+            "Llença't",
+            1.0,
+            "b",
+            track=2,
+            year=2000,
+        ),
+        TrackInfo("c", "c", "Other", "Zebra", "ZZ", 1.0, "c", track=1, year=2000),
+    ]
+    ordered = sorted(tracks, key=_sort_key)
+    assert [t.title for t in ordered[:2]] == ["Llença't", "Trepitja fort"]
 
 
 def test_cover_hash_uses_embedded_bytes(tmp_path, monkeypatch) -> None:

@@ -73,11 +73,9 @@ def extract_embedded_cover(audio_path: Path) -> tuple[bytes, str] | None:
     try:
         audio = MutagenFile(str(audio_path))
     except Exception:
-        return None
-    if audio is None:
-        return None
+        audio = None
 
-    # MP3 / ID3
+    # MP3 / ID3 — tags can exist even when the audio stream is unreadable.
     try:
         tags = ID3(str(audio_path))
         for frame in tags.values():
@@ -90,7 +88,9 @@ def extract_embedded_cover(audio_path: Path) -> tuple[bytes, str] | None:
         pass
 
     # MP4 / M4A
-    if isinstance(audio, MP4) or (audio.tags and "covr" in getattr(audio, "tags", {})):
+    if audio is not None and (
+        isinstance(audio, MP4) or (audio.tags and "covr" in getattr(audio, "tags", {}))
+    ):
         try:
             covers = audio.tags.get("covr") if audio.tags else None
             if covers:
@@ -469,6 +469,88 @@ def clear_cover_cache(key: str, cache_dir: Path) -> int:
     from .track_cache import clear_track_files
 
     return clear_track_files(cache_dir, key, {"cover"})["cover"]
+
+
+def refresh_track_cover_cache(
+    audio_path: Path,
+    cache_dir: Path,
+    *,
+    artist: str = "",
+    title: str = "",
+    duration: float | None = None,
+    album: str = "",
+) -> str:
+    """Copy embedded artwork into the disk cache. Never writes audio tags.
+
+    Returns ``updated``, ``same``, ``missing``, or ``failed``.
+    """
+    audio_path = Path(audio_path)
+    if not audio_path.is_file():
+        return "failed"
+    try:
+        found = extract_embedded_cover(audio_path)
+    except Exception:
+        return "failed"
+    if not found:
+        return "missing"
+    data, mime = found
+    if not data:
+        return "missing"
+    from .lyrics import cache_key
+
+    key = cache_key(artist, title, duration)
+    existing = find_cached_cover(key, cache_dir)
+    if existing is not None and existing.is_file():
+        try:
+            if existing.read_bytes() == data:
+                return "same"
+        except OSError:
+            pass
+    try:
+        _write_cover_cache(
+            key,
+            data,
+            mime,
+            cache_dir,
+            artist=artist,
+            title=title,
+            duration=duration,
+            album=album,
+        )
+    except Exception:
+        return "failed"
+    return "updated"
+
+
+def refresh_cover_cache_from_embedded(
+    tracks: list[Path] | list[object],
+    cache_dir: Path,
+) -> dict[str, int]:
+    """Rebuild cover cache from embedded tags. Never writes to audio files."""
+    counts = {"updated": 0, "same": 0, "missing": 0, "failed": 0}
+    for track in tracks:
+        if isinstance(track, (str, Path)):
+            path = Path(track)
+            artist = ""
+            title = ""
+            album = ""
+            duration = 0.0
+        else:
+            path = Path(getattr(track, "path"))
+            artist = str(getattr(track, "artist", "") or "")
+            title = str(getattr(track, "title", "") or "")
+            album = str(getattr(track, "album", "") or "")
+            duration = float(getattr(track, "duration", 0) or 0)
+        status = refresh_track_cover_cache(
+            path,
+            cache_dir,
+            artist=artist,
+            title=title,
+            duration=duration,
+            album=album,
+        )
+        counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 async def _apply_remote_cover(
