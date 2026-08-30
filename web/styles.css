@@ -1557,11 +1557,11 @@ button:hover {
 .rating-star:hover,
 .rating-star:focus-visible {
   filter: none;
-  color: var(--gold);
+  color: #fff;
 }
 
 .rating-star:focus-visible {
-  outline: 1px solid var(--gold);
+  outline: 1px solid #fff;
   outline-offset: 2px;
 }
 
@@ -1572,8 +1572,8 @@ button:hover {
 }
 
 .rating-star.is-on {
-  color: var(--gold);
-  filter: drop-shadow(0 0 6px rgba(255, 225, 74, 0.35));
+  color: #fff;
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.35));
 }
 
 .song-rating.is-compact .rating-star {
