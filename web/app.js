@@ -31,6 +31,7 @@ const lyricsEl = document.getElementById("lyrics");
 const kStackEl = document.getElementById("kStack") || lyricsEl;
 const lineCurrentEl = document.getElementById("lineCurrent");
 const lineNextEl = document.getElementById("lineNext");
+const approachEl = document.getElementById("kApproach");
 const songTitle = document.getElementById("songTitle");
 const songArtist = document.getElementById("songArtist");
 const lyricsStatus = document.getElementById("lyricsStatus");
@@ -40,7 +41,6 @@ const coverArtist = document.getElementById("coverArtist");
 const coverTitle = document.getElementById("coverTitle");
 const coverIndex = document.getElementById("coverIndex");
 const songRating = document.getElementById("songRating");
-const stageRating = document.getElementById("stageRating");
 const coverPrev = document.getElementById("coverPrev");
 const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
@@ -80,6 +80,7 @@ const muteOffBtn = document.getElementById("muteOffBtn");
 const muteOnBtn = document.getElementById("muteOnBtn");
 const lyricsLayoutStackBtn = document.getElementById("lyricsLayoutStackBtn");
 const lyricsLayoutDualBtn = document.getElementById("lyricsLayoutDualBtn");
+const lyricsSizeToggle = document.getElementById("lyricsSizeToggle");
 const auraParticlesOnBtn = document.getElementById("auraParticlesOnBtn");
 const auraParticlesOffBtn = document.getElementById("auraParticlesOffBtn");
 const audioModeToggle = document.getElementById("audioModeToggle");
@@ -130,6 +131,8 @@ const LIBRARY_BROWSE_KEY = "karaoke-library-browse";
 const LYRICS_FILTER_KEY = "karaoke-lyrics-filter";
 const RATING_FILTER_KEY = "karaoke-rating-filter";
 const LYRICS_LAYOUT_KEY = "karaoke-lyrics-layout";
+const LYRICS_SIZE_KEY = "karaoke-lyrics-size";
+const LYRICS_SIZE_BUMPS = { small: "-2pt", normal: "0pt", large: "2pt", xlarge: "4pt" };
 const AURA_PARTICLES_KEY = "karaoke-aura-particles";
 const AUDIO_MODE_KEY = "karaoke-audio-mode";
 const STAGE_VIDEO_KEY = "karaoke-stage-video";
@@ -140,6 +143,11 @@ let coverBust = 0;
 function loadLyricsLayout() {
   const stored = localStorage.getItem(LYRICS_LAYOUT_KEY);
   return stored === "dual" ? "dual" : "stack";
+}
+
+function loadLyricsSize() {
+  const stored = localStorage.getItem(LYRICS_SIZE_KEY);
+  return stored && stored in LYRICS_SIZE_BUMPS ? stored : "normal";
 }
 
 function loadAuraParticlesEnabled() {
@@ -354,6 +362,7 @@ let lyricsFilterMode = loadLyricsFilterMode();
 let ratingFilterMode = loadRatingFilterMode();
 let audioMuted = localStorage.getItem(MUTE_KEY) === "1";
 let lyricsLayout = loadLyricsLayout();
+let lyricsSize = loadLyricsSize();
 let auraParticlesEnabled = loadAuraParticlesEnabled();
 let audioMode = loadAudioMode();
 let stageBgMode = loadStageBgMode();
@@ -377,6 +386,18 @@ let lineSwapTimer = null;
 let dualRefreshTimer = null;
 /** @type {{ slotEl: HTMLElement, line: object } | null} */
 let dualPending = null;
+/** Stack view: next phrase is held back until shortly before it is sung. */
+let stackPending = false;
+let restHoldActive = false;
+let restLeadInActive = false;
+let restFadeTimer = null;
+/** False until the new audio element reports a real playhead (avoids stale time from the previous song). */
+let audioClockReady = false;
+/** Hold the next phrase when the rest after this line is longer than a breath. */
+const UPCOMING_REST_GAP = 5;
+/** Seconds before the next phrase starts to bring it on screen. */
+const UPCOMING_LEAD_IN = 3;
+const REST_FADE_MS = 750;
 let rafId = 0;
 let alignPollTimer = 0;
 let alignToken = 0;
@@ -580,6 +601,22 @@ function applyLyricsLayout() {
   lyricsLayoutDualBtn?.setAttribute("aria-pressed", dual ? "true" : "false");
   lyricsEl?.classList.toggle("is-dual", dual);
   lyricsEl?.classList.toggle("is-stack", !dual);
+}
+
+function applyLyricsSize() {
+  lyricsEl?.style.setProperty("--k-lyrics-bump", LYRICS_SIZE_BUMPS[lyricsSize] || "0pt");
+  lyricsSizeToggle?.querySelectorAll("[data-lyrics-size]").forEach((btn) => {
+    const on = btn.getAttribute("data-lyrics-size") === lyricsSize;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  approachInkCache = null;
+}
+
+function setLyricsSize(size) {
+  lyricsSize = size in LYRICS_SIZE_BUMPS ? size : "normal";
+  localStorage.setItem(LYRICS_SIZE_KEY, lyricsSize);
+  applyLyricsSize();
 }
 
 function setLyricsLayout(mode) {
@@ -4304,7 +4341,20 @@ function lineWords(line) {
 }
 
 function karaokeNow() {
-  return exportClock === null ? player.currentTime : exportClock;
+  if (exportClock !== null) return exportClock;
+  if (!audioClockReady) return 0;
+  const t = Number(player.currentTime);
+  return Number.isFinite(t) && t >= 0 ? t : 0;
+}
+
+function markAudioClockReady() {
+  audioClockReady = true;
+}
+
+function resetAudioClock() {
+  audioClockReady = player.readyState >= HTMLMediaElement.HAVE_METADATA;
+  if (audioClockReady) return;
+  player.addEventListener("loadedmetadata", markAudioClockReady, { once: true });
 }
 
 /** setTimeout on the live stage, virtual-clock step while exporting. */
@@ -4405,16 +4455,31 @@ function clearLineRoll() {
     cancelStageStep(dualRefreshTimer);
     dualRefreshTimer = null;
   }
-  dualPending = null;
+  if (!restHoldActive && restFadeTimer) {
+    cancelStageStep(restFadeTimer);
+    restFadeTimer = null;
+  }
+  if (!restHoldActive) dualPending = null;
   kStackEl.classList.remove("is-rolling");
   kStackEl.querySelectorAll(".k-slot-ghost").forEach((node) => node.remove());
-  lineCurrentEl.classList.remove("is-rising", "is-refreshing");
-  lineNextEl.classList.remove("is-entering", "is-refreshing");
+  lineCurrentEl.classList.remove("is-rising");
+  lineNextEl.classList.remove("is-entering");
+  if (!restHoldActive) {
+    lineCurrentEl.classList.remove("is-refreshing", "is-rest-fade", "is-rest-hidden");
+    lineNextEl.classList.remove("is-refreshing", "is-rest-fade", "is-rest-hidden");
+  }
 }
 
 function fillSlot(slotEl, line, { trackWords = false, resetWords = true } = {}) {
   slotEl.innerHTML = "";
-  slotEl.classList.remove("is-empty", "is-rising", "is-entering", "is-refreshing");
+  slotEl.classList.remove(
+    "is-empty",
+    "is-rising",
+    "is-entering",
+    "is-refreshing",
+    "is-rest-fade",
+    "is-rest-hidden",
+  );
   if (!line) {
     slotEl.classList.add("is-empty");
     return;
@@ -4505,9 +4570,326 @@ function activeLineProgress(t, index) {
   return (t - start) / (end - start);
 }
 
+function restBeforeUpcoming(index) {
+  const current = lyricLines[index];
+  const next = lyricLines[index + 1];
+  if (!current || !next) return false;
+  const gap = lineTimeSpan(next, index + 1).start - lineTimeSpan(current, index).end;
+  return gap >= UPCOMING_REST_GAP;
+}
+
+function upcomingReady(index, t) {
+  const next = lyricLines[index + 1];
+  if (!next) return false;
+  if (!restBeforeUpcoming(index)) return true;
+  return t >= lineTimeSpan(next, index + 1).start - UPCOMING_LEAD_IN;
+}
+
+function upcomingLineIfReady(index, t) {
+  return upcomingReady(index, t) ? lyricLines[index + 1] || null : null;
+}
+
+function lineHasEnded(index, t) {
+  const line = lyricLines[index];
+  if (!line) return true;
+  return t >= lineTimeSpan(line, index).end;
+}
+
+function firstLineStart() {
+  if (!lyricLines[0]) return 0;
+  return lineTimeSpan(lyricLines[0], 0).start;
+}
+
+function hasIntroRest() {
+  return firstLineStart() > UPCOMING_LEAD_IN;
+}
+
+function isIntroHold(t) {
+  if (!hasIntroRest()) return false;
+  return t < firstLineStart() - UPCOMING_LEAD_IN;
+}
+
+function isIntroLeadIn(t) {
+  if (!hasIntroRest()) return false;
+  const start = firstLineStart();
+  return t >= start - UPCOMING_LEAD_IN && t < start;
+}
+
+function isOutroHold(index, t) {
+  if (index < 0 || index !== lyricLines.length - 1) return false;
+  return lineHasEnded(index, t);
+}
+
+function isRestHold(index, t) {
+  return restBeforeUpcoming(index) && lineHasEnded(index, t) && !upcomingReady(index, t);
+}
+
+function isRestLeadIn(index, t) {
+  return restBeforeUpcoming(index) && lineHasEnded(index, t) && upcomingReady(index, t);
+}
+
+function isLyricHold(index, t) {
+  return isIntroHold(t) || isRestHold(index, t) || isOutroHold(index, t);
+}
+
+function isLyricLeadIn(index, t) {
+  return isIntroLeadIn(t) || isRestLeadIn(index, t);
+}
+
+function leadInLineIndex(index, t) {
+  if (isIntroLeadIn(t)) return 0;
+  if (isRestLeadIn(index, t)) return index + 1;
+  return -1;
+}
+
+function dualPairOriginFor(index) {
+  let i = Math.max(0, index);
+  while (i > 0 && !restBeforeUpcoming(i - 1)) i -= 1;
+  return i;
+}
+
+function dualActiveOnTop(index) {
+  return (index - dualPairOriginFor(index)) % 2 === 0;
+}
+
+function approachLineIndex(index, t) {
+  if (hasIntroRest()) {
+    const start = firstLineStart();
+    if (t >= start - UPCOMING_LEAD_IN && t <= start) return 0;
+  }
+  if (restBeforeUpcoming(index) && lineHasEnded(index, t)) {
+    const next = lyricLines[index + 1];
+    if (next) {
+      const start = lineTimeSpan(next, index + 1).start;
+      if (t >= start - UPCOMING_LEAD_IN && t <= start) return index + 1;
+    }
+  }
+  return -1;
+}
+
+function stackLinesFor(index, t) {
+  if (isLyricHold(index, t)) return { current: null, next: null };
+  const leadIndex = leadInLineIndex(index, t);
+  if (leadIndex >= 0) {
+    return {
+      current: lyricLines[leadIndex] || null,
+      next: upcomingLineIfReady(leadIndex, t),
+    };
+  }
+  return {
+    current: lyricLines[index] || null,
+    next: upcomingLineIfReady(index, t),
+  };
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function fadeSlotsOut(slots) {
+  const live = slots.filter((el) => el && !el.classList.contains("is-empty"));
+  if (!live.length) {
+    wordNodes = [];
+    return;
+  }
+  const empty = () => {
+    for (const el of live) fillSlot(el, null);
+    wordNodes = [];
+  };
+  if (prefersReducedMotion()) {
+    empty();
+    return;
+  }
+  if (restFadeTimer) cancelStageStep(restFadeTimer);
+  for (const el of live) el.classList.add("is-rest-fade");
+  afterStyleFlush(() => {
+    for (const el of live) el.classList.add("is-rest-hidden");
+  });
+  restFadeTimer = scheduleStageStep(REST_FADE_MS, () => {
+    empty();
+    restFadeTimer = null;
+  });
+}
+
+function fadeSlotsIn(updates) {
+  if (prefersReducedMotion()) {
+    for (const { slotEl, line, trackWords, role } of updates) {
+      fillSlot(slotEl, line, { trackWords: Boolean(trackWords) });
+      if (role) setSlotRole(slotEl, role);
+    }
+    syncWordFills(karaokeNow());
+    return;
+  }
+  for (const { slotEl, line, trackWords, role } of updates) {
+    fillSlot(slotEl, line, { trackWords: Boolean(trackWords) });
+    if (role) setSlotRole(slotEl, role);
+    slotEl.classList.add("is-rest-fade", "is-rest-hidden");
+  }
+  afterStyleFlush(() => {
+    for (const { slotEl } of updates) slotEl.classList.remove("is-rest-hidden");
+    syncWordFills(karaokeNow());
+    if (restFadeTimer) cancelStageStep(restFadeTimer);
+    restFadeTimer = scheduleStageStep(REST_FADE_MS, () => {
+      for (const { slotEl } of updates) slotEl.classList.remove("is-rest-fade");
+      restFadeTimer = null;
+    });
+  });
+}
+
+function showLeadInPair(currentIndex, t) {
+  const nextLine = lyricLines[currentIndex] || null;
+  const after = upcomingLineIfReady(currentIndex, t);
+  stackPending = false;
+  dualPending = null;
+  wordNodes = [];
+
+  const currentSlot = lineCurrentEl;
+  const nextSlot = lineNextEl;
+
+  const updates = [{ slotEl: currentSlot, line: nextLine, trackWords: true }];
+  if (lyricsLayout === "dual") updates[0].role = "active";
+  updates.push({
+    slotEl: nextSlot,
+    line: after,
+    role: lyricsLayout === "dual" ? "idle" : undefined,
+  });
+  fadeSlotsIn(updates);
+}
+
+function slotsAreClear() {
+  return lineCurrentEl.classList.contains("is-empty") && lineNextEl.classList.contains("is-empty");
+}
+
+function leadInSlotEl(_targetIndex) {
+  return lineCurrentEl;
+}
+
+function hideApproachBar() {
+  if (!approachEl) return;
+  approachEl.classList.remove("is-on");
+  approachEl.style.transform = "";
+  approachEl.style.height = "";
+  approachInkCache = null;
+}
+
+let approachMetricsCtx = null;
+/** @type {{ wordEl: HTMLElement, topOffset: number, leftOffset: number, height: number } | null} */
+let approachInkCache = null;
+
+function glyphMetricsFor(el) {
+  const style = getComputedStyle(el);
+  if (!approachMetricsCtx) {
+    approachMetricsCtx = document.createElement("canvas").getContext("2d");
+  }
+  approachMetricsCtx.font = style.font;
+  const text = (el.textContent || "H").trim() || "H";
+  const metrics = approachMetricsCtx.measureText(text);
+  const ascent = metrics.actualBoundingBoxAscent;
+  const descent = metrics.actualBoundingBoxDescent;
+  const left = Number.isFinite(metrics.actualBoundingBoxLeft) ? metrics.actualBoundingBoxLeft : 0;
+  if (ascent > 0) return { ascent, descent: Math.max(0, descent), left };
+  const fontSize = parseFloat(style.fontSize) || 48;
+  return { ascent: fontSize * 0.7, descent: 0, left };
+}
+
+function textInkRect(el) {
+  const box = el.getBoundingClientRect();
+  if (approachInkCache?.wordEl === el) {
+    return {
+      top: box.top + approachInkCache.topOffset,
+      left: box.left + approachInkCache.leftOffset,
+      height: approachInkCache.height,
+    };
+  }
+  const base = el.querySelector(".k-word-base") || el;
+  const { ascent, descent, left } = glyphMetricsFor(base);
+  const probe = document.createElement("span");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText =
+    "display:inline-block;width:0;height:1px;padding:0;border:0;margin:0;vertical-align:baseline;overflow:hidden;";
+  base.appendChild(probe);
+  const baseline = probe.getBoundingClientRect().bottom;
+  probe.remove();
+  const height = ascent + descent;
+  const topOffset = baseline - ascent - box.top;
+  const leftOffset = left;
+  approachInkCache = { wordEl: el, topOffset, leftOffset, height };
+  return { top: box.top + topOffset, left: box.left + leftOffset, height };
+}
+
+function syncApproachBar(t) {
+  if (!approachEl || activeLineIndex < 0) {
+    hideApproachBar();
+    return;
+  }
+  const targetIndex = approachLineIndex(activeLineIndex, t);
+  const line = targetIndex >= 0 ? lyricLines[targetIndex] : null;
+  const slotEl = targetIndex >= 0 ? leadInSlotEl(targetIndex) : null;
+  const firstWord = slotEl?.querySelector(".k-word");
+  if (!line || !firstWord || slotEl.classList.contains("is-empty")) {
+    hideApproachBar();
+    return;
+  }
+
+  const start = lineTimeSpan(line, targetIndex).start;
+  const begin = start - UPCOMING_LEAD_IN;
+  const progress = Math.min(1, Math.max(0, (t - begin) / Math.max(0.001, start - begin)));
+
+  const stackRect = kStackEl.getBoundingClientRect();
+  const ink = textInkRect(firstWord);
+  const barWidth = approachEl.offsetWidth || 5;
+  const travel = Math.min(240, Math.max(120, stackRect.width * 0.22));
+  const x = ink.left - stackRect.left - barWidth - travel * (1 - progress);
+  const y = ink.top - stackRect.top;
+
+  approachEl.style.height = `${ink.height}px`;
+  approachEl.style.transform = `translate(${x}px, ${y}px)`;
+  approachEl.classList.add("is-on");
+}
+
+function syncVerseRest(t) {
+  const index = activeLineIndex;
+  if (index < 0) return;
+
+  if (isLyricHold(index, t)) {
+    restLeadInActive = false;
+    const fading =
+      lineCurrentEl.classList.contains("is-refreshing") ||
+      lineNextEl.classList.contains("is-refreshing");
+    if (restHoldActive && (slotsAreClear() || fading)) return;
+    restHoldActive = true;
+    fadeSlotsOut([lineCurrentEl, lineNextEl]);
+    if (lyricsLayout === "dual" && isRestHold(index, t)) {
+      const upcoming = lyricLines[index + 1];
+      if (upcoming) dualPending = { slotEl: lineCurrentEl, line: upcoming };
+    } else {
+      stackPending = true;
+    }
+    return;
+  }
+
+  const leadIndex = leadInLineIndex(index, t);
+  if (leadIndex >= 0) {
+    if (restLeadInActive) return;
+    restHoldActive = false;
+    restLeadInActive = true;
+    if (restFadeTimer) {
+      cancelStageStep(restFadeTimer);
+      restFadeTimer = null;
+    }
+    showLeadInPair(leadIndex, t);
+    return;
+  }
+
+  restHoldActive = false;
+  restLeadInActive = false;
+}
+
 function maybeRevealDualUpcoming(t) {
   if (!dualPending || lyricsLayout !== "dual") return;
   if (activeLineIndex < 0) return;
+  if (isLyricHold(activeLineIndex, t) || isLyricLeadIn(activeLineIndex, t)) return;
+  if (!upcomingReady(activeLineIndex, t)) return;
   if (activeLineProgress(t, activeLineIndex) < 0.25) return;
   const { slotEl, line } = dualPending;
   dualPending = null;
@@ -4519,11 +4901,28 @@ function maybeRevealDualUpcoming(t) {
   refreshSlotSoft(slotEl, line);
 }
 
+function maybeRevealStackUpcoming(t) {
+  if (!stackPending || lyricsLayout !== "stack") return;
+  if (activeLineIndex < 0) return;
+  if (isLyricHold(activeLineIndex, t) || isLyricLeadIn(activeLineIndex, t)) return;
+  if (!upcomingReady(activeLineIndex, t)) return;
+  stackPending = false;
+  const next = lyricLines[activeLineIndex + 1] || null;
+  refreshSlotSoft(lineNextEl, next);
+}
+
 function refreshSlotSoft(slotEl, line) {
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (reduce) {
     fillSlot(slotEl, line);
     setSlotRole(slotEl, "idle");
+    return;
+  }
+  if (slotEl.classList.contains("is-empty") && line) {
+    fillSlot(slotEl, line);
+    setSlotRole(slotEl, "idle");
+    slotEl.classList.add("is-refreshing");
+    afterStyleFlush(() => slotEl.classList.remove("is-refreshing"));
     return;
   }
   slotEl.classList.add("is-refreshing");
@@ -4547,11 +4946,35 @@ function refreshSlotSoft(slotEl, line) {
 }
 
 function showStackLines(index, animate) {
-  const current = lyricLines[index] || null;
-  const next = lyricLines[index + 1] || null;
+  const t = karaokeNow();
+  const { current, next } = stackLinesFor(index, t);
+  restHoldActive = isLyricHold(index, t);
+  restLeadInActive = isLyricLeadIn(index, t);
+  stackPending = Boolean(
+    !isLyricHold(index, t) && !isLyricLeadIn(index, t) && lyricLines[index + 1] && !next,
+  );
   wordNodes = [];
   lineCurrentEl.classList.remove("is-active", "is-idle");
   lineNextEl.classList.remove("is-active", "is-idle");
+
+  const currentMatch = current
+    ? slotMatchesLine(lineCurrentEl, current)
+    : lineCurrentEl.classList.contains("is-empty");
+  const nextMatch = next ? slotMatchesLine(lineNextEl, next) : lineNextEl.classList.contains("is-empty");
+  if (currentMatch && nextMatch) {
+    if (current) bindSlotWords(lineCurrentEl, current);
+    syncWordFills(t);
+    return;
+  }
+
+  const fromEmpty = lineCurrentEl.classList.contains("is-empty") && lineNextEl.classList.contains("is-empty");
+  if (current && (fromEmpty || isLyricLeadIn(index, t))) {
+    fadeSlotsIn([
+      { slotEl: lineCurrentEl, line: current, trackWords: true },
+      { slotEl: lineNextEl, line: next },
+    ]);
+    return;
+  }
 
   if (!animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     clearLineRoll();
@@ -4597,10 +5020,42 @@ function showDualLines(index, sequential) {
   const current = lyricLines[index] || null;
   const upcoming = lyricLines[index + 1] || null;
   const previous = index > 0 ? lyricLines[index - 1] : null;
-  const activeOnTop = index % 2 === 0;
+  const activeOnTop = dualActiveOnTop(index);
   const activeSlot = activeOnTop ? lineCurrentEl : lineNextEl;
   const idleSlot = activeOnTop ? lineNextEl : lineCurrentEl;
   const t = karaokeNow();
+  restHoldActive = isLyricHold(index, t);
+  restLeadInActive = isLyricLeadIn(index, t);
+
+  if (isLyricHold(index, t)) {
+    clearLineRoll();
+    wordNodes = [];
+    fillSlot(lineCurrentEl, null);
+    fillSlot(lineNextEl, null);
+    setSlotRole(lineCurrentEl, "idle");
+    setSlotRole(lineNextEl, "idle");
+    if (upcoming && isRestHold(index, t)) dualPending = { slotEl: idleSlot, line: upcoming };
+    return;
+  }
+
+  const leadIndex = leadInLineIndex(index, t);
+  if (leadIndex >= 0) {
+    clearLineRoll();
+    showLeadInPair(leadIndex, t);
+    return;
+  }
+
+  if (
+    sequential &&
+    slotMatchesLine(activeSlot, current) &&
+    (upcoming ? slotMatchesLine(idleSlot, upcoming) : idleSlot.classList.contains("is-empty"))
+  ) {
+    setSlotRole(activeSlot, "active");
+    setSlotRole(idleSlot, "idle");
+    bindSlotWords(activeSlot, current);
+    syncWordFills(t);
+    return;
+  }
 
   clearLineRoll();
 
@@ -4611,18 +5066,17 @@ function showDualLines(index, sequential) {
 
     // First pair shows both lines. Later, keep the finished line until the
     // active one passes its first quarter, then reveal the next upcoming phrase.
-    if (index === 0) {
-      fillSlot(idleSlot, upcoming);
-      setSlotRole(idleSlot, "idle");
-      if (!upcoming) idleSlot.classList.add("is-empty");
-    } else if (activeLineProgress(t, index) >= 0.25) {
+    const ready = upcomingReady(index, t);
+    const pairStart = index === dualPairOriginFor(index);
+    const showUpcoming = ready && (pairStart || activeLineProgress(t, index) >= 0.25);
+    if (showUpcoming) {
       fillSlot(idleSlot, upcoming);
       setSlotRole(idleSlot, "idle");
       if (!upcoming) idleSlot.classList.add("is-empty");
     } else {
-      fillSlot(idleSlot, previous);
+      fillSlot(idleSlot, pairStart ? null : previous);
       setSlotRole(idleSlot, "idle");
-      if (previous) markSlotSung(idleSlot);
+      if (!pairStart && previous) markSlotSung(idleSlot);
       else idleSlot.classList.add("is-empty");
       if (upcoming) dualPending = { slotEl: idleSlot, line: upcoming };
     }
@@ -4662,6 +5116,11 @@ function renderLyrics(payload) {
   lastLyricsPlain = payload.plain || lyricLines.map((line) => line.text).join("\n");
   activeLineIndex = -1;
   wordNodes = [];
+  stackPending = false;
+  dualPending = null;
+  restHoldActive = false;
+  restLeadInActive = false;
+  hideApproachBar();
   setLyricsAligned(payload.aligned);
   applyLyricsLayout();
 
@@ -4743,6 +5202,9 @@ function syncKaraoke() {
   setActiveLine(lineIndex);
   syncWordFills(t);
   maybeRevealDualUpcoming(t);
+  maybeRevealStackUpcoming(t);
+  syncVerseRest(t);
+  syncApproachBar(t);
 }
 
 function tick() {
@@ -5167,11 +5629,12 @@ async function openSong(trackId, { autoplay = true } = {}) {
   setStageCover(trackId);
   songTitle.textContent = track.title;
   songArtist.textContent = track.artist || "Artista desconegut";
-  bindRatingWidget(stageRating, track);
   // Fall back to the original mix while the instrumental is still cooking.
   const wantsInstrumental = audioMode === "instrumental" && stemsAvailable;
   const useInstrumental = wantsInstrumental && !!track.has_instrumental;
+  audioClockReady = false;
   player.src = audioUrlFor(trackId, useInstrumental ? "instrumental" : "original");
+  resetAudioClock();
   applyAudioModeButtons();
   loadYoutubeBackdrop(trackId);
   setStemStatus("");
@@ -5853,6 +6316,10 @@ muteOffBtn?.addEventListener("click", () => setAudioMuted(false));
 muteOnBtn?.addEventListener("click", () => setAudioMuted(true));
 lyricsLayoutStackBtn?.addEventListener("click", () => setLyricsLayout("stack"));
 lyricsLayoutDualBtn?.addEventListener("click", () => setLyricsLayout("dual"));
+lyricsSizeToggle?.addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-lyrics-size]");
+  if (btn) setLyricsSize(btn.getAttribute("data-lyrics-size"));
+});
 auraParticlesOnBtn?.addEventListener("click", () => setAuraParticlesEnabled(true));
 auraParticlesOffBtn?.addEventListener("click", () => setAuraParticlesEnabled(false));
 audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
@@ -5866,12 +6333,12 @@ searchYoutubeMissingBtn?.addEventListener("click", () => startYoutubeSearch("mis
 searchYoutubeAllBtn?.addEventListener("click", () => startYoutubeSearch("all"));
 albumBackBtn?.addEventListener("click", () => closeAlbum());
 fillRatingWidget(songRating);
-fillRatingWidget(stageRating);
 applyLyricsFilterMode();
 applyRatingFilterMode();
 applyLibraryBrowseMode();
 applyAudioMute();
 applyLyricsLayout();
+applyLyricsSize();
 applyAuraParticles();
 applyAudioModeButtons();
 applyVideoModeButtons();
@@ -5985,11 +6452,13 @@ playBtn.addEventListener("click", () => {
   togglePlayback().catch(() => updatePlayButton());
 });
 player.addEventListener("play", () => {
+  markAudioClockReady();
   startTicker();
   updatePlayButton();
   syncYoutubeToAudio();
 });
 player.addEventListener("playing", () => {
+  markAudioClockReady();
   startTicker();
   updatePlayButton();
   syncYoutubeToAudio();

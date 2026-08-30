@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=59" />
+    <link rel="stylesheet" href="/styles.css?v=72" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -496,6 +496,35 @@
                 </div>
                 <div class="settings-inline-row">
                   <p class="settings-help">
+                    Tamany de la lletra a l’escenari. Normal és la mida actual.
+                  </p>
+                  <div
+                    id="lyricsSizeToggle"
+                    class="settings-toggle is-wrap"
+                    role="group"
+                    aria-label="Tamany de la lletra a l’escenari"
+                  >
+                    <button type="button" class="settings-toggle-btn" data-lyrics-size="small">
+                      Petit
+                    </button>
+                    <button
+                      type="button"
+                      class="settings-toggle-btn is-active"
+                      data-lyrics-size="normal"
+                      aria-pressed="true"
+                    >
+                      Normal
+                    </button>
+                    <button type="button" class="settings-toggle-btn" data-lyrics-size="large">
+                      Gran
+                    </button>
+                    <button type="button" class="settings-toggle-btn" data-lyrics-size="xlarge">
+                      Molt gran
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
                     Punts flotants del fons Aura. Les cintes de color es mantenen.
                   </p>
                   <div class="settings-toggle" role="group" aria-label="Partícules del fons Aura">
@@ -744,19 +773,13 @@
       <div class="stage-meta">
         <p id="songArtist" class="stage-artist"></p>
         <h2 id="songTitle" class="stage-title"></h2>
-        <div
-          id="stageRating"
-          class="song-rating song-rating-stage"
-          hidden
-          role="group"
-          aria-label="Puntuació de la cançó"
-        ></div>
       </div>
 
       <div id="lyrics" class="karaoke-board" aria-live="polite">
         <div class="k-stack" id="kStack">
           <div id="lineCurrent" class="k-slot k-slot-current"></div>
           <div id="lineNext" class="k-slot k-slot-next"></div>
+          <div id="kApproach" class="k-approach" aria-hidden="true"></div>
         </div>
       </div>
 
@@ -840,6 +863,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=91"></script>
+    <script src="/app.js?v=105"></script>
   </body>
 </html>

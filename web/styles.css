@@ -1586,14 +1586,6 @@ button:hover {
   height: 0.92rem;
 }
 
-.song-rating-stage {
-  margin-top: 0.45rem;
-}
-
-.song-rating-stage .rating-star {
-  color: rgba(255, 246, 234, 0.28);
-}
-
 .grid-card .song-rating {
   pointer-events: auto;
 }
@@ -2386,6 +2378,7 @@ body.is-exporting-video .fx {
 }
 
 .karaoke-board {
+  --k-lyrics-bump: 0pt;
   position: relative;
   z-index: 1;
   display: flex;
@@ -2420,14 +2413,14 @@ body.is-exporting-video .fx {
 }
 
 .k-slot-current {
-  font-size: clamp(2.6rem, 8vw, 5.4rem);
+  font-size: calc(clamp(2.6rem, 8vw, 5.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   opacity: 1;
   transform: translateY(0);
   color: var(--ink);
 }
 
 .k-slot-next {
-  font-size: clamp(1.35rem, 3.8vw, 2.4rem);
+  font-size: calc(clamp(1.35rem, 3.8vw, 2.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   opacity: 0.72;
   transform: translateY(0);
   color: var(--cyan);
@@ -2439,7 +2432,7 @@ body.is-exporting-video .fx {
   z-index: 3;
   margin: 0;
   pointer-events: none;
-  font-size: clamp(2.6rem, 8vw, 5.4rem);
+  font-size: calc(clamp(2.6rem, 8vw, 5.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   color: var(--ink);
   opacity: 1;
   transform: translateY(0);
@@ -2493,6 +2486,67 @@ body.is-exporting-video .fx {
   opacity: 0;
 }
 
+.k-approach {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0.28rem;
+  height: 1em;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--gold);
+  box-shadow: none;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 5;
+  will-change: transform, opacity, height;
+}
+
+.k-approach.is-on {
+  opacity: 1;
+}
+
+.k-approach::before,
+.k-approach::after {
+  content: "";
+  position: absolute;
+  right: 0.05rem;
+  top: 0;
+  height: 100%;
+  pointer-events: none;
+  border-radius: 0;
+  clip-path: inset(0 0 0 -8rem);
+}
+
+.k-approach::before {
+  width: 5.4rem;
+  background: linear-gradient(90deg, transparent, rgba(255, 225, 74, 0.28));
+  filter: blur(11px);
+}
+
+.k-approach::after {
+  width: 2.9rem;
+  background: linear-gradient(90deg, transparent, rgba(255, 225, 74, 0.75));
+  filter: blur(4px);
+}
+
+.karaoke-board .k-slot.is-rest-fade {
+  transition: opacity 0.75s ease !important;
+}
+
+.karaoke-board .k-slot.is-rest-hidden {
+  opacity: 0 !important;
+}
+
+.karaoke-board.is-stack .k-slot.is-refreshing {
+  opacity: 0;
+}
+
+.karaoke-board.is-stack .k-slot-current:not(.is-rising):not(.is-empty),
+.karaoke-board.is-stack .k-slot-next:not(.is-entering):not(.is-empty) {
+  transition: opacity 0.45s ease-out;
+}
+
 /* Dual layout: both phrases same size, both white until gold word-fill. */
 .karaoke-board.is-dual .k-stack {
   gap: 1.35rem;
@@ -2500,7 +2554,7 @@ body.is-exporting-video .fx {
 
 .karaoke-board.is-dual .k-slot-current,
 .karaoke-board.is-dual .k-slot-next {
-  font-size: clamp(2.2rem, 6.4vw, 4.5rem);
+  font-size: calc(clamp(2.2rem, 6.4vw, 4.5rem) + 2pt + var(--k-lyrics-bump, 0pt));
   transform: none;
   color: var(--ink);
 }
@@ -2539,7 +2593,10 @@ body.is-exporting-video .fx {
   .k-stack.is-rolling .k-slot-ghost,
   .k-stack.is-rolling .k-slot-current:not(.is-rising),
   .k-stack.is-rolling .k-slot-next:not(.is-entering),
-  .karaoke-board.is-dual .k-slot.is-refreshing {
+  .karaoke-board.is-dual .k-slot.is-refreshing,
+  .karaoke-board.is-stack .k-slot-current:not(.is-rising):not(.is-empty),
+  .karaoke-board.is-stack .k-slot-next:not(.is-entering):not(.is-empty),
+  .karaoke-board .k-slot.is-rest-fade {
     transition-duration: 0.01ms !important;
   }
 }
@@ -2823,6 +2880,6 @@ body.is-exporting-video .fx {
   }
 
   .k-slot-current {
-    font-size: clamp(2.1rem, 9vw, 3.4rem);
+    font-size: calc(clamp(2.1rem, 9vw, 3.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   }
 }
