@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,6 +12,7 @@ from mutagen.id3 import ID3, SYLT, USLT
 
 from karaoke_party import lyrics as lyrics_mod
 from karaoke_party.lyrics import (
+    ALIGNED_CACHE_VERSION,
     LyricsPayload,
     cache_key,
     embed_lyrics_in_audio,
@@ -22,8 +25,10 @@ from karaoke_party.lyrics import (
     save_aligned_cached,
     save_cached,
     save_manual_lyrics,
+    sanitize_all_library_lyrics,
 )
 from karaoke_party.lyrics import LyricLine, LyricWord
+from karaoke_party.track_cache import aligned_path, ensure_track_dir, lyrics_path
 
 SYNCED = "[00:10.00]Hello\n[00:12.00]World\n"
 
@@ -251,11 +256,12 @@ def test_save_manual_lyrics_clears_alignment(tmp_path: Path) -> None:
         artist="A",
         title="B",
         duration=12.0,
-        text="Nova\nLletra",
+        text="Nova.\nLletra...",
         aligned_cache=tmp_path,
     )
     assert payload.source == "manual"
     assert [line.text for line in payload.lines] == ["Nova", "Lletra"]
+    assert payload.plain == "Nova\nLletra"
     assert load_aligned_cached(tmp_path, key) is None
     cached = load_cached(tmp_path, key)
     assert cached is not None and cached.source == "manual"
@@ -350,6 +356,74 @@ def test_save_manual_lyrics_writes_to_audio(tmp_path: Path) -> None:
     local = read_local_lyrics(audio)
     assert local is not None
     assert [line.text for line in local.lines] == ["Nova", "Lletra"]
+
+
+def test_sanitize_all_library_lyrics_rewrites_cache_and_sidecar(tmp_path: Path) -> None:
+    key = cache_key("A", "B", 12.0)
+    ensure_track_dir(tmp_path, key)
+    lyrics_path(tmp_path, key).write_text(
+        json.dumps(
+            {
+                "synced": False,
+                "source": "manual",
+                "plain": "Hola món.\nAdéu...",
+                "lines": [
+                    {"time": 0.0, "text": "Hola món.", "words": []},
+                    {"time": 4.0, "text": "Adéu...", "words": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    aligned_path(tmp_path, key).write_text(
+        json.dumps(
+            {
+                "synced": True,
+                "source": "whisper-align",
+                "plain": "Hola món.",
+                "align_version": ALIGNED_CACHE_VERSION,
+                "lines": [
+                    {
+                        "time": 1.0,
+                        "text": "Hola món.",
+                        "words": [
+                            {"time": 1.0, "end": 1.3, "text": "Hola"},
+                            {"time": 1.3, "end": 1.8, "text": "món."},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    audio = _audio_stub(tmp_path / "song.mp3")
+    sidecar = audio.with_suffix(".lrc")
+    sidecar.write_text("[00:01.00]Hola món.\n", encoding="utf-8")
+
+    stats = sanitize_all_library_lyrics(
+        tmp_path,
+        [SimpleNamespace(artist="A", title="B", duration=12.0, path=audio)],
+    )
+    assert stats["lyrics"] == 1
+    assert stats["aligned"] == 1
+    assert stats["audio"] == 1
+
+    cached = load_cached(tmp_path, key)
+    assert cached is not None
+    assert [line.text for line in cached.lines] == ["Hola món", "Adéu"]
+    aligned = load_aligned_cached(tmp_path, key)
+    assert aligned is not None
+    assert aligned.lines[0].text == "Hola món"
+    assert aligned.lines[0].words[-1].text == "món"
+    assert "món." not in sidecar.read_text(encoding="utf-8")
+
+    again = sanitize_all_library_lyrics(
+        tmp_path,
+        [SimpleNamespace(artist="A", title="B", duration=12.0, path=audio)],
+    )
+    assert again["lyrics"] == 0
+    assert again["aligned"] == 0
+    assert again["audio"] == 0
 
 
 def test_save_manual_updates_sidecar(tmp_path: Path) -> None:

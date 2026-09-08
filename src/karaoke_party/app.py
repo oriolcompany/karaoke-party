@@ -62,6 +62,7 @@ from .lyrics import (
     save_aligned_cached,
     save_cached,
     save_manual_lyrics,
+    sanitize_all_library_lyrics,
     maybe_embed_lyrics,
     payload_to_text,
     read_local_lyrics,
@@ -336,6 +337,14 @@ def _migrate_covers_background(tracks: list[TrackInfo]) -> None:
         pass
 
 
+def _sanitize_lyrics_background(tracks: list[TrackInfo]) -> None:
+    """Drop leftover trailing periods from cached and local lyrics."""
+    try:
+        sanitize_all_library_lyrics(cache_dir(), tracks)
+    except Exception:
+        pass
+
+
 def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[TrackInfo]:
     """Rescan music files. Probe state resets only when the root folder changes."""
     global _music_root, _tracks
@@ -354,6 +363,12 @@ def _reload_library(root: Path, *, reset_probe: bool | None = None) -> list[Trac
         args=(list(tracks),),
         daemon=True,
         name="cover-migrate",
+    ).start()
+    threading.Thread(
+        target=_sanitize_lyrics_background,
+        args=(list(tracks),),
+        daemon=True,
+        name="lyrics-period-sanitize",
     ).start()
     return tracks
 
@@ -1621,13 +1636,12 @@ def generate_library_stems() -> dict:
             status_code=400,
             detail='Instal·la la separació amb: pip install -e ".[stems]"',
         )
-    snapshot = _library_snapshot()
+    if not _tracks:
+        _reload_library(_music_root, reset_probe=False)
     stems_path = stems_cache_dir()
     pending: list[TrackInfo] = []
-    for item in snapshot.get("tracks") or []:
-        track = _tracks.get(item["id"])
-        if track is None:
-            continue
+    # Instrumentals are useful even without lyrics; queue every song, not just playable.
+    for track in sorted(_tracks.values(), key=_sort_key):
         key = cache_key(track.artist, track.title, track.duration)
         if has_instrumental(stems_path, key):
             continue

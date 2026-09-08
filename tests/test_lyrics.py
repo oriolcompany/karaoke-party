@@ -1,6 +1,7 @@
 from karaoke_party.lyrics import (
     LyricLine,
     LyricWord,
+    LyricsPayload,
     attach_word_timings,
     clean_query_text,
     estimate_words,
@@ -8,6 +9,8 @@ from karaoke_party.lyrics import (
     parse_lrc,
     payload_from_text,
     payload_to_text,
+    sanitize_payload_trailing_periods,
+    strip_trailing_line_periods,
     tighten_phrase_onsets,
 )
 
@@ -122,3 +125,49 @@ def test_payload_from_text_plain_and_lrc() -> None:
     rendered = payload_to_text(lrc)
     assert rendered.startswith("[00:10.00]Hola")
     assert "[00:12.00]Adéu" in rendered
+
+
+def test_strip_trailing_line_periods() -> None:
+    assert strip_trailing_line_periods("Hola món.") == "Hola món"
+    assert strip_trailing_line_periods("Hola món...") == "Hola món"
+    assert strip_trailing_line_periods("Hola món.  ") == "Hola món"
+    assert strip_trailing_line_periods("Mr. Jones") == "Mr. Jones"
+    assert strip_trailing_line_periods("Hola. món.") == "Hola. món"
+
+
+def test_payload_from_text_strips_trailing_periods() -> None:
+    plain = payload_from_text("Hola món.\nAdéu...", "manual")
+    assert plain is not None
+    assert [line.text for line in plain.lines] == ["Hola món", "Adéu"]
+    assert plain.plain == "Hola món\nAdéu"
+    assert plain.lines[0].words[-1].text == "món"
+
+    lrc = payload_from_text("[00:10.00]Hola món.\n[00:12.00]Adéu...", "manual")
+    assert lrc is not None
+    assert [line.text for line in lrc.lines] == ["Hola món", "Adéu"]
+    assert lrc.plain == "Hola món\nAdéu"
+    rendered = payload_to_text(lrc)
+    assert "[00:10.00]Hola món" in rendered
+    assert "món." not in rendered
+
+
+def test_sanitize_payload_strips_last_word_period() -> None:
+    payload = LyricsPayload(
+        synced=True,
+        source="whisper-align",
+        lines=[
+            LyricLine(
+                time=1.0,
+                text="Hola món.",
+                words=[
+                    LyricWord(time=1.0, end=1.3, text="Hola"),
+                    LyricWord(time=1.3, end=1.8, text="món."),
+                ],
+            )
+        ],
+        plain="Hola món.",
+    )
+    sanitize_payload_trailing_periods(payload)
+    assert payload.lines[0].text == "Hola món"
+    assert payload.lines[0].words[-1].text == "món"
+    assert payload.plain == "Hola món"

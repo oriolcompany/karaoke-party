@@ -171,16 +171,77 @@ def estimate_words(line_time: float, next_time: float | None, text: str) -> list
     return words
 
 
+def strip_trailing_line_periods(text: str) -> str:
+    """Remove trailing '.' characters from a lyric line (and leftover spaces)."""
+    cleaned = (text or "").rstrip()
+    while cleaned.endswith("."):
+        cleaned = cleaned[:-1].rstrip()
+    return cleaned
+
+
+def _sanitize_line_trailing_periods(line: LyricLine) -> LyricLine:
+    text = strip_trailing_line_periods(line.text)
+    words = list(line.words)
+    if words:
+        last = words[-1]
+        cleaned = strip_trailing_line_periods(last.text)
+        if cleaned != last.text:
+            if cleaned:
+                words[-1] = LyricWord(
+                    time=last.time,
+                    end=last.end,
+                    text=cleaned,
+                    glue=last.glue,
+                )
+            else:
+                words.pop()
+    return LyricLine(time=line.time, text=text, words=words)
+
+
+def sanitize_payload_trailing_periods(payload: LyricsPayload) -> LyricsPayload:
+    """Drop end-of-line periods from lines, last words, and plain text."""
+    lines = [
+        cleaned
+        for line in payload.lines
+        if (cleaned := _sanitize_line_trailing_periods(line)).text.strip() or cleaned.words
+    ]
+    if payload.plain:
+        plain = "\n".join(
+            strip_trailing_line_periods(part)
+            for part in payload.plain.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        )
+    else:
+        plain = "\n".join(line.text for line in lines)
+    payload.lines = lines
+    payload.plain = plain
+    return payload
+
+
 def attach_word_timings(lines: list[LyricLine]) -> list[LyricLine]:
     enriched: list[LyricLine] = []
     for index, line in enumerate(lines):
         next_time = lines[index + 1].time if index + 1 < len(lines) else None
-        plain, enhanced = parse_enhanced_words(line.text)
-        text = plain or line.text
+        raw_text = strip_trailing_line_periods(line.text)
+        plain, enhanced = parse_enhanced_words(raw_text)
+        text = strip_trailing_line_periods(plain or raw_text)
         words = enhanced or estimate_words(line.time, next_time, text)
+        if words:
+            last = words[-1]
+            cleaned = strip_trailing_line_periods(last.text)
+            if cleaned != last.text:
+                if cleaned:
+                    words[-1] = LyricWord(
+                        time=last.time,
+                        end=last.end,
+                        text=cleaned,
+                        glue=last.glue,
+                    )
+                else:
+                    words.pop()
         if words and next_time is not None and words[-1].end > next_time:
             words[-1].end = next_time
-        enriched.append(LyricLine(time=line.time, text=text, words=words))
+        if text or words:
+            enriched.append(LyricLine(time=line.time, text=text, words=words))
     return enriched
 
 
@@ -227,16 +288,23 @@ def payload_from_text(text: str, source: str) -> LyricsPayload | None:
         len(lrc_lines) >= 2 or len(lrc_lines) >= max(1, int(len(nonempty) * 0.5))
     ):
         plain = "\n".join(line.text for line in lrc_lines)
-        return LyricsPayload(synced=True, source=source, lines=lrc_lines, plain=plain)
+        return sanitize_payload_trailing_periods(
+            LyricsPayload(synced=True, source=source, lines=lrc_lines, plain=plain)
+        )
     rough = [
-        LyricLine(time=float(index * 4), text=line.strip())
+        LyricLine(time=float(index * 4), text=strip_trailing_line_periods(line.strip()))
         for index, line in enumerate(nonempty)
+        if strip_trailing_line_periods(line.strip())
     ]
-    return LyricsPayload(
-        synced=False,
-        source=source,
-        lines=attach_word_timings(rough),
-        plain="\n".join(nonempty),
+    if not rough:
+        return None
+    return sanitize_payload_trailing_periods(
+        LyricsPayload(
+            synced=False,
+            source=source,
+            lines=attach_word_timings(rough),
+            plain="\n".join(line.text for line in rough),
+        )
     )
 
 
@@ -281,11 +349,13 @@ def load_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
         for row in data.get("lines") or []
     ]
     lines = attach_word_timings(base_lines)
-    return LyricsPayload(
-        synced=bool(data.get("synced")),
-        source=str(data.get("source") or "cache"),
-        lines=lines,
-        plain=str(data.get("plain") or ""),
+    return sanitize_payload_trailing_periods(
+        LyricsPayload(
+            synced=bool(data.get("synced")),
+            source=str(data.get("source") or "cache"),
+            lines=lines,
+            plain=str(data.get("plain") or ""),
+        )
     )
 
 
@@ -318,11 +388,13 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
         )
     if not lines:
         return None
-    return LyricsPayload(
-        synced=True,
-        source=str(data.get("source") or "aligned"),
-        lines=tighten_phrase_onsets(lines),
-        plain=str(data.get("plain") or ""),
+    return sanitize_payload_trailing_periods(
+        LyricsPayload(
+            synced=True,
+            source=str(data.get("source") or "aligned"),
+            lines=tighten_phrase_onsets(lines),
+            plain=str(data.get("plain") or ""),
+        )
     )
 
 
@@ -350,6 +422,7 @@ def save_cached(
             album=album,
         )
     path = lyrics_path(cache_dir, key)
+    sanitize_payload_trailing_periods(payload)
     data: dict[str, Any] = {
         "synced": payload.synced,
         "source": payload.source,
@@ -387,6 +460,7 @@ def save_aligned_cached(
             album=album,
         )
     path = aligned_path(cache_dir, key)
+    sanitize_payload_trailing_periods(payload)
     data: dict[str, Any] = {
         "synced": payload.synced,
         "source": payload.source,
@@ -406,11 +480,13 @@ def _from_lrclib_record(record: dict[str, Any], source: str) -> LyricsPayload | 
     if synced:
         lines = parse_lrc(synced)
         if lines:
-            return LyricsPayload(
-                synced=True,
-                source=source,
-                lines=lines,
-                plain=plain or "\n".join(line.text for line in lines),
+            return sanitize_payload_trailing_periods(
+                LyricsPayload(
+                    synced=True,
+                    source=source,
+                    lines=lines,
+                    plain=plain or "\n".join(line.text for line in lines),
+                )
             )
     if plain:
         return payload_from_text(plain, source)
@@ -557,10 +633,12 @@ def _group_timed_tokens(tokens: list[tuple[float, str]]) -> list[LyricLine]:
             end = bucket[index + 1][0] if index + 1 < len(bucket) else start + sung_word_duration(text)
             words.append(LyricWord(time=start, end=max(end, start + 0.05), text=text))
         lines.append(
-            LyricLine(
-                time=bucket[0][0],
-                text=" ".join(part for _, part in bucket),
-                words=words,
+            _sanitize_line_trailing_periods(
+                LyricLine(
+                    time=bucket[0][0],
+                    text=" ".join(part for _, part in bucket),
+                    words=words,
+                )
             )
         )
         bucket.clear()
@@ -1177,6 +1255,169 @@ def lyrics_status_and_source(
     if sidecar is not None and sidecar.lines:
         return True, sidecar.source
     return False, cached.source
+
+
+def _raw_lyrics_has_trailing_periods(raw: str) -> bool:
+    for line in (raw or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        match = LRC_LINE_RE.match(line.strip())
+        text = match.group(4) if match else line
+        if strip_trailing_line_periods(text) != text:
+            return True
+    return False
+
+
+def _cached_data_has_trailing_line_periods(data: dict[str, Any]) -> bool:
+    if _raw_lyrics_has_trailing_periods(str(data.get("plain") or "")):
+        return True
+    for row in data.get("lines") or []:
+        if not isinstance(row, dict):
+            continue
+        if strip_trailing_line_periods(str(row.get("text") or "")) != str(row.get("text") or ""):
+            return True
+        words = [word for word in (row.get("words") or []) if isinstance(word, dict)]
+        if words:
+            last = str(words[-1].get("text") or "")
+            if strip_trailing_line_periods(last) != last:
+                return True
+    return False
+
+
+def _raw_local_lyrics_text(audio_path: Path) -> str | None:
+    found = _find_sidecar(audio_path)
+    if found is not None:
+        return _read_text_file(found[0])
+    if not audio_path.is_file():
+        return None
+    try:
+        from mutagen import File as MutagenFile
+        from mutagen.id3 import ID3
+    except ImportError:
+        return None
+    tags = None
+    try:
+        audio = MutagenFile(audio_path)
+    except Exception:
+        audio = None
+    if audio is not None:
+        tags = audio.tags
+    if tags is None:
+        try:
+            tags = ID3(audio_path)
+        except Exception:
+            tags = None
+    if tags is None:
+        return None
+    getall = getattr(tags, "getall", None)
+    if callable(getall):
+        chunks: list[str] = []
+        for frame in getall("USLT"):
+            text = str(getattr(frame, "text", "") or "")
+            if text.strip():
+                chunks.append(text)
+        if chunks:
+            return "\n".join(chunks)
+    keys = (
+        "LYRICS",
+        "UNSYNCEDLYRICS",
+        "lyrics",
+        "©lyr",
+        "----:com.apple.iTunes:LYRICS",
+    )
+    chunks = []
+    for key in keys:
+        try:
+            value = tags.get(key)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            text = getattr(item, "text", item)
+            if isinstance(text, list):
+                text = "\n".join(str(part) for part in text if part)
+            piece = str(text or "").strip()
+            if piece:
+                chunks.append(piece)
+    return "\n".join(chunks) if chunks else None
+
+
+def sanitize_all_library_lyrics(
+    cache_dir: Path,
+    tracks: list[Any] | None = None,
+) -> dict[str, int]:
+    """Rewrite every cached and local lyric that still has trailing line periods."""
+    from .track_cache import aligned_path, iter_track_keys, lyrics_path, read_meta
+
+    audio_by_key: dict[str, Path] = {}
+    for track in tracks or []:
+        artist = str(getattr(track, "artist", "") or "")
+        title = str(getattr(track, "title", "") or "")
+        if not artist or not title:
+            continue
+        audio_by_key[cache_key(artist, title, getattr(track, "duration", None))] = Path(
+            getattr(track, "path")
+        )
+
+    stats = {"scanned": 0, "lyrics": 0, "aligned": 0, "audio": 0}
+    dirty_payloads: dict[str, LyricsPayload] = {}
+
+    for key in iter_track_keys(cache_dir):
+        stats["scanned"] += 1
+        meta = read_meta(cache_dir, key) or {}
+        meta_kwargs = {
+            "artist": str(meta.get("artist") or ""),
+            "title": str(meta.get("title") or ""),
+            "duration": meta.get("duration"),
+            "album": str(meta.get("album") or ""),
+        }
+
+        lpath = lyrics_path(cache_dir, key)
+        if lpath.is_file():
+            try:
+                data = json.loads(lpath.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = None
+            if isinstance(data, dict) and _cached_data_has_trailing_line_periods(data):
+                try:
+                    payload = load_cached(cache_dir, key)
+                except (OSError, ValueError):
+                    payload = None
+                if payload is not None and payload.lines:
+                    save_cached(cache_dir, key, payload, **meta_kwargs)
+                    dirty_payloads[key] = payload
+                    stats["lyrics"] += 1
+
+        apath = aligned_path(cache_dir, key)
+        if apath.is_file():
+            try:
+                data = json.loads(apath.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = None
+            if isinstance(data, dict) and _cached_data_has_trailing_line_periods(data):
+                try:
+                    payload = load_aligned_cached(cache_dir, key)
+                except (OSError, ValueError):
+                    payload = None
+                if payload is not None and payload.lines:
+                    save_aligned_cached(cache_dir, key, payload, **meta_kwargs)
+                    dirty_payloads[key] = payload
+                    stats["aligned"] += 1
+
+    for key, audio in audio_by_key.items():
+        if not audio.is_file():
+            continue
+        raw = _raw_local_lyrics_text(audio)
+        payload = dirty_payloads.get(key)
+        if raw and _raw_lyrics_has_trailing_periods(raw):
+            payload = payload or load_aligned_cached(cache_dir, key) or load_cached(cache_dir, key)
+            if payload is None:
+                payload = payload_from_text(raw, "local")
+        if payload is None or not payload.lines:
+            continue
+        if write_local_lyrics(audio, payload):
+            stats["audio"] += 1
+    return stats
 
 
 def clear_probe_errors(lyrics_cache: Path) -> int:
