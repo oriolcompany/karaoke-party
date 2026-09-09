@@ -58,6 +58,7 @@ const lyricsPasteModal = document.getElementById("lyricsPasteModal");
 const lyricsPasteCloseBtn = document.getElementById("lyricsPasteCloseBtn");
 const lyricsPasteCancelBtn = document.getElementById("lyricsPasteCancelBtn");
 const lyricsPasteSaveBtn = document.getElementById("lyricsPasteSaveBtn");
+const lyricsPasteDeleteBtn = document.getElementById("lyricsPasteDeleteBtn");
 const lyricsPasteInput = document.getElementById("lyricsPasteInput");
 const lyricsPasteMeta = document.getElementById("lyricsPasteMeta");
 const lyricsPasteStatus = document.getElementById("lyricsPasteStatus");
@@ -614,6 +615,8 @@ function applyLyricsSize() {
     btn.setAttribute("aria-pressed", on ? "true" : "false");
   });
   approachInkCache = null;
+  lyricFitCache = null;
+  fitSharedLyricSize();
 }
 
 function setLyricsSize(size) {
@@ -4571,6 +4574,119 @@ function clearLineRoll() {
   }
 }
 
+const LYRIC_LINE_FIT_MIN_PX = 12;
+const LYRIC_SIDE_PAD_MIN_PX = 4;
+
+let lyricFitCache = null;
+let lyricFitProbe = null;
+
+function ensureLyricFitProbe() {
+  if (lyricFitProbe?.isConnected) return lyricFitProbe;
+  lyricFitProbe = document.createElement("div");
+  lyricFitProbe.className = "k-slot k-slot-current k-slot-fit-probe";
+  lyricFitProbe.setAttribute("aria-hidden", "true");
+  (kStackEl || lyricsEl)?.appendChild(lyricFitProbe);
+  return lyricFitProbe;
+}
+
+function paintSlotWords(slotEl, line) {
+  slotEl.innerHTML = "";
+  if (!line) return;
+  let groupEl = null;
+  for (const word of lineWords(line)) {
+    const node = buildWordNode(word);
+    if (!groupEl) {
+      groupEl = document.createElement("span");
+      groupEl.className = "k-word-group";
+      slotEl.appendChild(groupEl);
+    }
+    groupEl.appendChild(node);
+    if (!word.glue) groupEl = null;
+  }
+}
+
+function resetSharedLyricFit() {
+  lyricsEl?.style.removeProperty("--k-lyrics-fitted");
+  lyricsEl?.style.removeProperty("--k-lyrics-side");
+  lineCurrentEl?.style.removeProperty("font-size");
+  lineNextEl?.style.removeProperty("font-size");
+}
+
+function longestLyricScrollWidth(probe) {
+  if (lyricFitCache && lyricFitCache.fontPx > 0) return lyricFitCache;
+  let maxWidth = 0;
+  const fontPx = parseFloat(getComputedStyle(probe).fontSize) || 0;
+  for (const line of lyricLines) {
+    paintSlotWords(probe, line);
+    maxWidth = Math.max(maxWidth, probe.scrollWidth);
+  }
+  probe.innerHTML = "";
+  lyricFitCache = { maxWidth, fontPx };
+  return lyricFitCache;
+}
+
+function fitSharedLyricSize() {
+  if (!lyricsEl || !lyricLines.length) {
+    resetSharedLyricFit();
+    return;
+  }
+  const probe = ensureLyricFitProbe();
+  if (!probe) return;
+
+  resetSharedLyricFit();
+  const preferred = parseFloat(getComputedStyle(probe).fontSize);
+  if (!Number.isFinite(preferred) || preferred <= 0) return;
+
+  const measured = longestLyricScrollWidth(probe);
+  const available = probe.clientWidth;
+  if (available <= 1) return;
+
+  const needed =
+    measured.fontPx > 0 ? measured.maxWidth * (preferred / measured.fontPx) : measured.maxWidth;
+  if (needed <= available + 0.5) return;
+
+  lyricsEl.style.setProperty("--k-lyrics-side", `${LYRIC_SIDE_PAD_MIN_PX}px`);
+  lyricFitCache = null;
+  const tight = longestLyricScrollWidth(probe);
+  const tightPreferred = parseFloat(getComputedStyle(probe).fontSize) || preferred;
+  const tightNeeded =
+    tight.fontPx > 0 ? tight.maxWidth * (tightPreferred / tight.fontPx) : tight.maxWidth;
+  if (tightNeeded <= probe.clientWidth + 0.5) return;
+
+  const fitted = Math.max(
+    LYRIC_LINE_FIT_MIN_PX,
+    tightPreferred * (probe.clientWidth / tightNeeded) * 0.992,
+  );
+  lyricsEl.style.setProperty("--k-lyrics-fitted", `${fitted}px`);
+}
+
+if (lyricsEl && typeof ResizeObserver !== "undefined") {
+  let lastLyricFitWidth = -1;
+  let lyricFitRaf = 0;
+  new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect?.width ?? 0;
+    if (Math.abs(width - lastLyricFitWidth) < 0.5) return;
+    lastLyricFitWidth = width;
+    lyricFitCache = null;
+    if (exportClock !== null) {
+      fitSharedLyricSize();
+      return;
+    }
+    if (lyricFitRaf) cancelAnimationFrame(lyricFitRaf);
+    lyricFitRaf = requestAnimationFrame(() => {
+      lyricFitRaf = 0;
+      fitSharedLyricSize();
+    });
+  }).observe(lyricsEl);
+}
+
+if (document.fonts?.ready) {
+  document.fonts.ready.then(() => {
+    lyricFitCache = null;
+    fitSharedLyricSize();
+  });
+}
+
 function fillSlot(slotEl, line, { trackWords = false, resetWords = true } = {}) {
   slotEl.innerHTML = "";
   slotEl.classList.remove(
@@ -4583,27 +4699,23 @@ function fillSlot(slotEl, line, { trackWords = false, resetWords = true } = {}) 
   );
   if (!line) {
     slotEl.classList.add("is-empty");
+    slotEl.style.removeProperty("font-size");
     return;
   }
+  paintSlotWords(slotEl, line);
   if (trackWords && resetWords) wordNodes = [];
-  let groupEl = null;
-  for (const word of lineWords(line)) {
-    const node = buildWordNode(word);
-    if (!groupEl) {
-      groupEl = document.createElement("span");
-      groupEl.className = "k-word-group";
-      slotEl.appendChild(groupEl);
-    }
-    groupEl.appendChild(node);
-    if (!word.glue) groupEl = null;
-    if (trackWords) {
+  if (trackWords) {
+    const nodes = [...slotEl.querySelectorAll(".k-word")];
+    lineWords(line).forEach((word, index) => {
+      const node = nodes[index];
+      if (!node) return;
       wordNodes.push({
         start: Number(word.time),
         end: Number(word.end),
         el: node,
         fill: node.querySelector(".k-word-fill"),
       });
-    }
+    });
   }
 }
 
@@ -5224,11 +5336,14 @@ function renderLyrics(payload) {
   hideApproachBar();
   setLyricsAligned(payload.aligned);
   applyLyricsLayout();
+  lyricFitCache = null;
+  fitSharedLyricSize();
 
   if (!lyricLines.length) {
     clearLineRoll();
     lineCurrentEl.innerHTML = "";
     lineNextEl.innerHTML = "";
+    resetSharedLyricFit();
     lineCurrentEl.classList.remove("is-active", "is-idle");
     lineNextEl.classList.remove("is-active", "is-idle");
     lineNextEl.classList.add("is-empty");
@@ -5956,6 +6071,7 @@ async function savePastedLyrics() {
     return;
   }
   if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = true;
+  if (lyricsPasteDeleteBtn) lyricsPasteDeleteBtn.disabled = true;
   setLyricsPasteStatus("Desant la lletra…", "running");
   try {
     const payload = await api("/api/lyrics", {
@@ -5989,6 +6105,49 @@ async function savePastedLyrics() {
     setLyricsPasteStatus(err.message || "No s’ha pogut desar la lletra", "error");
   } finally {
     if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = false;
+    if (lyricsPasteDeleteBtn) lyricsPasteDeleteBtn.disabled = false;
+  }
+}
+
+async function clearPastedLyrics() {
+  const track = trackForLyricsPaste();
+  if (!track) {
+    setLyricsPasteStatus("Tria una cançó", "error");
+    return;
+  }
+  const ok = window.confirm(
+    `Vols esborrar la lletra de “${track.title || track.relpath}”?\nEs treurà del fitxer d’àudio i de la cau.`
+  );
+  if (!ok) return;
+  if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = true;
+  if (lyricsPasteDeleteBtn) lyricsPasteDeleteBtn.disabled = true;
+  setLyricsPasteStatus("Esborrant la lletra…", "running");
+  try {
+    await api("/api/lyrics/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: track.id }),
+    });
+    const savedId = track.id;
+    await loadLibrary();
+    closeLyricsPasteModal();
+    const idx = findBrowseIndexByTrackId(savedId);
+    if (idx >= 0) {
+      selectedIndex = idx;
+      layoutCovers();
+      layoutGridSelection();
+      updateCoverMeta();
+    }
+    if (currentId === savedId) {
+      renderLyrics({ lines: [] });
+      lyricsStatus.textContent = "No s’ha trobat lletra";
+    }
+    libraryMeta.textContent = `S’ha esborrat la lletra de “${track.title}”`;
+  } catch (err) {
+    setLyricsPasteStatus(err.message || "No s’ha pogut esborrar la lletra", "error");
+  } finally {
+    if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = false;
+    if (lyricsPasteDeleteBtn) lyricsPasteDeleteBtn.disabled = false;
   }
 }
 
@@ -6462,6 +6621,9 @@ lyricsPasteCloseBtn?.addEventListener("click", () => closeLyricsPasteModal());
 lyricsPasteCancelBtn?.addEventListener("click", () => closeLyricsPasteModal());
 lyricsPasteSaveBtn?.addEventListener("click", () => {
   savePastedLyrics().catch(() => {});
+});
+lyricsPasteDeleteBtn?.addEventListener("click", () => {
+  clearPastedLyrics().catch(() => {});
 });
 exportVideoBtn?.addEventListener("click", () => {
   exportSelectedKaraokeVideo();

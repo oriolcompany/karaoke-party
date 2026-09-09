@@ -669,7 +669,20 @@ button:hover {
 .lyrics-paste-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.lyrics-paste-delete-btn {
+  margin-right: auto;
+  color: #ff6b8a;
+  border-color: rgba(255, 107, 138, 0.38);
+}
+
+.lyrics-paste-delete-btn:hover:not(:disabled) {
+  color: #ff8aa3;
+  border-color: rgba(255, 107, 138, 0.7);
 }
 
 .stage-paste-lyrics-btn {
@@ -1766,7 +1779,7 @@ button:hover {
   max-height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  padding: 0.75rem clamp(0.35rem, 1.2vw, 0.85rem) 1rem;
+  padding: 0.75rem 0.15rem 1rem;
   isolation: isolate;
 }
 
@@ -2379,6 +2392,8 @@ body.is-exporting-video .fx {
 
 .karaoke-board {
   --k-lyrics-bump: 0pt;
+  --k-lyrics-side: 0.35rem;
+  --k-lyrics-fitted: calc(clamp(2.6rem, 8vw, 5.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   position: relative;
   z-index: 1;
   display: flex;
@@ -2403,24 +2418,34 @@ body.is-exporting-video .fx {
 }
 
 .k-slot {
-  max-width: min(1400px, 99vw);
+  max-width: 100%;
   width: 100%;
   min-height: 1.3em;
   font-family: var(--font-display);
+  font-size: var(--k-lyrics-fitted);
   letter-spacing: 0.03em;
   line-height: 1.15;
-  padding: 0 clamp(0.25rem, 1vw, 0.75rem);
+  padding: 0 var(--k-lyrics-side);
+  /* One screen row per lyric; app.js tightens side padding, then shrinks all lines together. */
+  white-space: nowrap;
+}
+
+.k-slot-fit-probe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
 }
 
 .k-slot-current {
-  font-size: calc(clamp(2.6rem, 8vw, 5.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   opacity: 1;
   transform: translateY(0);
   color: var(--ink);
 }
 
 .k-slot-next {
-  font-size: calc(clamp(1.35rem, 3.8vw, 2.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   opacity: 0.72;
   transform: translateY(0);
   color: var(--cyan);
@@ -2432,7 +2457,6 @@ body.is-exporting-video .fx {
   z-index: 3;
   margin: 0;
   pointer-events: none;
-  font-size: calc(clamp(2.6rem, 8vw, 5.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   color: var(--ink);
   opacity: 1;
   transform: translateY(0);
@@ -2554,7 +2578,6 @@ body.is-exporting-video .fx {
 
 .karaoke-board.is-dual .k-slot-current,
 .karaoke-board.is-dual .k-slot-next {
-  font-size: calc(clamp(2.2rem, 6.4vw, 4.5rem) + 2pt + var(--k-lyrics-bump, 0pt));
   transform: none;
   color: var(--ink);
 }
@@ -2684,6 +2707,7 @@ body.is-exporting-video .fx {
 .lyrics-empty {
   color: var(--muted);
   font-size: 1.2rem;
+  white-space: normal;
 }
 
 .stage-dock-layer {
@@ -2879,7 +2903,8 @@ body.is-exporting-video .fx {
     height: 2.2rem;
   }
 
-  .k-slot-current {
-    font-size: calc(clamp(2.1rem, 9vw, 3.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
+  .karaoke-board {
+    --k-lyrics-fitted: calc(clamp(2.1rem, 9vw, 3.4rem) + 2pt + var(--k-lyrics-bump, 0pt));
   }
 }
+

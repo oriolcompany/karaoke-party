@@ -892,6 +892,134 @@ def write_local_lyrics(audio_path: Path | str | None, payload: LyricsPayload) ->
     return wrote
 
 
+def _delete_tag_keys(tags: Any, keys: tuple[str, ...]) -> bool:
+    changed = False
+    for key in keys:
+        try:
+            if key in tags:
+                del tags[key]
+                changed = True
+        except Exception:
+            continue
+    return changed
+
+
+def clear_local_lyrics(audio_path: Path | str | None) -> bool:
+    """Remove sidecar lyric files and embedded lyric tags. True if anything changed."""
+    if not audio_path:
+        return False
+    path = Path(audio_path)
+    changed = False
+    seen: set[Path] = set()
+    for candidate, _source in _sidecar_candidates(path):
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            if candidate.is_file():
+                candidate.unlink()
+                changed = True
+        except OSError:
+            continue
+    if not path.is_file():
+        return changed
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".mp3", ".wav"}:
+            from mutagen.id3 import ID3, ID3NoHeaderError
+
+            try:
+                tags = ID3(str(path))
+            except ID3NoHeaderError:
+                return changed
+            except Exception:
+                return changed
+            before = bool(tags.getall("USLT") or tags.getall("SYLT"))
+            tags.delall("USLT")
+            tags.delall("SYLT")
+            if before:
+                tags.save(str(path))
+                changed = True
+            return changed
+
+        if suffix in {".m4a", ".mp4", ".aac"}:
+            from mutagen.mp4 import MP4
+
+            audio = MP4(str(path))
+            keys = ("\xa9lyr", "----:com.apple.iTunes:LYRICS")
+            if _delete_tag_keys(audio, keys):
+                audio.save()
+                changed = True
+            return changed
+
+        if suffix == ".flac":
+            from mutagen.flac import FLAC
+
+            audio = FLAC(str(path))
+            if _delete_tag_keys(audio, ("LYRICS", "UNSYNCEDLYRICS", "lyrics")):
+                audio.save()
+                changed = True
+            return changed
+
+        if suffix in {".ogg", ".opus"}:
+            from mutagen import File as MutagenFile
+
+            audio = MutagenFile(str(path))
+            tags = None if audio is None else audio.tags
+            if tags is not None and _delete_tag_keys(tags, ("LYRICS", "UNSYNCEDLYRICS", "lyrics")):
+                audio.save()
+                changed = True
+            return changed
+
+        from mutagen.id3 import ID3, ID3NoHeaderError
+
+        try:
+            tags = ID3(str(path))
+        except ID3NoHeaderError:
+            return changed
+        except Exception:
+            return changed
+        before = bool(tags.getall("USLT") or tags.getall("SYLT"))
+        tags.delall("USLT")
+        tags.delall("SYLT")
+        if before:
+            tags.save(str(path))
+            changed = True
+    except Exception:
+        return changed
+    return changed
+
+
+def clear_manual_lyrics(
+    cache_dir: Path,
+    *,
+    artist: str,
+    title: str,
+    album: str = "",
+    duration: float | None = None,
+    aligned_cache: Path | None = None,
+    audio_path: Path | str | None = None,
+) -> None:
+    """Strip lyrics from the audio file, cache a miss, and drop Whisper alignment."""
+    key = cache_key(artist, title, duration)
+    clear_local_lyrics(audio_path)
+    save_cached(
+        cache_dir,
+        key,
+        LyricsPayload(synced=False, source="none", lines=[], plain=""),
+        artist=artist,
+        title=title,
+        duration=duration,
+        album=album,
+    )
+    if aligned_cache is not None:
+        clear_aligned_keys(aligned_cache, [key])
+
+
 def save_manual_lyrics(
     cache_dir: Path,
     *,

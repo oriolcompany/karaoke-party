@@ -54,6 +54,7 @@ from .lyrics import (
     cache_key,
     clear_lyrics_cache,
     clear_lyrics_keys,
+    clear_manual_lyrics,
     clear_probe_errors,
     fetch_lyrics,
     load_aligned_cached,
@@ -229,6 +230,10 @@ class ResyncLyricsBody(BaseModel):
 class SaveLyricsBody(BaseModel):
     track_id: str
     text: str
+
+
+class ClearLyricsBody(BaseModel):
+    track_id: str
 
 
 class RatingBody(BaseModel):
@@ -1775,6 +1780,22 @@ def save_lyrics(body: SaveLyricsBody) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _lyrics_response(track, body.track_id, payload, aligned=False)
+
+
+@app.post("/api/lyrics/clear")
+def clear_lyrics(body: ClearLyricsBody) -> dict:
+    """Remove this song’s lyrics from the audio file, cache, and Whisper alignment."""
+    track = _resolve_track(body.track_id)
+    clear_manual_lyrics(
+        cache_dir(),
+        artist=track.artist,
+        title=track.title,
+        album=track.album,
+        duration=track.duration,
+        aligned_cache=aligned_cache_dir(),
+        audio_path=track.path,
+    )
+    return {"track_id": body.track_id, "cleared": True}
 
 
 @app.get("/api/youtube")

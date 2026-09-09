@@ -15,6 +15,8 @@ from karaoke_party.lyrics import (
     ALIGNED_CACHE_VERSION,
     LyricsPayload,
     cache_key,
+    clear_local_lyrics,
+    clear_manual_lyrics,
     embed_lyrics_in_audio,
     fetch_lyrics,
     load_aligned_cached,
@@ -356,6 +358,70 @@ def test_save_manual_lyrics_writes_to_audio(tmp_path: Path) -> None:
     local = read_local_lyrics(audio)
     assert local is not None
     assert [line.text for line in local.lines] == ["Nova", "Lletra"]
+
+
+def test_clear_manual_lyrics_strips_file_cache_and_alignment(tmp_path: Path) -> None:
+    audio = _audio_stub(tmp_path / "song.mp3")
+    sidecar = audio.with_suffix(".lrc")
+    sidecar.write_text("[00:01.00]Hola\n[00:04.00]Adéu\n", encoding="utf-8")
+    key = cache_key("A", "B", 12.0)
+    save_manual_lyrics(
+        tmp_path,
+        artist="A",
+        title="B",
+        duration=12.0,
+        text="Nova\nLletra",
+        aligned_cache=tmp_path,
+        audio_path=audio,
+    )
+    save_aligned_cached(
+        tmp_path,
+        key,
+        LyricsPayload(
+            synced=True,
+            source="whisper-align",
+            lines=[
+                LyricLine(
+                    time=1.0,
+                    text="old",
+                    words=[LyricWord(time=1.0, end=1.4, text="old")],
+                )
+            ],
+            plain="old",
+        ),
+        artist="A",
+        title="B",
+        duration=12.0,
+    )
+    assert read_local_lyrics(audio) is not None
+    assert sidecar.is_file()
+    assert load_aligned_cached(tmp_path, key) is not None
+
+    clear_manual_lyrics(
+        tmp_path,
+        artist="A",
+        title="B",
+        duration=12.0,
+        aligned_cache=tmp_path,
+        audio_path=audio,
+    )
+    assert read_local_lyrics(audio) is None
+    assert not sidecar.is_file()
+    assert load_aligned_cached(tmp_path, key) is None
+    cached = load_cached(tmp_path, key)
+    assert cached is not None
+    assert cached.lines == []
+    assert cached.source == "none"
+    assert lyrics_status_and_source("A", "B", 12.0, lyrics_cache=tmp_path, aligned_cache=tmp_path) == (
+        False,
+        "none",
+    )
+
+
+def test_clear_local_lyrics_is_idempotent(tmp_path: Path) -> None:
+    audio = _audio_stub(tmp_path / "song.mp3")
+    assert clear_local_lyrics(audio) is False
+    assert read_local_lyrics(audio) is None
 
 
 def test_sanitize_all_library_lyrics_rewrites_cache_and_sidecar(tmp_path: Path) -> None:
