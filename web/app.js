@@ -34,6 +34,8 @@ const kStackEl = document.getElementById("kStack") || lyricsEl;
 const lineCurrentEl = document.getElementById("lineCurrent");
 const lineNextEl = document.getElementById("lineNext");
 const approachEl = document.getElementById("kApproach");
+const restCountEl = document.getElementById("kRestCount");
+const restCountNumEl = document.getElementById("kRestCountNum");
 const songTitle = document.getElementById("songTitle");
 const songArtist = document.getElementById("songArtist");
 const lyricsStatus = document.getElementById("lyricsStatus");
@@ -398,6 +400,7 @@ let stackPending = false;
 let restHoldActive = false;
 let restLeadInActive = false;
 let restFadeTimer = null;
+let restCountHideTimer = null;
 /** False until the new audio element reports a real playhead (avoids stale time from the previous song). */
 let audioClockReady = false;
 /** Hold the next phrase when the rest after this line is longer than a breath. */
@@ -2816,6 +2819,10 @@ function collectExportText(ctx) {
       .forEach((node) => collectExportWord(ctx, items, node, { shadow, clip }));
     const empty = lyricsEl.querySelector(".lyrics-empty");
     if (empty) collectExportElementText(ctx, items, empty, { shadow: false, clip });
+    const restCount = lyricsEl.querySelector(
+      ".k-rest-count.is-on .k-rest-count-num, .k-rest-count.is-leaving .k-rest-count-num"
+    );
+    if (restCount) collectExportElementText(ctx, items, restCount, { shadow, clip });
   }
   return items;
 }
@@ -3081,6 +3088,39 @@ function paintExportOutro(ctx, t) {
   ctx.restore();
 }
 
+function paintExportRestRing(ctx) {
+  if (!restCountEl?.classList.contains("is-on") && !restCountEl?.classList.contains("is-leaving")) {
+    return;
+  }
+  const opacity = elementOpacity(restCountEl);
+  if (opacity < 0.02) return;
+  const svg = restCountEl.querySelector(".k-rest-ring");
+  if (!svg) return;
+  const box = svg.getBoundingClientRect();
+  if (box.width < 2 || box.height < 2) return;
+  const raw = Number.parseFloat(restCountEl.style.getPropertyValue("--k-rest-progress"));
+  const progress = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+  const cx = box.left + box.width / 2;
+  const cy = box.top + box.height / 2;
+  const radius = Math.min(box.width, box.height) * 0.42;
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.lineWidth = Math.max(2.5, box.width * 0.032);
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(255, 246, 234, 0.18)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  if (progress > 0.001) {
+    ctx.strokeStyle = "#fff6ea";
+    ctx.beginPath();
+    const start = -Math.PI / 2;
+    ctx.arc(cx, cy, radius, start, start + progress * Math.PI * 2, false);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function paintExportFrame(options = {}) {
   if (!stageCapture?.ctx || !viewStage) return;
   const ctx = stageCapture.ctx;
@@ -3124,6 +3164,7 @@ function paintExportFrame(options = {}) {
   const afterBackground = performance.now();
   exportProfile.bg += afterBackground - startedAt;
   if (!options.skipText) {
+    paintExportRestRing(ctx);
     paintExportText(ctx, view);
     exportProfile.text += performance.now() - afterBackground;
   }
@@ -4988,6 +5029,88 @@ function hideApproachBar() {
   approachInkCache = null;
 }
 
+function clearRestCountNow() {
+  if (restCountHideTimer) {
+    cancelStageStep(restCountHideTimer);
+    restCountHideTimer = null;
+  }
+  if (!restCountEl) return;
+  restCountEl.classList.remove("is-on", "is-leaving");
+  restCountEl.style.removeProperty("--k-rest-progress");
+  if (restCountNumEl) {
+    restCountNumEl.classList.remove("is-tick");
+    restCountNumEl.textContent = "";
+  }
+}
+
+function hideRestCount(immediate = false) {
+  if (!restCountEl) return;
+  if (immediate || prefersReducedMotion()) {
+    clearRestCountNow();
+    return;
+  }
+  if (restCountEl.classList.contains("is-leaving")) return;
+  if (!restCountEl.classList.contains("is-on") && !restCountNumEl?.textContent) return;
+  restCountNumEl?.classList.remove("is-tick");
+  restCountEl.classList.remove("is-on");
+  restCountEl.classList.add("is-leaving");
+  if (restCountHideTimer) cancelStageStep(restCountHideTimer);
+  restCountHideTimer = scheduleStageStep(REST_FADE_MS, () => {
+    restCountHideTimer = null;
+    clearRestCountNow();
+  });
+}
+
+/** When the next phrase is sung, or -1 if this rest has no more lines. */
+function restCountSingAt(index, t) {
+  if (isIntroHold(t)) return firstLineStart();
+  if (!isRestHold(index, t)) return -1;
+  const next = lyricLines[index + 1];
+  if (!next) return -1;
+  return lineTimeSpan(next, index + 1).start;
+}
+
+function restCountHoldStart(index, t) {
+  if (isIntroHold(t)) return 0;
+  if (isRestHold(index, t) && lyricLines[index]) {
+    return lineTimeSpan(lyricLines[index], index).end;
+  }
+  return -1;
+}
+
+function pulseRestCount() {
+  if (!restCountNumEl || prefersReducedMotion()) return;
+  restCountNumEl.classList.remove("is-tick");
+  void restCountNumEl.offsetWidth;
+  restCountNumEl.classList.add("is-tick");
+}
+
+function syncRestCount(t) {
+  if (!restCountEl || !restCountNumEl) return;
+  const index = activeLineIndex;
+  const singAt = restCountSingAt(index, t);
+  const holdStart = restCountHoldStart(index, t);
+  const remaining = singAt - t;
+  if (singAt < 0 || holdStart < 0 || remaining <= 0) {
+    hideRestCount();
+    return;
+  }
+  if (restCountHideTimer) {
+    cancelStageStep(restCountHideTimer);
+    restCountHideTimer = null;
+  }
+  restCountEl.classList.remove("is-leaving");
+  const span = Math.max(0.001, singAt - holdStart);
+  const progress = Math.min(1, Math.max(0, remaining / span));
+  restCountEl.style.setProperty("--k-rest-progress", progress.toFixed(4));
+  const seconds = String(Math.max(1, Math.ceil(remaining)));
+  if (restCountNumEl.textContent !== seconds) {
+    restCountNumEl.textContent = seconds;
+    pulseRestCount();
+  }
+  restCountEl.classList.add("is-on");
+}
+
 let approachMetricsCtx = null;
 /** @type {{ wordEl: HTMLElement, topOffset: number, leftOffset: number, height: number } | null} */
 let approachInkCache = null;
@@ -5337,6 +5460,7 @@ function renderLyrics(payload) {
   restHoldActive = false;
   restLeadInActive = false;
   hideApproachBar();
+  hideRestCount(true);
   setLyricsAligned(payload.aligned);
   applyLyricsLayout();
   lyricFitCache = null;
@@ -5501,6 +5625,7 @@ function syncKaraoke() {
   maybeRevealStackUpcoming(t);
   syncVerseRest(t);
   syncApproachBar(t);
+  syncRestCount(t);
 }
 
 function tick() {
