@@ -2967,14 +2967,18 @@ function fillThumbnailHeadline(ctx, text, x, y, stroke) {
   ctx.fillText(text, x, y);
 }
 
-function paintThumbnailCard(ctx, track) {
+function paintSongTitleCard(ctx, track, { alpha = 1, overlay = 0 } = {}) {
+  if (alpha < 0.01) return;
   const artist = (track?.artist || "").toLocaleUpperCase("ca");
   const title = track?.title || "";
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = "rgba(3, 2, 8, 0.58)";
-  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  if (overlay > 0) {
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `rgba(3, 2, 8, ${overlay * alpha})`;
+    ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  }
+  ctx.globalAlpha = alpha;
   const cx = EXPORT_VIDEO_W / 2;
   const maxTextW = 1760;
   const artistSize = fitExportFont(ctx, artist, "Outfit, sans-serif", 96, 60, maxTextW);
@@ -3006,6 +3010,10 @@ function paintThumbnailCard(ctx, track) {
   ctx.fillStyle = "#3de7ff";
   fillThumbnailHeadline(ctx, "KARAOKE", cx, y, 8);
   ctx.restore();
+}
+
+function paintThumbnailCard(ctx, track) {
+  paintSongTitleCard(ctx, track, { overlay: 0.58 });
 }
 
 function paintThumbnailBackground(ctx, image) {
@@ -3570,45 +3578,62 @@ function drawExportBrandMark(ctx, x, y, size) {
 }
 
 function paintExportIntro(ctx, t, track) {
-  const fadeIn = smoothstep(t / 0.7);
-  const card = smoothstep((t - 0.65) / 0.55);
+  const fadeIn = smoothstep(t / 0.55);
   const fadeOut = smoothstep((t - 4.2) / 0.8);
-  const alpha = fadeIn * (1 - fadeOut);
-  if (alpha < 0.01) return;
+  const veil = fadeIn * (1 - fadeOut);
+  if (veil < 0.01) return;
+  const mark = 236;
+  const settle = smoothstep((t - 1.2) / 0.42);
+  const endLogoSize = mark;
+  const startLogoSize = mark * 1.72;
+  const logoSize = startLogoSize + (endLogoSize - startLogoSize) * settle;
+  const textIn = smoothstep((t - 1.28) / 0.36);
   const artist = (track?.artist || "").toLocaleUpperCase("ca");
   const title = track?.title || "";
+  const maxTextW = 1680;
+  const artistSize = fitExportFont(ctx, artist, "Outfit, sans-serif", mark * 0.22, mark * 0.16, maxTextW);
+  const wrapped = wrapThumbnailTitle(ctx, title, "Bebas Neue, sans-serif", mark * 0.56, mark * 0.34, maxTextW);
+  const titleSize = wrapped.size;
+  const titleGap = Math.round(titleSize * 0.1);
+  const titlesH = wrapped.lines.length * titleSize + Math.max(0, wrapped.lines.length - 1) * titleGap;
+  const subSize = mark * 0.16;
+  const logoGap = mark * 0.18;
+  const artistToTitle = mark * 0.1;
+  const titleToSub = mark * 0.16;
+  const textH = artistSize + artistToTitle + titlesH + titleToSub + subSize;
+  const endTop = (EXPORT_VIDEO_H - (endLogoSize + logoGap + textH)) / 2;
+  const logoY = (EXPORT_VIDEO_H - logoSize) / 2 + (endTop - (EXPORT_VIDEO_H - logoSize) / 2) * settle;
+  const cx = EXPORT_VIDEO_W / 2;
+
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = `rgba(3, 2, 8, ${0.52 * alpha})`;
+  ctx.fillStyle = `rgba(3, 2, 8, ${0.54 * veil})`;
   ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
-  const cx = EXPORT_VIDEO_W / 2;
-  const logoSize = 220 + (1 - card) * 160;
-  const artistSize = 28;
-  const titleSize = fitExportFont(ctx, title, "Bebas Neue, sans-serif", 88, 44, 1600);
-  const subSize = 22;
-  const gap = 36;
-  const textH = artistSize + 16 + titleSize + 44 + subSize;
-  const stackH = logoSize + card * (gap + textH);
-  const logoY = (EXPORT_VIDEO_H - stackH) / 2;
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = veil;
   drawExportBrandMark(ctx, cx - logoSize / 2, logoY, logoSize);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "alphabetic";
-  ctx.globalAlpha = alpha * card;
-  const artistY = logoY + logoSize + gap + artistSize;
-  setExportLetterSpacing(ctx, 7);
-  ctx.font = `700 ${artistSize}px Outfit, sans-serif`;
-  ctx.fillStyle = "#ffe14a";
-  fillExportHeadline(ctx, artist, cx, artistY);
-  setExportLetterSpacing(ctx, 2);
-  ctx.font = `${titleSize}px Bebas Neue, sans-serif`;
-  ctx.fillStyle = "#fff6ea";
-  fillExportHeadline(ctx, title, cx, artistY + 16 + titleSize);
-  setExportLetterSpacing(ctx, 4);
-  ctx.font = `500 ${subSize}px Outfit, sans-serif`;
-  ctx.fillStyle = "#3de7ff";
-  fillExportHeadline(ctx, "KARAOKE", cx, artistY + titleSize + 60);
+  if (textIn > 0.01) {
+    ctx.globalAlpha = veil * textIn;
+    let y = endTop + endLogoSize + logoGap + artistSize;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    setExportLetterSpacing(ctx, 6);
+    ctx.font = `800 ${artistSize}px Outfit, sans-serif`;
+    ctx.fillStyle = "#ffe14a";
+    fillExportHeadline(ctx, artist, cx, y);
+    setExportLetterSpacing(ctx, 1);
+    ctx.font = `${titleSize}px Bebas Neue, sans-serif`;
+    ctx.fillStyle = "#fff6ea";
+    wrapped.lines.forEach((line, index) => {
+      y += (index ? titleGap : artistToTitle) + titleSize;
+      fillExportHeadline(ctx, line, cx, y);
+    });
+    y += titleToSub + subSize;
+    setExportLetterSpacing(ctx, 6);
+    ctx.font = `800 ${subSize}px Outfit, sans-serif`;
+    ctx.fillStyle = "#3de7ff";
+    fillExportHeadline(ctx, "KARAOKE", cx, y);
+  }
   ctx.restore();
 }
 
