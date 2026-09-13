@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=83" />
+    <link rel="stylesheet" href="/styles.css?v=89" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -274,6 +274,14 @@
               aria-controls="settingsSectionCache"
             >
               Memòria cau
+            </button>
+            <button
+              type="button"
+              class="settings-nav-btn"
+              data-settings-section="export"
+              aria-controls="settingsSectionExport"
+            >
+              Exportació de vídeo
             </button>
           </nav>
           <div id="settingsBody" class="settings-body">
@@ -711,6 +719,71 @@
                 <p id="cacheSettingsStatus" class="settings-status" aria-live="polite"></p>
               </div>
             </section>
+
+            <section
+              id="settingsSectionExport"
+              class="settings-section settings-section-fill"
+              data-settings-section-panel="export"
+            >
+              <h3 class="settings-section-title">Exportació de vídeo</h3>
+              <p class="settings-help">
+                Marca les cançons i crea els MP4 un rere l’altre, amb les mateixes opcions de
+                l’escenari.
+              </p>
+              <div class="export-table-toolbar">
+                <input
+                  id="exportTableSearch"
+                  type="search"
+                  placeholder="Cerca per títol, artista o àlbum…"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <p id="exportTableMeta" class="export-table-meta">0 seleccionades</p>
+                <button id="exportTableBtn" type="button" disabled>Exportar vídeos</button>
+              </div>
+              <div class="export-table-wrap">
+                <table id="exportTable" class="export-table">
+                  <thead>
+                    <tr>
+                      <th class="export-table-check">
+                        <input
+                          id="exportTableSelectAll"
+                          type="checkbox"
+                          aria-label="Seleccionar totes les cançons visibles"
+                        />
+                      </th>
+                      <th>
+                        <button type="button" class="export-table-sort" data-export-sort="artist">
+                          Artista
+                        </button>
+                      </th>
+                      <th>
+                        <button type="button" class="export-table-sort" data-export-sort="title">
+                          Títol
+                        </button>
+                      </th>
+                      <th>
+                        <button type="button" class="export-table-sort" data-export-sort="album">
+                          Àlbum
+                        </button>
+                      </th>
+                      <th>
+                        <button type="button" class="export-table-sort" data-export-sort="rating">
+                          Puntuació
+                        </button>
+                      </th>
+                      <th>
+                        <button type="button" class="export-table-sort" data-export-sort="status">
+                          Estat
+                        </button>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody id="exportTableBody"></tbody>
+                </table>
+              </div>
+              <p id="exportTableStatus" class="settings-status" aria-live="polite"></p>
+            </section>
           </div>
         </div>
       </div>
@@ -756,6 +829,115 @@
               Cancel·lar
             </button>
             <button id="lyricsPasteSaveBtn" type="button">Desar al fitxer</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="exportVideoModal"
+      class="settings-modal lyrics-paste-modal export-video-modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="exportVideoTitle"
+      hidden
+    >
+      <div class="settings-backdrop" data-export-video-close></div>
+      <div class="settings-panel export-video-panel">
+        <header class="settings-header">
+          <h2 id="exportVideoTitle">Desar vídeo</h2>
+          <button
+            id="exportVideoCloseBtn"
+            class="settings-close"
+            type="button"
+            aria-label="Tancar"
+            data-export-video-close
+          >
+            ×
+          </button>
+        </header>
+        <div class="lyrics-paste-body export-video-body">
+          <p class="settings-help">
+            Aquestes són les opcions de l’escenari. Les pots canviar abans de crear el MP4.
+          </p>
+          <p id="exportVideoModalTrack" class="export-video-track"></p>
+
+          <div class="settings-block">
+            <h4 class="settings-block-title">Pista d’àudio</h4>
+            <div class="settings-toggle" role="group" aria-label="Pista d’àudio">
+              <button type="button" class="settings-toggle-btn" data-export-audio="original">
+                Amb veu
+              </button>
+              <button type="button" class="settings-toggle-btn" data-export-audio="instrumental">
+                Karaoke
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-block">
+            <h4 class="settings-block-title">Fons</h4>
+            <div class="settings-toggle is-wrap" role="group" aria-label="Fons de l’escenari">
+              <button type="button" class="settings-toggle-btn" data-export-bg="video">Vídeo</button>
+              <button type="button" class="settings-toggle-btn" data-export-bg="cover">Portada</button>
+              <button type="button" class="settings-toggle-btn" data-export-bg="image">Imatge</button>
+              <button type="button" class="settings-toggle-btn" data-export-bg="aura">Aura</button>
+              <button type="button" class="settings-toggle-btn" data-export-bg="stage">Escenari</button>
+            </div>
+            <p id="exportVideoBgHint" class="settings-help" hidden>
+              El videoclip de YouTube no es pot gravar al MP4; s’usarà la portada.
+            </p>
+          </div>
+
+          <div class="settings-block">
+            <h4 class="settings-block-title">Lletra</h4>
+            <div class="settings-toggle" role="group" aria-label="Estil de lletra">
+              <button type="button" class="settings-toggle-btn" data-export-layout="stack">
+                Principal + següent
+              </button>
+              <button type="button" class="settings-toggle-btn" data-export-layout="dual">
+                Dues línies
+              </button>
+            </div>
+            <div class="settings-toggle is-wrap" role="group" aria-label="Tamany de la lletra">
+              <button type="button" class="settings-toggle-btn" data-export-size="small">Petit</button>
+              <button type="button" class="settings-toggle-btn" data-export-size="normal">Normal</button>
+              <button type="button" class="settings-toggle-btn" data-export-size="large">Gran</button>
+              <button type="button" class="settings-toggle-btn" data-export-size="xlarge">Molt gran</button>
+            </div>
+          </div>
+
+          <div id="exportVideoAuraBlock" class="settings-block">
+            <h4 class="settings-block-title">Aura</h4>
+            <div class="settings-toggle" role="group" aria-label="Partícules del fons Aura">
+              <button type="button" class="settings-toggle-btn" data-export-particles="1">
+                Amb partícules
+              </button>
+              <button type="button" class="settings-toggle-btn" data-export-particles="0">
+                Sense partícules
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-block">
+            <h4 class="settings-block-title">Vídeo desat</h4>
+            <p class="settings-help">
+              Si ja n’hi ha un amb aquestes opcions, el pots tornar a crear des de zero.
+            </p>
+            <div class="settings-toggle" role="group" aria-label="Regenerar el vídeo">
+              <button type="button" class="settings-toggle-btn" data-export-regen="0">
+                Usar el desat
+              </button>
+              <button type="button" class="settings-toggle-btn" data-export-regen="1">
+                Regenerar
+              </button>
+            </div>
+          </div>
+
+          <div class="lyrics-paste-actions">
+            <button id="exportVideoCancelBtn" class="settings-secondary-btn" type="button" data-export-video-close>
+              Cancel·lar
+            </button>
+            <button id="exportVideoConfirmBtn" type="button">Crear vídeo</button>
           </div>
         </div>
       </div>
@@ -934,6 +1116,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=117"></script>
+    <script src="/app.js?v=124"></script>
   </body>
 </html>

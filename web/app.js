@@ -54,6 +54,20 @@ const coverNext = document.getElementById("coverNext");
 const singBtn = document.getElementById("singBtn");
 const exportVideoBtn = document.getElementById("exportVideoBtn");
 const exportVideoStatus = document.getElementById("exportVideoStatus");
+const exportVideoModal = document.getElementById("exportVideoModal");
+const exportVideoModalTrack = document.getElementById("exportVideoModalTrack");
+const exportVideoCloseBtn = document.getElementById("exportVideoCloseBtn");
+const exportVideoCancelBtn = document.getElementById("exportVideoCancelBtn");
+const exportVideoConfirmBtn = document.getElementById("exportVideoConfirmBtn");
+const exportVideoTitle = document.getElementById("exportVideoTitle");
+const exportVideoBgHint = document.getElementById("exportVideoBgHint");
+const exportVideoAuraBlock = document.getElementById("exportVideoAuraBlock");
+const exportTableSearch = document.getElementById("exportTableSearch");
+const exportTableMeta = document.getElementById("exportTableMeta");
+const exportTableBtn = document.getElementById("exportTableBtn");
+const exportTableSelectAll = document.getElementById("exportTableSelectAll");
+const exportTableBody = document.getElementById("exportTableBody");
+const exportTableStatus = document.getElementById("exportTableStatus");
 // const exportCaptureBadge = document.getElementById("exportCaptureBadge");
 // const exportOverlay = document.getElementById("exportOverlay");
 // const exportOverlayDetail = document.getElementById("exportOverlayDetail");
@@ -318,6 +332,7 @@ function applyTrackRating(trackId, rating) {
   document.querySelectorAll(".song-rating[data-track-id]").forEach((el) => {
     if (el.dataset.trackId === trackId) paintRatingWidget(el, value);
   });
+  if (activeSettingsSection() === "export") renderExportTable();
   if (ratingFilterMode === "all") return;
   const previousId = selectedTrack()?.id;
   applyLyricsFilterMode();
@@ -397,6 +412,12 @@ let coversRefreshTimer = 0;
 let openedAlbum = null;
 let alignMode = loadAlignMode();
 let currentId = null;
+let exportLookTrack = null;
+let exportDialogTrack = null;
+let exportDialogTracks = [];
+const exportTableSelected = new Set();
+let exportTableSortKey = "artist";
+let exportTableSortDir = "asc";
 let lyricLines = [];
 let lastLyricsPlain = "";
 let lyricsPasteTrackId = "";
@@ -453,7 +474,9 @@ const exportAnimationStarts = new WeakMap();
 /** @type {object[]} */
 const videoQueue = [];
 const videoQueuedIds = new Set();
+const videoQueueForce = new Set();
 let videoQueueDone = 0;
+let exportRegenerate = false;
 let stageOutroTimer = 0;
 let youtubeToken = 0;
 let youtubeApiPromise = null;
@@ -1154,9 +1177,34 @@ window.addEventListener("resize", () => {
   resizeAuraCanvas();
 });
 
+function lookTrack() {
+  return exportLookTrack || findTrackById(currentId);
+}
+
+function exportStageBgMode(track) {
+  const wanted = STAGE_BG_MODES.has(stageBgMode) ? stageBgMode : "stage";
+  if (wanted === "video") return "cover";
+  if (wanted === "image") return itemHasBackdrop(track) ? "image" : "stage";
+  return wanted;
+}
+
+function exportAudioMode() {
+  return audioMode === "instrumental" && stemsAvailable ? "instrumental" : "original";
+}
+
+function exportStageLook(track) {
+  return {
+    background: exportStageBgMode(track),
+    lyrics_layout: lyricsLayout === "dual" ? "dual" : "stack",
+    lyrics_size: lyricsSize in LYRICS_SIZE_BUMPS ? lyricsSize : "normal",
+    aura_particles: Boolean(auraParticlesEnabled),
+    audio: exportAudioMode(),
+  };
+}
+
 function applyVideoModeButtons() {
   const videoReady = youtubeVideoReady();
-  const current = findTrackById(currentId);
+  const current = lookTrack();
   const imageReady = itemHasBackdrop(current);
   const videoOn = stageBgMode === "video" && videoReady;
   const coverOn = stageBgMode === "cover";
@@ -1205,7 +1253,12 @@ function applyVideoModeButtons() {
 }
 
 function setStageBgMode(mode, { persist = true } = {}) {
-  if (mode === "video" && !youtubeVideoReady()) return;
+  if (mode === "video" && !youtubeVideoReady()) {
+    stageBgMode = "video";
+    if (persist) localStorage.setItem(STAGE_BG_KEY, stageBgMode);
+    applyVideoModeButtons();
+    return;
+  }
   stageBgMode = STAGE_BG_MODES.has(mode) ? mode : "stage";
   if (persist) localStorage.setItem(STAGE_BG_KEY, stageBgMode);
   applyVideoModeButtons();
@@ -2754,17 +2807,19 @@ function updatePrimaryAction() {
 }
 
 function setExportVideoStatus(text, kind) {
-  if (!exportVideoStatus) return;
-  if (!text) {
-    exportVideoStatus.hidden = true;
-    exportVideoStatus.textContent = "";
-    exportVideoStatus.removeAttribute("data-kind");
-    return;
+  if (exportVideoStatus) {
+    if (!text) {
+      exportVideoStatus.hidden = true;
+      exportVideoStatus.textContent = "";
+      exportVideoStatus.removeAttribute("data-kind");
+    } else {
+      exportVideoStatus.hidden = false;
+      exportVideoStatus.textContent = text;
+      if (kind) exportVideoStatus.dataset.kind = kind;
+      else exportVideoStatus.removeAttribute("data-kind");
+    }
   }
-  exportVideoStatus.hidden = false;
-  exportVideoStatus.textContent = text;
-  if (kind) exportVideoStatus.dataset.kind = kind;
-  else exportVideoStatus.removeAttribute("data-kind");
+  setSettingsStatus(exportTableStatus, text, kind || "");
 }
 
 function updateExportVideoButton() {
@@ -3099,7 +3154,8 @@ function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
 
 function collectExportText(ctx) {
   const items = [];
-  const shadow = viewStage.classList.contains("has-aura");
+  const shadow =
+    viewStage.classList.contains("has-aura") || viewStage.classList.contains("has-image");
   if (lyricsEl) {
     const clip = lyricsEl.getBoundingClientRect();
     lyricsEl
@@ -3110,7 +3166,7 @@ function collectExportText(ctx) {
     const restCount = lyricsEl.querySelector(
       ".k-rest-count.is-on .k-rest-count-num, .k-rest-count.is-leaving .k-rest-count-num"
     );
-    if (restCount) collectExportElementText(ctx, items, restCount, { shadow, clip });
+    if (restCount) collectExportElementText(ctx, items, restCount, { shadow: true, clip });
   }
   return items;
 }
@@ -3376,37 +3432,210 @@ function paintExportOutro(ctx, t) {
   ctx.restore();
 }
 
+function paintExportDonut(ctx, cx, cy, outer, inner, start, end, color) {
+  if (outer <= inner || end === start) return;
+  ctx.beginPath();
+  ctx.arc(cx, cy, outer, start, end, false);
+  ctx.arc(cx, cy, inner, end, start, true);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
 function paintExportRestRing(ctx) {
   if (!restCountEl?.classList.contains("is-on") && !restCountEl?.classList.contains("is-leaving")) {
     return;
   }
   const opacity = elementOpacity(restCountEl);
   if (opacity < 0.02) return;
-  const svg = restCountEl.querySelector(".k-rest-ring");
-  if (!svg) return;
-  const box = svg.getBoundingClientRect();
+  const dial = restCountEl.querySelector(".k-rest-count-dial") || restCountEl.querySelector(".k-rest-ring");
+  if (!dial) return;
+  const box = dial.getBoundingClientRect();
   if (box.width < 2 || box.height < 2) return;
   const raw = Number.parseFloat(restCountEl.style.getPropertyValue("--k-rest-progress"));
   const progress = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+  const size = Math.min(box.width, box.height);
+  const strokeVar = Number.parseFloat(getComputedStyle(dial).getPropertyValue("--k-rest-stroke"));
+  const stroke = Number.isFinite(strokeVar) && strokeVar > 0 ? strokeVar : Math.max(10, size * 0.042);
   const cx = box.left + box.width / 2;
   const cy = box.top + box.height / 2;
-  const radius = Math.min(box.width, box.height) * 0.42;
+  const outer = size / 2;
+  const inner = Math.max(1, outer - stroke);
   ctx.save();
   ctx.globalAlpha = opacity;
-  ctx.lineWidth = Math.max(2.5, box.width * 0.032);
-  ctx.lineCap = "round";
-  ctx.strokeStyle = "rgba(255, 246, 234, 0.18)";
+  const glow = ctx.createRadialGradient(cx, cy, inner * 0.12, cx, cy, inner);
+  glow.addColorStop(0, "rgba(0, 0, 0, 0.42)");
+  glow.addColorStop(0.72, "rgba(0, 0, 0, 0.08)");
+  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = glow;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.arc(cx, cy, inner, 0, Math.PI * 2);
+  ctx.fill();
+  paintExportDonut(ctx, cx, cy, outer, inner, 0, Math.PI * 2, "rgba(255, 246, 234, 0.2)");
   if (progress > 0.001) {
-    ctx.strokeStyle = "#fff6ea";
-    ctx.beginPath();
     const start = -Math.PI / 2;
-    ctx.arc(cx, cy, radius, start, start + progress * Math.PI * 2, false);
-    ctx.stroke();
+    paintExportDonut(ctx, cx, cy, outer, inner, start, start + progress * Math.PI * 2, "#fff6ea");
   }
   ctx.restore();
+}
+
+function paintExportApproachBar(ctx) {
+  if (!approachEl?.classList.contains("is-on")) return;
+  const opacity = elementOpacity(approachEl);
+  if (opacity < 0.02) return;
+  const box = approachEl.getBoundingClientRect();
+  if (box.width < 0.5 || box.height < 0.5) return;
+  const glowW = Math.max(46, box.height * 3.4);
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.save();
+  ctx.filter = "blur(10px)";
+  const wash = ctx.createLinearGradient(box.left - glowW, 0, box.left + box.width, 0);
+  wash.addColorStop(0, "rgba(255, 225, 74, 0)");
+  wash.addColorStop(0.58, "rgba(255, 225, 74, 0.22)");
+  wash.addColorStop(1, "rgba(255, 225, 74, 0.55)");
+  ctx.fillStyle = wash;
+  ctx.fillRect(box.left - glowW, box.top - 6, glowW + box.width + 8, box.height + 12);
+  ctx.restore();
+  ctx.fillStyle = "#ffe14a";
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(box.left, box.top, box.width, box.height, box.width / 2);
+    ctx.fill();
+  } else {
+    ctx.fillRect(box.left, box.top, box.width, box.height);
+  }
+  ctx.restore();
+}
+
+function drawImageCoverFit(ctx, img, dx, dy, dw, dh) {
+  const iw = img.naturalWidth || 0;
+  const ih = img.naturalHeight || 0;
+  if (iw < 1 || ih < 1 || dw < 1 || dh < 1) return;
+  const scale = Math.max(dw / iw, dh / ih);
+  const sw = Math.min(iw, dw / scale);
+  const sh = Math.min(ih, dh / scale);
+  const sx = (iw - sw) / 2;
+  const sy = (ih - sh) / 2;
+  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+function paintExportDomImage(ctx, img, { shadow = false } = {}) {
+  if (!img || img.naturalWidth < 1) return false;
+  const box = img.getBoundingClientRect();
+  if (box.width < 2 || box.height < 2) return false;
+  const style = getComputedStyle(img);
+  const radius = Number.parseFloat(style.borderRadius) || 0;
+  ctx.save();
+  if (shadow) {
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.58)";
+    ctx.shadowBlur = 45;
+    ctx.shadowOffsetY = 18;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+    if (radius > 0 && typeof ctx.roundRect === "function") {
+      ctx.beginPath();
+      ctx.roundRect(box.left, box.top, box.width, box.height, radius);
+      ctx.fill();
+    } else {
+      ctx.fillRect(box.left, box.top, box.width, box.height);
+    }
+    ctx.restore();
+  }
+  if (radius > 0 && typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(box.left, box.top, box.width, box.height, radius);
+    ctx.clip();
+  }
+  const filter = style.filter;
+  if (filter && filter !== "none") ctx.filter = filter;
+  drawImageCoverFit(ctx, img, box.left, box.top, box.width, box.height);
+  ctx.restore();
+  return true;
+}
+
+function paintExportVideoDim(ctx, box) {
+  const dim = stageVideoDimEl?.getBoundingClientRect();
+  const area = dim && dim.width > 2 ? dim : box;
+  if (!area || area.width < 2) return;
+  const linear = ctx.createLinearGradient(0, area.top, 0, area.top + area.height);
+  linear.addColorStop(0, "rgba(0,0,0,0.58)");
+  linear.addColorStop(0.32, "rgba(0,0,0,0.28)");
+  linear.addColorStop(0.68, "rgba(0,0,0,0.32)");
+  linear.addColorStop(1, "rgba(0,0,0,0.72)");
+  ctx.fillStyle = linear;
+  ctx.fillRect(area.left, area.top, area.width, area.height);
+  const cx = area.left + area.width / 2;
+  const cy = area.top + area.height / 2;
+  const radial = ctx.createRadialGradient(
+    cx,
+    cy,
+    Math.min(area.width, area.height) * 0.15,
+    cx,
+    cy,
+    Math.max(area.width, area.height) * 0.65
+  );
+  radial.addColorStop(0, "rgba(0,0,0,0.12)");
+  radial.addColorStop(1, "rgba(0,0,0,0.45)");
+  ctx.fillStyle = radial;
+  ctx.fillRect(area.left, area.top, area.width, area.height);
+}
+
+function paintExportAura(ctx, box) {
+  if (stageAuraCanvas && stageAuraCanvas.width && stageAuraCanvas.height) {
+    const aura = stageAuraEl?.getBoundingClientRect() || box;
+    ctx.drawImage(stageAuraCanvas, aura.left, aura.top, aura.width, aura.height);
+    if (auraParticlesEnabled && stageCapture?.grainPattern) {
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.globalCompositeOperation = "overlay";
+      ctx.fillStyle = stageCapture.grainPattern;
+      ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
+      ctx.restore();
+    }
+    const vignette = ctx.createLinearGradient(0, aura.top, 0, aura.top + aura.height);
+    vignette.addColorStop(0, "rgba(0,0,0,0.38)");
+    vignette.addColorStop(0.16, "rgba(0,0,0,0)");
+    vignette.addColorStop(0.84, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.5)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
+    return;
+  }
+  ctx.fillStyle = "#07060b";
+  ctx.fillRect(box.left, box.top, box.width, box.height);
+}
+
+function paintExportCover(ctx, box) {
+  ctx.fillStyle = "#08060a";
+  ctx.fillRect(box.left, box.top, box.width, box.height);
+  paintExportDomImage(ctx, stageCoverBlur);
+  paintExportDomImage(ctx, stageCoverArt, { shadow: true });
+  paintExportVideoDim(ctx, box);
+}
+
+function paintExportImage(ctx, box) {
+  ctx.fillStyle = "#08060a";
+  ctx.fillRect(box.left, box.top, box.width, box.height);
+  paintExportDomImage(ctx, stageBackdropImg);
+  paintExportVideoDim(ctx, box);
+}
+
+function paintExportStageBackground(ctx, box) {
+  if (viewStage.classList.contains("has-aura")) {
+    paintExportAura(ctx, box);
+    return;
+  }
+  if (viewStage.classList.contains("has-cover")) {
+    paintExportCover(ctx, box);
+    return;
+  }
+  if (viewStage.classList.contains("has-image")) {
+    paintExportImage(ctx, box);
+    return;
+  }
+  ctx.fillStyle = "#07060b";
+  ctx.fillRect(box.left, box.top, box.width, box.height);
 }
 
 function paintExportFrame(options = {}) {
@@ -3424,35 +3653,13 @@ function paintExportFrame(options = {}) {
   ctx.imageSmoothingEnabled = true;
   if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
 
-  if (stageAuraEl && viewStage.classList.contains("has-aura")) {
-    const aura = stageAuraEl.getBoundingClientRect();
-    if (stageAuraCanvas && stageAuraCanvas.width && stageAuraCanvas.height) {
-      ctx.drawImage(stageAuraCanvas, aura.left, aura.top, aura.width, aura.height);
-    }
-    if (auraParticlesEnabled && stageCapture.grainPattern) {
-      ctx.save();
-      ctx.globalAlpha = 0.18;
-      ctx.globalCompositeOperation = "overlay";
-      ctx.fillStyle = stageCapture.grainPattern;
-      ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
-      ctx.restore();
-    }
-    const vignette = ctx.createLinearGradient(0, aura.top, 0, aura.top + aura.height);
-    vignette.addColorStop(0, "rgba(0,0,0,0.38)");
-    vignette.addColorStop(0.16, "rgba(0,0,0,0)");
-    vignette.addColorStop(0.84, "rgba(0,0,0,0)");
-    vignette.addColorStop(1, "rgba(0,0,0,0.5)");
-    ctx.fillStyle = vignette;
-    ctx.fillRect(aura.left, aura.top, aura.width, aura.height);
-  } else {
-    ctx.fillStyle = "#07060b";
-    ctx.fillRect(stage.left, stage.top, stage.width, stage.height);
-  }
+  paintExportStageBackground(ctx, stage);
 
   const afterBackground = performance.now();
   exportProfile.bg += afterBackground - startedAt;
   if (!options.skipText) {
     paintExportRestRing(ctx);
+    paintExportApproachBar(ctx);
     paintExportText(ctx, view);
     exportProfile.text += performance.now() - afterBackground;
   }
@@ -3645,7 +3852,16 @@ function recordStageUntilEnded() {
 async function uploadStageRecording(track, blob, filename) {
   const form = new FormData();
   form.append("file", blob, filename);
-  return api(`/api/video/upload?track_id=${encodeURIComponent(track.id)}`, {
+  const look = exportStageLook(track);
+  const query = new URLSearchParams({
+    track_id: track.id,
+    background: look.background,
+    lyrics_layout: look.lyrics_layout,
+    lyrics_size: look.lyrics_size,
+    aura_particles: look.aura_particles ? "true" : "false",
+    audio: look.audio,
+  });
+  return api(`/api/video/upload?${query}`, {
     method: "POST",
     body: form,
   });
@@ -3703,7 +3919,7 @@ function probeAudioSeconds(trackId) {
     };
     probe.addEventListener("loadedmetadata", done, { once: true });
     probe.addEventListener("error", done, { once: true });
-    probe.src = audioUrlFor(trackId, "original");
+    probe.src = audioUrlFor(trackId, exportAudioMode());
     setTimeout(done, 5000);
   });
 }
@@ -3718,13 +3934,58 @@ function exportSongSeconds(track, probedSeconds) {
   return Math.max(Number(track?.duration) || 0, probedSeconds || 0, lyricsEnd + 1.5, 1);
 }
 
+function waitForExportImage(img, timeoutMs = 4000) {
+  if (!img) return Promise.resolve();
+  if (img.complete && img.naturalWidth) {
+    return img.decode?.().catch(() => {}) || Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      img.removeEventListener("load", done);
+      img.removeEventListener("error", done);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    img.addEventListener(
+      "load",
+      () => {
+        clearTimeout(timer);
+        done();
+      },
+      { once: true }
+    );
+    img.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        done();
+      },
+      { once: true }
+    );
+  });
+}
+
+async function applyExportStageLook(track) {
+  exportLookTrack = track;
+  setStageCover(track.id);
+  setStageBackdrop(track);
+  const mode = exportStageBgMode(track);
+  setStageBgMode(mode, { persist: false });
+  applyVideoModeButtons();
+  const waiting = [];
+  if (mode === "cover") waiting.push(stageCoverArt, stageCoverBlur);
+  if (mode === "image") waiting.push(stageBackdropImg);
+  await Promise.all(waiting.map((img) => waitForExportImage(img)));
+  return mode;
+}
+
 /** Lay the stage out offscreen: no audio, no playback, nothing for the user to watch. */
 async function openStageForExport(track) {
   stopAlignPoll();
   stopStemPoll();
   clearStageOutro();
   stopPreview();
-  setStageBgMode("aura", { persist: false });
+  await applyExportStageLook(track);
   // Keep the library on screen so more videos can be queued. The stage is
   // parked offscreen via body.is-exporting-video.
   // viewMenu.classList.add("hidden");
@@ -3743,8 +4004,10 @@ async function openStageForExport(track) {
   renderLyrics(payload);
 
   // Same seeding as the live stage, then take over the clock ourselves.
-  startAuraEngine();
-  stopAuraEngine();
+  if (exportStageBgMode(track) === "aura") {
+    startAuraEngine();
+    stopAuraEngine();
+  }
   await document.fonts.ready.catch(() => {});
   await ensureExportBrandLogo();
   return payload;
@@ -3753,12 +4016,19 @@ async function openStageForExport(track) {
 function closeStageForExport(previousBgMode) {
   exportClock = null;
   exportTimers.length = 0;
+  exportLookTrack = null;
   clearLineRoll();
   resumeStageAnimations();
   if (!currentId) viewStage.classList.add("hidden");
   detachStageCapture();
   // if (!currentId) viewMenu.classList.remove("hidden");
   if (previousBgMode) setStageBgMode(previousBgMode, { persist: false });
+  const current = findTrackById(currentId);
+  if (current) {
+    setStageCover(current.id);
+    setStageBackdrop(current);
+  }
+  applyVideoModeButtons();
   syncAuraEngine();
 }
 
@@ -3856,7 +4126,9 @@ async function renderStageOffline(track, config, onProgress) {
       const markKaraoke = performance.now();
       if (!skipText) stepStageAnimations(exportClock * 1000);
       const markAnim = performance.now();
-      drawAuraFrame(auraT0 + (staticAura ? 0 : fileTime * 1000));
+      if (viewStage.classList.contains("has-aura")) {
+        drawAuraFrame(auraT0 + (staticAura ? 0 : fileTime * 1000));
+      }
       const markAura = performance.now();
       paintExportFrame({ skipText });
       if (frame < introFrames) {
@@ -3943,7 +4215,10 @@ async function buildKaraokeVideo(track, label) {
         config = software;
       }
     }
-    setExportVideoStatus(`${label} · muntant l’àudio original…`, "running");
+    setExportVideoStatus(
+      `${label} · muntant l’àudio ${exportAudioMode() === "instrumental" ? "karaoke" : "original"}…`,
+      "running"
+    );
     setExportCaptureBadge("Muntant l’àudio…");
     return await uploadStageRecording(track, blob, "stage.h264");
   } finally {
@@ -3955,9 +4230,8 @@ async function captureAndMuxStage(track) {
   const prevAudio = audioMode;
   const prevBg = stageBgMode;
   try {
-    await setAudioMode("original", { persist: false });
-    setStageBgMode("aura", { persist: false });
     await openSong(track.id, { autoplay: false });
+    await applyExportStageLook(track);
     if (currentId !== track.id) throw new Error("S’ha sortit de l’escenari");
     if (!lyricLines.length) throw new Error("No hi ha lletra per al vídeo");
     setExportVideoStatus(`${trackLabel(track)} · esperant la sincronització…`, "running");
@@ -3987,10 +4261,14 @@ async function captureAndMuxStage(track) {
     updatePlayButton();
     const blob = await blobPromise;
     setExportCaptureBadge("Muntant l’àudio…");
-    setExportVideoStatus(`${trackLabel(track)} · muntant l’àudio original…`, "running");
+    setExportVideoStatus(
+      `${trackLabel(track)} · muntant l’àudio ${exportAudioMode() === "instrumental" ? "karaoke" : "original"}…`,
+      "running"
+    );
     const ext = (mime || blob.type || "").includes("mp4") ? "mp4" : "webm";
     return await uploadStageRecording(track, blob, `stage.${ext}`);
   } finally {
+    exportLookTrack = null;
     const stillOnStage = Boolean(viewStage && !viewStage.classList.contains("hidden"));
     detachStageCapture();
     try {
@@ -4009,7 +4287,7 @@ function exportQueuePrefix() {
   return `Vídeo ${videoQueueDone + 1}/${total} · `;
 }
 
-async function exportKaraokeVideo(track) {
+async function exportKaraokeVideo(track, regenerate = false) {
   const label = `${exportQueuePrefix()}${trackLabel(track)}`;
   setExportVideoStatus(`${label} · comprovant la sincronització…`, "running");
   const job = await api("/api/video", {
@@ -4018,7 +4296,8 @@ async function exportKaraokeVideo(track) {
     body: JSON.stringify({
       track_id: track.id,
       language: "ca",
-      lyrics_layout: lyricsLayout === "dual" ? "dual" : "stack",
+      ...exportStageLook(track),
+      regenerate: Boolean(regenerate),
     }),
   });
   if (job.status === "unavailable") {
@@ -4049,11 +4328,13 @@ async function runVideoQueue() {
   while (videoQueue.length) {
     const track = videoQueue.shift();
     videoQueuedIds.delete(track.id);
+    const regenerate = videoQueueForce.has(track.id);
+    videoQueueForce.delete(track.id);
     exportAborted = false;
     exportVideoTrackId = track.id;
     updateExportVideoButton();
     try {
-      await exportKaraokeVideo(track);
+      await exportKaraokeVideo(track, regenerate);
     } catch (err) {
       setExportVideoStatus(
         `${trackLabel(track)} · ${err.message || "error creant el vídeo"}`,
@@ -4073,11 +4354,145 @@ function cancelVideoQueue() {
   exportAborted = true;
   videoQueue.length = 0;
   videoQueuedIds.clear();
+  videoQueueForce.clear();
   if (stageCapture && !stageCapture.aborted) {
     abortStageCapture("S’ha aturat el vídeo");
   }
   setExportVideoStatus("S’ha aturat la creació de vídeos", "error");
   updateExportVideoButton();
+}
+
+function isExportVideoModalOpen() {
+  return Boolean(
+    exportVideoModal && !exportVideoModal.classList.contains("hidden") && !exportVideoModal.hidden
+  );
+}
+
+function applyExportModalButtons() {
+  if (!exportVideoModal) return;
+  const track = exportDialogTrack || selectedTrack();
+  const imageReady = itemHasBackdrop(track);
+  const instrumentalOn = audioMode === "instrumental";
+  exportVideoModal.querySelectorAll("[data-export-audio]").forEach((btn) => {
+    const on = btn.getAttribute("data-export-audio") === (instrumentalOn ? "instrumental" : "original");
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    if (btn.getAttribute("data-export-audio") === "instrumental") {
+      btn.disabled = !stemsAvailable;
+      btn.title = stemsAvailable ? "" : "Encara no hi ha pistes instrumentals";
+    }
+  });
+  exportVideoModal.querySelectorAll("[data-export-bg]").forEach((btn) => {
+    const mode = btn.getAttribute("data-export-bg");
+    const on = stageBgMode === mode;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    if (mode === "image") {
+      btn.disabled = !imageReady;
+      btn.title = imageReady ? "" : "Aquest àlbum encara no té una imatge de fons";
+    }
+  });
+  exportVideoModal.querySelectorAll("[data-export-layout]").forEach((btn) => {
+    const on = btn.getAttribute("data-export-layout") === lyricsLayout;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  exportVideoModal.querySelectorAll("[data-export-size]").forEach((btn) => {
+    const on = btn.getAttribute("data-export-size") === lyricsSize;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  exportVideoModal.querySelectorAll("[data-export-particles]").forEach((btn) => {
+    const on = btn.getAttribute("data-export-particles") === (auraParticlesEnabled ? "1" : "0");
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  exportVideoModal.querySelectorAll("[data-export-regen]").forEach((btn) => {
+    const on = btn.getAttribute("data-export-regen") === (exportRegenerate ? "1" : "0");
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  if (exportVideoBgHint) {
+    exportVideoBgHint.hidden = stageBgMode !== "video";
+    exportVideoBgHint.classList.toggle("hidden", stageBgMode !== "video");
+  }
+  if (exportVideoAuraBlock) {
+    exportVideoAuraBlock.hidden = stageBgMode !== "aura";
+    exportVideoAuraBlock.classList.toggle("hidden", stageBgMode !== "aura");
+  }
+}
+
+function openExportVideoModal(tracks) {
+  const list = (Array.isArray(tracks) ? tracks : [tracks]).filter(Boolean);
+  if (!exportVideoModal || !list.length) return;
+  exportDialogTracks = list;
+  exportDialogTrack = list[0];
+  exportRegenerate = false;
+  const many = list.length > 1;
+  if (exportVideoTitle) exportVideoTitle.textContent = many ? "Exportar vídeos" : "Desar vídeo";
+  if (exportVideoModalTrack) {
+    exportVideoModalTrack.textContent = many ? `${list.length} cançons` : trackLabel(list[0]);
+  }
+  if (exportVideoConfirmBtn) {
+    exportVideoConfirmBtn.textContent = many ? "Crear vídeos" : "Crear vídeo";
+  }
+  applyExportModalButtons();
+  exportVideoModal.hidden = false;
+  exportVideoModal.classList.remove("hidden");
+  (exportVideoConfirmBtn || exportVideoModal).focus();
+}
+
+function closeExportVideoModal() {
+  if (!exportVideoModal) return;
+  exportVideoModal.classList.add("hidden");
+  exportVideoModal.hidden = true;
+  exportDialogTrack = null;
+  exportDialogTracks = [];
+  if (exportVideoTitle) exportVideoTitle.textContent = "Desar vídeo";
+  if (exportVideoConfirmBtn) exportVideoConfirmBtn.textContent = "Crear vídeo";
+}
+
+function canExportKaraokeVideo(track) {
+  return Boolean(track && !(track.has_lyrics === false && !track.lyrics_pending));
+}
+
+function queueKaraokeVideos(tracks) {
+  const added = [];
+  for (const track of tracks || []) {
+    if (!canExportKaraokeVideo(track)) continue;
+    if (exportVideoTrackId === track.id) continue;
+    if (videoQueuedIds.has(track.id)) {
+      if (exportRegenerate) videoQueueForce.add(track.id);
+      else videoQueueForce.delete(track.id);
+      continue;
+    }
+    videoQueue.push(track);
+    videoQueuedIds.add(track.id);
+    if (exportRegenerate) videoQueueForce.add(track.id);
+    else videoQueueForce.delete(track.id);
+    added.push(track);
+  }
+  updateExportVideoButton();
+  if (!added.length) {
+    if (exportVideoBusy) {
+      setExportVideoStatus("Les cançons ja són a la cua", "running");
+    }
+    return;
+  }
+  if (exportVideoBusy) {
+    setExportVideoStatus(
+      added.length === 1
+        ? `${trackLabel(added[0])} · a la cua (${videoQueue.length} pendents)`
+        : `${added.length} cançons a la cua (${videoQueue.length} pendents)`,
+      "running"
+    );
+    return;
+  }
+  runVideoQueue();
+}
+
+function queueKaraokeVideo(track) {
+  queueKaraokeVideos([track]);
 }
 
 function exportSelectedKaraokeVideo() {
@@ -4092,21 +4507,16 @@ function exportSelectedKaraokeVideo() {
     videoQueuedIds.delete(track.id);
     const index = videoQueue.findIndex((item) => item.id === track.id);
     if (index >= 0) videoQueue.splice(index, 1);
+    videoQueueForce.delete(track.id);
     setExportVideoStatus(`${trackLabel(track)} · fora de la cua`, "running");
     updateExportVideoButton();
     return;
   }
-  videoQueue.push(track);
-  videoQueuedIds.add(track.id);
-  updateExportVideoButton();
   if (exportVideoBusy) {
-    setExportVideoStatus(
-      `${trackLabel(track)} · a la cua (${videoQueue.length} pendents)`,
-      "running"
-    );
+    queueKaraokeVideo(track);
     return;
   }
-  runVideoQueue();
+  openExportVideoModal(track);
 }
 
 function updatePasteLyricsButton() {
@@ -5368,6 +5778,7 @@ function restCountHoldStart(index, t) {
 
 function pulseRestCount() {
   if (!restCountNumEl || prefersReducedMotion()) return;
+  if (exportClock !== null || document.body.classList.contains("is-exporting-video")) return;
   restCountNumEl.classList.remove("is-tick");
   void restCountNumEl.offsetWidth;
   restCountNumEl.classList.add("is-tick");
@@ -6068,11 +6479,9 @@ function updateLibraryMeta(data) {
   }
   applyStemsAvailability(data);
   applyCoversRefreshAvailability(data);
-  const cacheSectionOpen =
-    isSettingsOpen() &&
-    settingsModal?.querySelector(".settings-nav-btn.is-active")?.dataset?.settingsSection ===
-      "cache";
-  if (cacheSectionOpen) fillCacheSongSelect();
+  const openSection = activeSettingsSection();
+  if (openSection === "cache") fillCacheSongSelect();
+  if (openSection === "export") renderExportTable();
 
   if (probe.running && !syncRunning) {
     const done = probe.done || 0;
@@ -6659,6 +7068,10 @@ function isSettingsOpen() {
   return settingsModal && !settingsModal.classList.contains("hidden") && !settingsModal.hidden;
 }
 
+function activeSettingsSection() {
+  return settingsModal?.querySelector(".settings-nav-btn.is-active")?.dataset?.settingsSection || "";
+}
+
 function showSettingsSection(sectionId) {
   const id = sectionId || "general";
   settingsModal?.querySelectorAll(".settings-nav-btn").forEach((btn) => {
@@ -6671,6 +7084,7 @@ function showSettingsSection(sectionId) {
     fillCacheSongSelect();
     refreshSelectedCacheStatus();
   }
+  if (id === "export") renderExportTable();
 }
 
 function allLibraryTracks() {
@@ -6690,6 +7104,200 @@ function allLibraryTracks() {
       { sensitivity: "base" }
     )
   );
+}
+
+function exportTrackStatus(track) {
+  if (!track || (track.has_lyrics === false && !track.lyrics_pending)) return "none";
+  if (track.lyrics_pending) return "pending";
+  if (track.whisper_aligned) return "synced";
+  return "lyrics";
+}
+
+function exportTrackStatusLabel(status) {
+  if (status === "synced") return "Sincronitzada";
+  if (status === "pending") return "Pendent";
+  if (status === "lyrics") return "Amb lletra";
+  return "Sense lletra";
+}
+
+function exportTrackStatusRank(status) {
+  if (status === "synced") return 0;
+  if (status === "lyrics") return 1;
+  if (status === "pending") return 2;
+  return 3;
+}
+
+function exportTableQuery() {
+  return (exportTableSearch?.value || "").trim().toLowerCase();
+}
+
+function exportTableVisibleTracks() {
+  const query = exportTableQuery();
+  const items = allLibraryTracks().filter((track) => {
+    if (!query) return true;
+    const hay = `${track.artist || ""} ${track.title || ""} ${track.album || ""}`.toLowerCase();
+    return hay.includes(query);
+  });
+  const dir = exportTableSortDir === "desc" ? -1 : 1;
+  items.sort((a, b) => {
+    let cmp = 0;
+    if (exportTableSortKey === "title") {
+      cmp = (a.title || "").localeCompare(b.title || "", "ca", { sensitivity: "base" });
+    } else if (exportTableSortKey === "album") {
+      cmp = foldAlbumName(a.album).localeCompare(foldAlbumName(b.album), "ca");
+    } else if (exportTableSortKey === "status") {
+      cmp = exportTrackStatusRank(exportTrackStatus(a)) - exportTrackStatusRank(exportTrackStatus(b));
+    } else if (exportTableSortKey === "rating") {
+      cmp = clampRating(a.rating) - clampRating(b.rating);
+    } else {
+      cmp = foldAlbumName(a.artist).localeCompare(foldAlbumName(b.artist), "ca");
+    }
+    if (cmp) return cmp * dir;
+    return `${a.artist || ""} ${a.title || ""}`.localeCompare(
+      `${b.artist || ""} ${b.title || ""}`,
+      "ca",
+      { sensitivity: "base" }
+    );
+  });
+  return items;
+}
+
+function selectedExportTableTracks() {
+  const seen = new Set();
+  const out = [];
+  for (const track of exportTableVisibleTracks()) {
+    if (!exportTableSelected.has(track.id)) continue;
+    seen.add(track.id);
+    out.push(track);
+  }
+  for (const track of allLibraryTracks()) {
+    if (!exportTableSelected.has(track.id) || seen.has(track.id)) continue;
+    out.push(track);
+  }
+  return out;
+}
+
+function updateExportTableChrome(visible) {
+  const rows = visible || [];
+  const selected = rows.filter((track) => exportTableSelected.has(track.id)).length;
+  const totalSelected = exportTableSelected.size;
+  if (exportTableMeta) {
+    exportTableMeta.textContent =
+      totalSelected === 1 ? "1 seleccionada" : `${totalSelected} seleccionades`;
+  }
+  if (exportTableBtn) {
+    exportTableBtn.disabled = !totalSelected;
+  }
+  if (exportTableSelectAll) {
+    exportTableSelectAll.checked = Boolean(rows.length && selected === rows.length);
+    exportTableSelectAll.indeterminate = selected > 0 && selected < rows.length;
+  }
+  settingsModal?.querySelectorAll("[data-export-sort]").forEach((btn) => {
+    const active = btn.getAttribute("data-export-sort") === exportTableSortKey;
+    btn.classList.toggle("is-active", active);
+    btn.classList.toggle("is-desc", active && exportTableSortDir === "desc");
+  });
+}
+
+function renderExportTable() {
+  if (!exportTableBody) return;
+  const known = new Set(allLibraryTracks().map((track) => track.id));
+  for (const id of [...exportTableSelected]) {
+    if (!known.has(id)) exportTableSelected.delete(id);
+  }
+  const visible = exportTableVisibleTracks();
+  exportTableBody.replaceChildren();
+  for (const track of visible) {
+    const status = exportTrackStatus(track);
+    const selected = exportTableSelected.has(track.id);
+    const row = document.createElement("tr");
+    row.dataset.trackId = track.id;
+    row.classList.toggle("is-selected", selected);
+    row.classList.toggle("is-disabled", status === "none");
+    const checkCell = document.createElement("td");
+    checkCell.className = "export-table-check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = selected;
+    box.setAttribute("aria-label", `Seleccionar ${trackLabel(track)}`);
+    checkCell.appendChild(box);
+    const artist = document.createElement("td");
+    artist.textContent = track.artist || "Desconegut";
+    const title = document.createElement("td");
+    title.textContent = track.title || track.id;
+    const album = document.createElement("td");
+    album.textContent = track.album || "—";
+    const rating = clampRating(track.rating);
+    const ratingCell = document.createElement("td");
+    ratingCell.className = "export-table-rating";
+    ratingCell.setAttribute("aria-label", ratingLabel(rating));
+    const stars = document.createElement("span");
+    stars.className = "export-table-stars";
+    stars.setAttribute("aria-hidden", "true");
+    for (let n = 1; n <= 5; n += 1) {
+      const star = document.createElement("span");
+      if (n <= rating) star.className = "is-on";
+      star.innerHTML = ICON_STAR;
+      stars.appendChild(star);
+    }
+    ratingCell.appendChild(stars);
+    const statusCell = document.createElement("td");
+    statusCell.className = `export-table-status is-${status}`;
+    statusCell.textContent = exportTrackStatusLabel(status);
+    row.append(checkCell, artist, title, album, ratingCell, statusCell);
+    exportTableBody.appendChild(row);
+  }
+  updateExportTableChrome(visible);
+}
+
+function setExportTableSelected(trackId, selected) {
+  if (!trackId) return;
+  if (selected) exportTableSelected.add(trackId);
+  else exportTableSelected.delete(trackId);
+}
+
+function toggleExportTableSort(key) {
+  if (!key) return;
+  if (exportTableSortKey === key) {
+    exportTableSortDir = exportTableSortDir === "asc" ? "desc" : "asc";
+  } else {
+    exportTableSortKey = key;
+    exportTableSortDir = key === "rating" ? "desc" : "asc";
+  }
+  renderExportTable();
+}
+
+function toggleExportTableSelectAll(checked) {
+  for (const track of exportTableVisibleTracks()) {
+    setExportTableSelected(track.id, checked);
+  }
+  renderExportTable();
+}
+
+function openExportTableModal() {
+  const selected = selectedExportTableTracks();
+  const exportable = selected.filter(canExportKaraokeVideo);
+  const skipped = selected.length - exportable.length;
+  if (!exportable.length) {
+    setSettingsStatus(
+      exportTableStatus,
+      selected.length
+        ? "Cap de les cançons seleccionades té lletra per exportar"
+        : "Marca almenys una cançó",
+      "error"
+    );
+    return;
+  }
+  if (skipped) {
+    setSettingsStatus(
+      exportTableStatus,
+      `S’ometen ${skipped} cançons sense lletra`,
+      "running"
+    );
+  } else {
+    setSettingsStatus(exportTableStatus, "", "");
+  }
+  openExportVideoModal(exportable);
 }
 
 function fillCacheSongSelect() {
@@ -7065,6 +7673,27 @@ cacheSongSearch?.addEventListener("input", () => {
   fillCacheSongSelect();
   refreshSelectedCacheStatus();
 });
+exportTableSearch?.addEventListener("input", () => renderExportTable());
+exportTableSelectAll?.addEventListener("change", () => {
+  toggleExportTableSelectAll(exportTableSelectAll.checked);
+});
+exportTableBtn?.addEventListener("click", () => openExportTableModal());
+document.getElementById("exportTable")?.addEventListener("click", (event) => {
+  const sortBtn = event.target?.closest?.("[data-export-sort]");
+  if (sortBtn) {
+    toggleExportTableSort(sortBtn.getAttribute("data-export-sort"));
+    return;
+  }
+  const row = event.target?.closest?.("tr[data-track-id]");
+  if (!row || !exportTableBody?.contains(row)) return;
+  const fromBox = event.target?.closest?.("input[type='checkbox']");
+  const next = fromBox ? fromBox.checked : !exportTableSelected.has(row.dataset.trackId);
+  setExportTableSelected(row.dataset.trackId, next);
+  row.classList.toggle("is-selected", next);
+  const box = row.querySelector("input[type='checkbox']");
+  if (box) box.checked = next;
+  updateExportTableChrome(exportTableVisibleTracks());
+});
 cacheSongSelect?.addEventListener("change", () => refreshSelectedCacheStatus());
 cacheClearBtn?.addEventListener("click", () => runCacheAction("clear"));
 cacheResyncBtn?.addEventListener("click", () => runCacheAction("resync"));
@@ -7143,6 +7772,58 @@ lyricsPasteDeleteBtn?.addEventListener("click", () => {
 exportVideoBtn?.addEventListener("click", () => {
   exportSelectedKaraokeVideo();
 });
+exportVideoModal?.addEventListener("click", (event) => {
+  if (event.target?.hasAttribute?.("data-export-video-close")) {
+    closeExportVideoModal();
+    return;
+  }
+  const audio = event.target?.closest?.("[data-export-audio]");
+  if (audio) {
+    setAudioMode(audio.getAttribute("data-export-audio")).catch(() => {});
+    applyExportModalButtons();
+    return;
+  }
+  const bg = event.target?.closest?.("[data-export-bg]");
+  if (bg && !bg.disabled) {
+    setStageBgMode(bg.getAttribute("data-export-bg"));
+    applyExportModalButtons();
+    return;
+  }
+  const layout = event.target?.closest?.("[data-export-layout]");
+  if (layout) {
+    setLyricsLayout(layout.getAttribute("data-export-layout"));
+    applyExportModalButtons();
+    return;
+  }
+  const size = event.target?.closest?.("[data-export-size]");
+  if (size) {
+    setLyricsSize(size.getAttribute("data-export-size"));
+    applyExportModalButtons();
+    return;
+  }
+  const particles = event.target?.closest?.("[data-export-particles]");
+  if (particles) {
+    setAuraParticlesEnabled(particles.getAttribute("data-export-particles") === "1");
+    applyExportModalButtons();
+    return;
+  }
+  const regen = event.target?.closest?.("[data-export-regen]");
+  if (regen) {
+    exportRegenerate = regen.getAttribute("data-export-regen") === "1";
+    applyExportModalButtons();
+  }
+});
+exportVideoCloseBtn?.addEventListener("click", () => closeExportVideoModal());
+exportVideoCancelBtn?.addEventListener("click", () => closeExportVideoModal());
+exportVideoConfirmBtn?.addEventListener("click", () => {
+  const tracks = exportDialogTracks.length
+    ? exportDialogTracks.slice()
+    : exportDialogTrack
+      ? [exportDialogTrack]
+      : [];
+  closeExportVideoModal();
+  queueKaraokeVideos(tracks);
+});
 // exportCancelBtn?.addEventListener("click", () => {
 //   cancelVideoQueue();
 // });
@@ -7164,6 +7845,13 @@ coverTrack.addEventListener(
 window.addEventListener(
   "keydown",
   (event) => {
+    if (isExportVideoModalOpen()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeExportVideoModal();
+      }
+      return;
+    }
     if (isLyricsPasteOpen()) {
       if (event.key === "Escape") {
         event.preventDefault();

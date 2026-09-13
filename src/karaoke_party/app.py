@@ -92,10 +92,12 @@ from .stems import (
 from .track_cache import CACHE_SCOPES as _CACHE_SCOPES
 from .video import (
     VideoRenderError,
+    choose_audio,
     download_filename,
     karaoke_is_current,
     mark_karaoke_exported,
     mux_stage_recording,
+    normalize_stage_look,
 )
 
 
@@ -202,7 +204,7 @@ _youtube_bulk_state: dict = {
 _youtube_bulk_thread: threading.Thread | None = None
 _video_jobs: dict[str, dict] = {}
 _video_lock = threading.Lock()
-_video_queue: list[tuple[str, TrackInfo, str, str]] = []
+_video_queue: list[tuple[str, TrackInfo, str, str, dict]] = []
 _video_worker_started = False
 _video_wake = threading.Event()
 
@@ -224,6 +226,11 @@ class VideoBody(BaseModel):
     track_id: str
     language: str = "ca"
     lyrics_layout: str = "stack"
+    background: str = "aura"
+    lyrics_size: str = "normal"
+    aura_particles: bool = True
+    audio: str = "original"
+    regenerate: bool = False
 
 
 class ResyncCoverBody(BaseModel):
@@ -631,11 +638,21 @@ def _wait_for_alignment(
     raise VideoRenderError("La sincronització ha trigat massa")
 
 
-def _run_video_job(job_id: str, track: TrackInfo, language: str, layout: str) -> None:
+def _video_look_from_job(job: dict | None, layout: str = "stack") -> dict:
+    stored = job.get("_look") if isinstance(job, dict) else None
+    if isinstance(stored, dict):
+        return normalize_stage_look(**stored)
+    return normalize_stage_look(lyrics_layout=layout)
+
+
+def _run_video_job(job_id: str, track: TrackInfo, language: str, layout: str, look: dict) -> None:
     key = cache_key(track.artist, track.title, track.duration)
     filename = download_filename(track.artist, track.title)
+    look = normalize_stage_look(**look)
+    with _video_lock:
+        force = bool((_video_jobs.get(job_id) or {}).get("_force"))
     try:
-        existing = karaoke_is_current(aligned_cache_dir(), key)
+        existing = None if force else karaoke_is_current(aligned_cache_dir(), key, look)
         if existing is not None and load_aligned_cached(aligned_cache_dir(), key) is not None:
             _set_video_job(
                 job_id,
@@ -663,7 +680,7 @@ def _run_video_job(job_id: str, track: TrackInfo, language: str, layout: str) ->
         if not payload.lines:
             raise VideoRenderError("No hi ha lletra per al vídeo")
 
-        existing = karaoke_is_current(aligned_cache_dir(), key)
+        existing = None if force else karaoke_is_current(aligned_cache_dir(), key, look)
         if existing is not None:
             _set_video_job(
                 job_id,
@@ -681,6 +698,7 @@ def _run_video_job(job_id: str, track: TrackInfo, language: str, layout: str) ->
             phase="capture",
             progress=1.0,
             filename=filename,
+            _look=look,
         )
     except VideoRenderError as exc:
         _set_video_job(job_id, status="error", error=str(exc), progress=0.0, filename=filename)
@@ -696,8 +714,8 @@ def _video_worker_loop() -> None:
                 if not _video_queue:
                     _video_wake.clear()
                     break
-                job_id, track, language, layout = _video_queue.pop(0)
-            _run_video_job(job_id, track, language, layout)
+                job_id, track, language, layout, look = _video_queue.pop(0)
+            _run_video_job(job_id, track, language, layout, look)
 
 
 def _ensure_video_worker() -> None:
@@ -710,8 +728,11 @@ def _ensure_video_worker() -> None:
     thread.start()
 
 
-def _enqueue_video_job(job_id: str, track: TrackInfo, language: str, layout: str) -> None:
+def _enqueue_video_job(
+    job_id: str, track: TrackInfo, language: str, layout: str, look: dict, force: bool = False
+) -> None:
     _ensure_video_worker()
+    look = normalize_stage_look(**look)
     with _video_lock:
         _video_jobs[job_id] = {
             "status": "queued",
@@ -719,8 +740,10 @@ def _enqueue_video_job(job_id: str, track: TrackInfo, language: str, layout: str
             "phase": "queued",
             "track_id": track.id,
             "filename": download_filename(track.artist, track.title),
+            "_look": look,
+            "_force": bool(force),
         }
-        _video_queue.append((job_id, track, language, layout))
+        _video_queue.append((job_id, track, language, layout, look))
     _video_wake.set()
 
 
@@ -2126,6 +2149,13 @@ def start_video(body: VideoBody) -> dict:
     track = _resolve_track(body.track_id)
     layout = "dual" if body.lyrics_layout == "dual" else "stack"
     language = body.language or "ca"
+    look = normalize_stage_look(
+        background=body.background,
+        lyrics_layout=layout,
+        lyrics_size=body.lyrics_size,
+        aura_particles=body.aura_particles,
+        audio=body.audio,
+    )
     key = cache_key(track.artist, track.title, track.duration)
 
     if not ffmpeg_available():
@@ -2135,7 +2165,7 @@ def start_video(body: VideoBody) -> dict:
             "error": "Cal ffmpeg per crear el vídeo karaoke",
         }
 
-    existing = karaoke_is_current(aligned_cache_dir(), key)
+    existing = None if body.regenerate else karaoke_is_current(aligned_cache_dir(), key, look)
     if existing is not None and load_aligned_cached(aligned_cache_dir(), key) is not None:
         job_id = uuid.uuid4().hex
         stored = {
@@ -2145,20 +2175,25 @@ def start_video(body: VideoBody) -> dict:
             "track_id": track.id,
             "filename": download_filename(track.artist, track.title),
             "_path": str(existing),
+            "_look": look,
         }
         with _video_lock:
             _video_jobs[job_id] = stored
         return _public_video_job(job_id, stored)
 
-    with _video_lock:
-        for existing_id, job in _video_jobs.items():
-            if job.get("track_id") != track.id:
-                continue
-            if job.get("status") in {"queued", "running", "ready"}:
+    if not body.regenerate:
+        with _video_lock:
+            for existing_id, job in _video_jobs.items():
+                if job.get("track_id") != track.id:
+                    continue
+                if job.get("status") not in {"queued", "running", "ready"}:
+                    continue
+                if _video_look_from_job(job, layout) != look:
+                    continue
                 return _public_video_job(existing_id, dict(job))
 
     job_id = uuid.uuid4().hex
-    _enqueue_video_job(job_id, track, language, layout)
+    _enqueue_video_job(job_id, track, language, layout, look, force=body.regenerate)
     with _video_lock:
         job = dict(_video_jobs[job_id])
     return _public_video_job(job_id, job)
@@ -2192,11 +2227,23 @@ def video_file(job_id: str):
 async def upload_stage_video(
     track_id: str = Query(...),
     file: UploadFile = File(...),
+    background: str = Query("aura"),
+    lyrics_layout: str = Query("stack"),
+    lyrics_size: str = Query("normal"),
+    aura_particles: bool = Query(True),
+    audio: str = Query("original"),
 ) -> dict:
-    """Accept a browser capture of the live stage and mux it with original audio."""
+    """Accept a browser capture of the live stage and mux it with the chosen audio."""
     from .track_cache import karaoke_path
 
     track = _resolve_track(track_id)
+    look = normalize_stage_look(
+        background=background,
+        lyrics_layout=lyrics_layout,
+        lyrics_size=lyrics_size,
+        aura_particles=aura_particles,
+        audio=audio,
+    )
     key = cache_key(track.artist, track.title, track.duration)
     if load_aligned_cached(aligned_cache_dir(), key) is None:
         raise HTTPException(status_code=409, detail="Cal sincronitzar la lletra abans de gravar")
@@ -2216,11 +2263,16 @@ async def upload_stage_video(
             raise HTTPException(status_code=400, detail="La gravació de l’escenari és buida")
         mux_stage_recording(
             video_path=rec_path,
-            audio_path=Path(track.path),
+            audio_path=choose_audio(
+                Path(track.path),
+                aligned_cache_dir(),
+                key,
+                look["audio"],
+            ),
             output_path=output,
             duration=float(track.duration) or 0.0,
         )
-        mark_karaoke_exported(aligned_cache_dir(), key)
+        mark_karaoke_exported(aligned_cache_dir(), key, look)
     except HTTPException:
         raise
     except VideoRenderError as exc:
@@ -2240,6 +2292,7 @@ async def upload_stage_video(
         "track_id": track.id,
         "filename": filename,
         "_path": str(output),
+        "_look": look,
     }
     with _video_lock:
         _video_jobs[job_id] = stored

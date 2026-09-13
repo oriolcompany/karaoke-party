@@ -1,6 +1,6 @@
 """Mux a browser capture of the live karaoke stage with original audio.
 
-The YouTube iframe cannot be recorded, and album art is never used.
+The YouTube iframe cannot be painted into the MP4; other stage looks can.
 ffmpeg is required to mux the stage recording into an MP4.
 """
 
@@ -23,6 +23,7 @@ from .syllables import expand_syllable_tokens, has_syllable_glue
 from .track_cache import (
     aligned_path,
     ensure_track_dir,
+    instrumental_path,
     karaoke_meta_path,
     karaoke_path,
 )
@@ -30,7 +31,10 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 17
+KARAOKE_RENDER_VERSION = 18
+STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
+LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
+AUDIO_MODES = frozenset({"original", "instrumental"})
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
 # YouTube bumpers painted by the browser encoder. Keep in sync with app.js.
@@ -63,7 +67,32 @@ def download_filename(artist: str, title: str) -> str:
     return f"{safe}.mp4"
 
 
-def karaoke_is_current(tracks_root: Path, key: str) -> Path | None:
+def normalize_stage_look(
+    *,
+    background: str = "aura",
+    lyrics_layout: str = "stack",
+    lyrics_size: str = "normal",
+    aura_particles: bool = True,
+    audio: str = "original",
+    **_unused,
+) -> dict:
+    bg = str(background or "aura").strip().lower()
+    size = str(lyrics_size or "normal").strip().lower()
+    mix = str(audio or "original").strip().lower()
+    return {
+        "background": bg if bg in STAGE_BG_MODES else "aura",
+        "lyrics_layout": "dual" if str(lyrics_layout) == "dual" else "stack",
+        "lyrics_size": size if size in LYRICS_SIZES else "normal",
+        "aura_particles": bool(aura_particles),
+        "audio": mix if mix in AUDIO_MODES else "original",
+    }
+
+
+def karaoke_is_current(
+    tracks_root: Path,
+    key: str,
+    look: dict | None = None,
+) -> Path | None:
     """Return the cached MP4 when it matches the current alignment and look."""
     path = karaoke_path(tracks_root, key)
     if not path.is_file() or path.stat().st_size <= 0:
@@ -76,9 +105,23 @@ def karaoke_is_current(tracks_root: Path, key: str) -> Path | None:
     meta = _read_karaoke_meta(tracks_root, key)
     if int(meta.get("version") or 0) != KARAOKE_RENDER_VERSION:
         return None
-    if str(meta.get("background") or "") != choose_background(tracks_root, key):
+    expected = normalize_stage_look(
+        **(
+            look
+            or {
+                "background": choose_background(tracks_root, key),
+            }
+        )
+    )
+    if str(meta.get("background") or "") != expected["background"]:
         return None
-    if str(meta.get("audio") or "") != "original":
+    if str(meta.get("lyrics_layout") or "stack") != expected["lyrics_layout"]:
+        return None
+    if str(meta.get("lyrics_size") or "normal") != expected["lyrics_size"]:
+        return None
+    if bool(meta.get("aura_particles", True)) != bool(expected["aura_particles"]):
+        return None
+    if str(meta.get("audio") or "original") != expected["audio"]:
         return None
     if str(meta.get("source") or "") != "stage":
         return None
@@ -86,7 +129,7 @@ def karaoke_is_current(tracks_root: Path, key: str) -> Path | None:
 
 
 def choose_background(tracks_root: Path, key: str) -> str:
-    """Always Aura — covers are never used in the exported MP4."""
+    """Default look for the unused ffmpeg renderer."""
     del tracks_root, key
     return "aura"
 
@@ -102,15 +145,22 @@ def _read_karaoke_meta(tracks_root: Path, key: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write_karaoke_meta(tracks_root: Path, key: str, background: str) -> None:
+def _write_karaoke_meta(tracks_root: Path, key: str, look: dict | str) -> None:
+    if isinstance(look, str):
+        payload = normalize_stage_look(background=look)
+    else:
+        payload = normalize_stage_look(**(look or {}))
     path = karaoke_meta_path(tracks_root, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "version": KARAOKE_RENDER_VERSION,
-                "background": background,
-                "audio": "original",
+                "background": payload["background"],
+                "lyrics_layout": payload["lyrics_layout"],
+                "lyrics_size": payload["lyrics_size"],
+                "aura_particles": payload["aura_particles"],
+                "audio": payload["audio"],
                 "source": "stage",
             },
             ensure_ascii=False,
@@ -119,8 +169,8 @@ def _write_karaoke_meta(tracks_root: Path, key: str, background: str) -> None:
     )
 
 
-def mark_karaoke_exported(tracks_root: Path, key: str) -> None:
-    _write_karaoke_meta(tracks_root, key, "aura")
+def mark_karaoke_exported(tracks_root: Path, key: str, look: dict | None = None) -> None:
+    _write_karaoke_meta(tracks_root, key, look or {"background": "aura"})
 
 
 def lines_for_render(payload: LyricsPayload) -> list[LyricLine]:
@@ -129,9 +179,17 @@ def lines_for_render(payload: LyricsPayload) -> list[LyricLine]:
     return expand_syllable_tokens(payload.lines)
 
 
-def choose_audio(track_path: Path, tracks_root: Path, key: str) -> Path:
-    """Use the original mix (with vocals), not the instrumental stem."""
-    del tracks_root, key
+def choose_audio(
+    track_path: Path,
+    tracks_root: Path,
+    key: str,
+    mode: str = "original",
+) -> Path:
+    """Original mix, or the instrumental stem when the export asks for karaoke."""
+    if str(mode) == "instrumental":
+        inst = instrumental_path(tracks_root, key)
+        if inst.is_file() and inst.stat().st_size > 0:
+            return inst
     return Path(track_path)
 
 

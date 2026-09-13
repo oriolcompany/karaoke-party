@@ -30,6 +30,7 @@ from karaoke_party.video import (
     choose_background,
     download_filename,
     karaoke_is_current,
+    normalize_stage_look,
     render_karaoke_mp4,
 )
 
@@ -223,6 +224,22 @@ def test_choose_audio_uses_original_even_with_instrumental(tmp_path: Path) -> No
     inst = folder / "instrumental.mp3"
     inst.write_bytes(b"inst")
     assert choose_audio(original, tmp_path, key) == original
+    assert choose_audio(original, tmp_path, key, "instrumental") == inst
+    assert choose_audio(original, tmp_path, key, "missing") == original
+
+
+def test_normalize_stage_look_defaults_and_aliases() -> None:
+    assert normalize_stage_look()["background"] == "aura"
+    assert normalize_stage_look(background="cover", lyrics_layout="dual") == {
+        "background": "cover",
+        "lyrics_layout": "dual",
+        "lyrics_size": "normal",
+        "aura_particles": True,
+        "audio": "original",
+    }
+    assert normalize_stage_look(audio="instrumental")["audio"] == "instrumental"
+    assert normalize_stage_look(background="nope", lyrics_size="huge")["background"] == "aura"
+    assert normalize_stage_look(lyrics_size="xlarge")["lyrics_size"] == "xlarge"
 
 
 def test_choose_background_always_aura(tmp_path: Path) -> None:
@@ -260,6 +277,25 @@ def test_karaoke_is_current_requires_newer_than_align(tmp_path: Path) -> None:
     assert karaoke_is_current(tmp_path, key) == video
     os.utime(aligned, (3_000_000, 3_000_000))
     assert karaoke_is_current(tmp_path, key) is None
+
+
+def test_karaoke_is_current_rejects_other_stage_look(tmp_path: Path) -> None:
+    key = cache_key("A", "B", 10.0)
+    write_meta(tmp_path, key, artist="A", title="B", duration=10.0)
+    video = karaoke_path(tmp_path, key)
+    aligned_path(tmp_path, key).write_text("{}", encoding="utf-8")
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"mp4")
+    karaoke_meta_path(tmp_path, key).write_text(
+        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "cover", "lyrics_layout": "stack", "lyrics_size": "normal", "aura_particles": true, "audio": "original", "source": "stage"}}',
+        encoding="utf-8",
+    )
+    os.utime(aligned_path(tmp_path, key), (1_000_000, 1_000_000))
+    os.utime(video, (2_000_000, 2_000_000))
+    assert karaoke_is_current(tmp_path, key, {"background": "cover"}) == video
+    assert karaoke_is_current(tmp_path, key, {"background": "aura"}) is None
+    assert karaoke_is_current(tmp_path, key, {"background": "cover", "lyrics_layout": "dual"}) is None
+    assert karaoke_is_current(tmp_path, key, {"background": "cover", "audio": "instrumental"}) is None
 
 
 def test_karaoke_is_current_rejects_old_cover_export(tmp_path: Path) -> None:
