@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=78" />
+    <link rel="stylesheet" href="/styles.css?v=83" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -216,6 +216,19 @@
             Editar lletra
           </button>
           <button id="resyncCoverBtn" class="resync-cover-btn" type="button" hidden>Nova portada</button>
+          <button id="albumBackdropBtn" class="album-backdrop-btn" type="button" hidden>
+            Fons karaoke
+          </button>
+          <button id="albumBackdropClearBtn" class="album-backdrop-btn" type="button" hidden>
+            Treure fons
+          </button>
+          <input
+            id="albumBackdropInput"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+            hidden
+          />
+          <p id="albumBackdropStatus" class="sync-queue-meta" hidden></p>
           <p id="syncQueueMeta" class="sync-queue-meta" hidden></p>
           <p id="exportVideoStatus" class="sync-queue-meta" hidden></p>
         </div>
@@ -537,6 +550,14 @@
                 </div>
                 <div class="settings-inline-row">
                   <p class="settings-help">
+                    Imatge de fons 16:9 per cada àlbum. El tamany exacte de l’escenari i del vídeo
+                    és 1920×1080. Descarrega la plantilla, edita-la i puja-la amb “Fons karaoke”
+                    a la vista d’àlbums.
+                  </p>
+                  <button id="albumBackdropTemplateBtn" type="button">Plantilla 1920×1080</button>
+                </div>
+                <div class="settings-inline-row">
+                  <p class="settings-help">
                     Punts flotants del fons Aura. Les cintes de color es mantenen.
                   </p>
                   <div class="settings-toggle" role="group" aria-label="Partícules del fons Aura">
@@ -756,6 +777,9 @@
         <img id="stageCoverBlur" class="stage-cover-blur" alt="" draggable="false" />
         <img id="stageCoverArt" class="stage-cover-art" alt="" draggable="false" />
       </div>
+      <div id="stageBackdrop" class="stage-backdrop" aria-hidden="true">
+        <img id="stageBackdropImg" class="stage-backdrop-img" alt="" draggable="false" />
+      </div>
       <div id="stageAura" class="stage-aura" aria-hidden="true">
         <canvas id="stageAuraCanvas" class="stage-aura-canvas"></canvas>
         <div class="stage-aura-grain"></div>
@@ -808,23 +832,23 @@
       </div>
 
       <div class="stage-dock-layer">
-        <div class="stage-seek" id="stageSeek">
-          <span id="stageSeekTime" class="stage-seek-time">0:00</span>
-          <input
-            id="stageSeekBar"
-            class="stage-seek-bar"
-            type="range"
-            min="0"
-            max="0"
-            step="0.05"
-            value="0"
-            aria-label="Posició de la cançó"
-            disabled
-          />
-          <span id="stageSeekDuration" class="stage-seek-time">0:00</span>
-        </div>
         <div class="stage-dock">
           <audio id="player" preload="metadata"></audio>
+          <div class="stage-seek" id="stageSeek">
+            <span id="stageSeekTime" class="stage-seek-time">0:00</span>
+            <input
+              id="stageSeekBar"
+              class="stage-seek-bar"
+              type="range"
+              min="0"
+              max="0"
+              step="0.05"
+              value="0"
+              aria-label="Posició de la cançó"
+              disabled
+            />
+            <span id="stageSeekDuration" class="stage-seek-time">0:00</span>
+          </div>
           <button id="playBtn" class="play-btn" type="button" aria-label="Reproduir">Inicia</button>
           <div class="stage-toggles">
             <div id="audioModeToggle" class="settings-toggle stage-toggle" role="group" aria-label="Pista d’àudio" hidden>
@@ -861,6 +885,14 @@
                 aria-pressed="false"
               >
                 Portada
+              </button>
+              <button
+                id="videoModeImageBtn"
+                type="button"
+                class="settings-toggle-btn"
+                aria-pressed="false"
+              >
+                Imatge
               </button>
               <button
                 id="videoModeAuraBtn"
@@ -902,6 +934,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=114"></script>
+    <script src="/app.js?v=117"></script>
   </body>
 </html>

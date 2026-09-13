@@ -44,6 +44,15 @@ from .covers import (
     resolve_cover,
 )
 from .folder_picker import pick_music_folder
+from .album_backdrop import (
+    album_backdrop_key,
+    album_has_backdrop,
+    delete_album_backdrop,
+    find_album_backdrop,
+    list_album_backdrop_keys,
+    save_album_backdrop,
+    sniff_image_mime,
+)
 from .library import TrackInfo, _sort_key, scan_library
 from .ratings import get_rating, load_ratings, normalize_rating, set_rating
 from .lyrics import (
@@ -828,6 +837,7 @@ def _library_snapshot() -> dict:
 
     lyrics_path = cache_dir()
     aligned_path = aligned_cache_dir()
+    backdrop_keys = list_album_backdrop_keys()
     playable_tracks: list[TrackInfo] = []
     hidden_tracks: list[TrackInfo] = []
     pending_tracks: list[TrackInfo] = []
@@ -868,29 +878,38 @@ def _library_snapshot() -> dict:
     for track in playable_tracks:
         item = asdict(track)
         key = cache_key(track.artist, track.title, track.duration)
+        album_key = album_backdrop_key(track.artist, track.album)
         item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
         item["has_lyrics"] = True
         item["has_instrumental"] = has_instrumental(stems_path, key)
         item["rating"] = get_rating(key, ratings)
+        item["album_key"] = album_key
+        item["has_backdrop"] = album_key in backdrop_keys
         playable.append(item)
 
     hidden_items: list[dict] = []
     for track in hidden_tracks:
         item = asdict(track)
         key = cache_key(track.artist, track.title, track.duration)
+        album_key = album_backdrop_key(track.artist, track.album)
         item["whisper_aligned"] = False
         item["has_lyrics"] = False
         item["rating"] = get_rating(key, ratings)
+        item["album_key"] = album_key
+        item["has_backdrop"] = album_key in backdrop_keys
         hidden_items.append(item)
 
     pending_items: list[dict] = []
     for track in pending_tracks:
         item = asdict(track)
         key = cache_key(track.artist, track.title, track.duration)
+        album_key = album_backdrop_key(track.artist, track.album)
         item["whisper_aligned"] = False
         item["has_lyrics"] = False
         item["lyrics_pending"] = True
         item["rating"] = get_rating(key, ratings)
+        item["album_key"] = album_key
+        item["has_backdrop"] = album_key in backdrop_keys
         pending_items.append(item)
 
     with _probe_lock:
@@ -1684,6 +1703,88 @@ def library_stems_state() -> dict:
     state["available"] = separation_available()
     state["model"] = model_name()
     return state
+
+
+def _resolve_album_backdrop_target(
+    album_key: str = "",
+    track_id: str = "",
+) -> tuple[str, str, str]:
+    key = (album_key or "").strip()
+    artist = ""
+    album = ""
+    if track_id:
+        track = _resolve_track(track_id)
+        artist = track.artist or "Artista desconegut"
+        album = track.album or "Sense àlbum"
+        key = album_backdrop_key(track.artist, track.album)
+    if not key:
+        raise HTTPException(status_code=400, detail="Cal un àlbum")
+    if not artist or not album:
+        for track in _tracks.values():
+            if album_backdrop_key(track.artist, track.album) == key:
+                artist = track.artist or "Artista desconegut"
+                album = track.album or "Sense àlbum"
+                break
+    return key, artist, album
+
+
+@app.get("/api/album-backdrop")
+def get_album_backdrop(album_key: str = "", track_id: str = ""):
+    key, _artist, _album = _resolve_album_backdrop_target(album_key, track_id)
+    path = find_album_backdrop(key)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Aquest àlbum no té fons personalitzat")
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(
+        path,
+        media_type=mime,
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.post("/api/album-backdrop")
+async def upload_album_backdrop(
+    album_key: str = "",
+    track_id: str = "",
+    file: UploadFile = File(...),
+) -> dict:
+    key, artist, album = _resolve_album_backdrop_target(album_key, track_id)
+    data = await file.read()
+    try:
+        save_album_backdrop(
+            key,
+            data,
+            artist=artist,
+            album=album,
+            mime=file.content_type or sniff_image_mime(data),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "album_key": key,
+        "artist": artist,
+        "album": album,
+        "has_backdrop": True,
+    }
+
+
+@app.delete("/api/album-backdrop")
+def remove_album_backdrop(album_key: str = "", track_id: str = "") -> dict:
+    key, artist, album = _resolve_album_backdrop_target(album_key, track_id)
+    delete_album_backdrop(key)
+    return {
+        "ok": True,
+        "album_key": key,
+        "artist": artist,
+        "album": album,
+        "has_backdrop": album_has_backdrop(key),
+    }
 
 
 @app.get("/api/cover/{track_id:path}")

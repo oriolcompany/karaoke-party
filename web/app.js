@@ -44,6 +44,7 @@ const playBtn = document.getElementById("playBtn");
 const stageSeekBar = document.getElementById("stageSeekBar");
 const stageSeekTime = document.getElementById("stageSeekTime");
 const stageSeekDuration = document.getElementById("stageSeekDuration");
+const stageDockLayer = document.querySelector(".stage-dock-layer");
 const coverArtist = document.getElementById("coverArtist");
 const coverTitle = document.getElementById("coverTitle");
 const coverIndex = document.getElementById("coverIndex");
@@ -99,15 +100,23 @@ const videoStatus = document.getElementById("videoStatus");
 const videoModeToggle = document.getElementById("videoModeToggle");
 const videoModeOnBtn = document.getElementById("videoModeOnBtn");
 const videoModeCoverBtn = document.getElementById("videoModeCoverBtn");
+const videoModeImageBtn = document.getElementById("videoModeImageBtn");
 const videoModeAuraBtn = document.getElementById("videoModeAuraBtn");
 const videoModeOffBtn = document.getElementById("videoModeOffBtn");
 const stageVideoEl = document.getElementById("stageVideo");
 const stageCoverEl = document.getElementById("stageCover");
+const stageBackdropEl = document.getElementById("stageBackdrop");
+const stageBackdropImg = document.getElementById("stageBackdropImg");
 const stageAuraEl = document.getElementById("stageAura");
 const stageAuraCanvas = document.getElementById("stageAuraCanvas");
 const stageCoverArt = document.getElementById("stageCoverArt");
 const stageCoverBlur = document.getElementById("stageCoverBlur");
 const stageVideoDimEl = document.getElementById("stageVideoDim");
+const albumBackdropBtn = document.getElementById("albumBackdropBtn");
+const albumBackdropInput = document.getElementById("albumBackdropInput");
+const albumBackdropTemplateBtn = document.getElementById("albumBackdropTemplateBtn");
+const albumBackdropClearBtn = document.getElementById("albumBackdropClearBtn");
+const albumBackdropStatus = document.getElementById("albumBackdropStatus");
 const generateStemsBtn = document.getElementById("generateStemsBtn");
 const stemsSettingsStatus = document.getElementById("stemsSettingsStatus");
 const searchYoutubeMissingBtn = document.getElementById("searchYoutubeMissingBtn");
@@ -147,6 +156,7 @@ const STAGE_VIDEO_KEY = "karaoke-stage-video";
 const STAGE_BG_KEY = "karaoke-stage-bg";
 const MUTE_KEY = "karaoke-muted";
 let coverBust = 0;
+let backdropBust = 0;
 
 function loadLyricsLayout() {
   const stored = localStorage.getItem(LYRICS_LAYOUT_KEY);
@@ -166,7 +176,9 @@ function loadAudioMode() {
   return localStorage.getItem(AUDIO_MODE_KEY) === "instrumental" ? "instrumental" : "original";
 }
 
-const STAGE_BG_MODES = new Set(["video", "cover", "aura", "stage"]);
+const STAGE_BG_MODES = new Set(["video", "cover", "image", "aura", "stage"]);
+const ALBUM_BACKDROP_W = 1920;
+const ALBUM_BACKDROP_H = 1080;
 
 function loadStageBgMode() {
   const stored = localStorage.getItem(STAGE_BG_KEY);
@@ -700,6 +712,263 @@ function setStageCover(trackId) {
   }
 }
 
+function albumKeyForItem(item) {
+  if (!item) return "";
+  if (item.kind === "album") return item.key || albumKey(item.artist, item.album);
+  if (item.album_key) return item.album_key;
+  return albumKey(item.artist || "Artista desconegut", item.album || "Sense àlbum");
+}
+
+function collectAlbumKeys(item) {
+  const keys = new Set();
+  const addTrack = (track) => {
+    if (!track) return;
+    if (track.album_key) keys.add(track.album_key);
+    keys.add(albumKey(track.artist || "Artista desconegut", track.album || "Sense àlbum"));
+  };
+  if (!item) return keys;
+  if (item.kind === "album") {
+    if (item.key) keys.add(item.key);
+    keys.add(albumKey(item.artist, item.album));
+    (item.tracks || []).forEach(addTrack);
+    return keys;
+  }
+  addTrack(item);
+  return keys;
+}
+
+function itemHasBackdrop(item) {
+  if (!item) return false;
+  if (item.has_backdrop) return true;
+  if (item.kind === "album") return Boolean(item.tracks?.some((track) => track.has_backdrop));
+  return false;
+}
+
+function albumBackdropUrl(albumKeyValue) {
+  const query = new URLSearchParams({ album_key: albumKeyValue });
+  if (backdropBust) query.set("t", String(backdropBust));
+  return `/api/album-backdrop?${query}`;
+}
+
+function setStageBackdrop(track) {
+  if (!stageBackdropImg) return;
+  const key = albumKeyForItem(track);
+  if (!key || !itemHasBackdrop(track)) {
+    stageBackdropImg.removeAttribute("src");
+    return;
+  }
+  stageBackdropImg.onerror = () => {
+    stageBackdropImg.onerror = null;
+    stageBackdropImg.removeAttribute("src");
+  };
+  stageBackdropImg.src = albumBackdropUrl(key);
+}
+
+function markAlbumBackdrop(albumKeyValue, present) {
+  if (!albumKeyValue) return;
+  const keys = new Set([albumKeyValue]);
+  const trackMatches = (track) => {
+    for (const key of collectAlbumKeys(track)) {
+      if (keys.has(key)) return true;
+    }
+    return false;
+  };
+  const apply = (track) => {
+    if (!trackMatches(track)) return;
+    track.has_backdrop = present;
+    collectAlbumKeys(track).forEach((key) => keys.add(key));
+  };
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const list of [playableTracks, tracks, hiddenTracks, pendingTracks]) {
+      list.forEach(apply);
+    }
+    openedAlbum?.tracks?.forEach(apply);
+  }
+  const albumMatches = (album) =>
+    Boolean(album && (keys.has(album.key) || album.tracks?.some(trackMatches)));
+  if (albumMatches(openedAlbum)) openedAlbum.has_backdrop = present;
+  for (const album of filteredAlbums) {
+    if (albumMatches(album)) album.has_backdrop = present;
+  }
+}
+
+function selectedAlbumBackdropTarget() {
+  const item = selectedBrowseItem();
+  if (item?.kind === "album") {
+    const track = item.coverTrack || item.tracks?.[0] || null;
+    return {
+      key: track ? albumKeyForItem(track) : albumKeyForItem(item),
+      trackId: track?.id || "",
+      artist: item.artist || "Artista desconegut",
+      album: item.album || "Sense àlbum",
+      hasBackdrop: itemHasBackdrop(item),
+    };
+  }
+  const track = selectedTrack() || findTrackById(currentId);
+  if (!track) return null;
+  return {
+    key: albumKeyForItem(track),
+    trackId: track.id || "",
+    artist: track.artist || "Artista desconegut",
+    album: track.album || "Sense àlbum",
+    hasBackdrop: itemHasBackdrop(track),
+  };
+}
+
+function setAlbumBackdropStatus(text, kind = "") {
+  if (!albumBackdropStatus) return;
+  albumBackdropStatus.textContent = text || "";
+  albumBackdropStatus.hidden = !text;
+  albumBackdropStatus.dataset.kind = kind || "";
+}
+
+function updateAlbumBackdropControls() {
+  const target = selectedAlbumBackdropTarget();
+  const ready = Boolean(target?.key);
+  if (albumBackdropBtn) {
+    albumBackdropBtn.hidden = !ready;
+    albumBackdropBtn.disabled = !ready;
+    albumBackdropBtn.classList.toggle("is-set", Boolean(target?.hasBackdrop));
+    albumBackdropBtn.textContent = target?.hasBackdrop ? "Canviar fons" : "Fons karaoke";
+  }
+  if (albumBackdropClearBtn) {
+    albumBackdropClearBtn.hidden = !ready || !target?.hasBackdrop;
+    albumBackdropClearBtn.disabled = !ready || !target?.hasBackdrop;
+  }
+}
+
+function downloadAlbumBackdropTemplate() {
+  const canvas = document.createElement("canvas");
+  canvas.width = ALBUM_BACKDROP_W;
+  canvas.height = ALBUM_BACKDROP_H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = "#0a0812";
+  ctx.fillRect(0, 0, ALBUM_BACKDROP_W, ALBUM_BACKDROP_H);
+  ctx.strokeStyle = "rgba(255, 246, 234, 0.08)";
+  ctx.lineWidth = 1;
+  for (let x = 80; x < ALBUM_BACKDROP_W; x += 80) {
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, ALBUM_BACKDROP_H);
+    ctx.stroke();
+  }
+  for (let y = 80; y < ALBUM_BACKDROP_H; y += 80) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(ALBUM_BACKDROP_W, y + 0.5);
+    ctx.stroke();
+  }
+
+  const zones = [
+    { x: 80, y: 36, w: 1760, h: 140, label: "Títol i artista", sub: "No hi posis cara ni text important" },
+    { x: 120, y: 220, w: 1680, h: 640, label: "Lletra", sub: "Zona segura · aquí es llegeix la cançó" },
+    { x: 80, y: 900, w: 1760, h: 140, label: "Controls", sub: "Barra de temps i botons" },
+  ];
+  for (const zone of zones) {
+    ctx.fillStyle = "rgba(61, 231, 255, 0.08)";
+    ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
+    ctx.strokeStyle = "rgba(61, 231, 255, 0.7)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([14, 10]);
+    ctx.strokeRect(zone.x + 1.5, zone.y + 1.5, zone.w - 3, zone.h - 3);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#fff6ea";
+    ctx.font = "700 42px Outfit, sans-serif";
+    ctx.fillText(zone.label, zone.x + 28, zone.y + 56);
+    ctx.fillStyle = "rgba(255, 246, 234, 0.7)";
+    ctx.font = "400 26px Outfit, sans-serif";
+    ctx.fillText(zone.sub, zone.x + 28, zone.y + 96);
+  }
+
+  ctx.strokeStyle = "rgba(255, 225, 74, 0.85)";
+  ctx.lineWidth = 4;
+  const mark = 36;
+  const inset = 16;
+  for (const [x, y, dx, dy] of [
+    [inset, inset, 1, 1],
+    [ALBUM_BACKDROP_W - inset, inset, -1, 1],
+    [inset, ALBUM_BACKDROP_H - inset, 1, -1],
+    [ALBUM_BACKDROP_W - inset, ALBUM_BACKDROP_H - inset, -1, -1],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(x, y + dy * mark);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + dx * mark, y);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#ffe14a";
+  ctx.font = "700 28px Outfit, sans-serif";
+  ctx.fillText("Karaoke Party · plantilla de fons", 80, 1048);
+  ctx.fillStyle = "rgba(255, 246, 234, 0.75)";
+  ctx.font = "600 28px Outfit, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(`${ALBUM_BACKDROP_W} × ${ALBUM_BACKDROP_H} px`, ALBUM_BACKDROP_W - 80, 1048);
+  ctx.textAlign = "left";
+
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "karaoke-fons-1920x1080.png";
+    link.click();
+    URL.revokeObjectURL(url);
+    setAlbumBackdropStatus("");
+  }, "image/png");
+}
+
+function albumBackdropQuery(target) {
+  if (target.trackId) return `track_id=${encodeURIComponent(target.trackId)}`;
+  return `album_key=${encodeURIComponent(target.key)}`;
+}
+
+async function uploadAlbumBackdropFile(file) {
+  const target = selectedAlbumBackdropTarget();
+  if (!target?.key || !file) return;
+  setAlbumBackdropStatus(`Pujant fons de “${target.album}”…`, "running");
+  const body = new FormData();
+  body.append("file", file);
+  try {
+    const result = await api(`/api/album-backdrop?${albumBackdropQuery(target)}`, {
+      method: "POST",
+      body,
+    });
+    backdropBust = Date.now();
+    markAlbumBackdrop(result.album_key || target.key, true);
+    markAlbumBackdrop(target.key, true);
+    const current = findTrackById(currentId);
+    if (current) setStageBackdrop(current);
+    applyVideoModeButtons();
+    updateAlbumBackdropControls();
+    setAlbumBackdropStatus(`Fons de “${result.album || target.album}” desat.`, "ok");
+  } catch (err) {
+    setAlbumBackdropStatus(err.message || "No s’ha pogut pujar el fons", "error");
+  }
+}
+
+async function clearAlbumBackdrop() {
+  const target = selectedAlbumBackdropTarget();
+  if (!target?.key) return;
+  setAlbumBackdropStatus(`Traient el fons de “${target.album}”…`, "running");
+  try {
+    const result = await api(`/api/album-backdrop?${albumBackdropQuery(target)}`, {
+      method: "DELETE",
+    });
+    backdropBust = Date.now();
+    markAlbumBackdrop(result.album_key || target.key, false);
+    markAlbumBackdrop(target.key, false);
+    const current = findTrackById(currentId);
+    if (current) setStageBackdrop(current);
+    applyVideoModeButtons();
+    updateAlbumBackdropControls();
+    setAlbumBackdropStatus(`S’ha tret el fons de “${result.album || target.album}”.`, "ok");
+  } catch (err) {
+    setAlbumBackdropStatus(err.message || "No s’ha pogut treure el fons", "error");
+  }
+}
+
 function youtubeVideoReady() {
   return Boolean(youtubeCurrent?.found && youtubeCurrent?.video_id && youtubeEmbedOk);
 }
@@ -887,15 +1156,20 @@ window.addEventListener("resize", () => {
 
 function applyVideoModeButtons() {
   const videoReady = youtubeVideoReady();
+  const current = findTrackById(currentId);
+  const imageReady = itemHasBackdrop(current);
   const videoOn = stageBgMode === "video" && videoReady;
   const coverOn = stageBgMode === "cover";
+  const imageOn = stageBgMode === "image" && imageReady;
   const auraOn = stageBgMode === "aura";
   videoModeOnBtn?.classList.toggle("is-active", videoOn);
   videoModeCoverBtn?.classList.toggle("is-active", coverOn);
+  videoModeImageBtn?.classList.toggle("is-active", stageBgMode === "image");
   videoModeAuraBtn?.classList.toggle("is-active", auraOn);
   videoModeOffBtn?.classList.toggle("is-active", stageBgMode === "stage");
   videoModeOnBtn?.setAttribute("aria-pressed", videoOn ? "true" : "false");
   videoModeCoverBtn?.setAttribute("aria-pressed", coverOn ? "true" : "false");
+  videoModeImageBtn?.setAttribute("aria-pressed", stageBgMode === "image" ? "true" : "false");
   videoModeAuraBtn?.setAttribute("aria-pressed", auraOn ? "true" : "false");
   videoModeOffBtn?.setAttribute("aria-pressed", stageBgMode === "stage" ? "true" : "false");
   if (videoModeOnBtn) {
@@ -906,15 +1180,26 @@ function applyVideoModeButtons() {
         ? "El videoclip encara s’està carregant"
         : "Encara no hi ha videoclip";
   }
+  if (videoModeImageBtn) {
+    videoModeImageBtn.disabled = !imageReady;
+    videoModeImageBtn.title = imageReady
+      ? ""
+      : "Aquest àlbum encara no té una imatge de fons";
+  }
   if (videoModeToggle) videoModeToggle.hidden = false;
   viewStage?.classList.toggle("has-video", videoOn);
   viewStage?.classList.toggle("has-cover", coverOn);
+  viewStage?.classList.toggle("has-image", imageOn);
   viewStage?.classList.toggle("has-aura", auraOn);
   if (stageVideoEl) stageVideoEl.setAttribute("aria-hidden", videoOn ? "false" : "true");
   if (stageCoverEl) stageCoverEl.setAttribute("aria-hidden", coverOn ? "false" : "true");
+  if (stageBackdropEl) stageBackdropEl.setAttribute("aria-hidden", imageOn ? "false" : "true");
   if (stageAuraEl) stageAuraEl.setAttribute("aria-hidden", auraOn ? "false" : "true");
   if (stageVideoDimEl) {
-    stageVideoDimEl.setAttribute("aria-hidden", videoOn || coverOn || auraOn ? "false" : "true");
+    stageVideoDimEl.setAttribute(
+      "aria-hidden",
+      videoOn || coverOn || imageOn || auraOn ? "false" : "true"
+    );
   }
   syncAuraEngine();
 }
@@ -2037,10 +2322,12 @@ function buildAlbums(sourceTracks) {
         year: track.year || 0,
         tracks: [],
         coverTrack: track,
+        has_backdrop: Boolean(track.has_backdrop),
       };
       map.set(key, entry);
     }
     entry.tracks.push(track);
+    entry.has_backdrop = Boolean(entry.has_backdrop || track.has_backdrop);
     entry.year = Math.max(entry.year || 0, track.year || 0);
   }
   for (const entry of map.values()) {
@@ -2418,6 +2705,7 @@ function showAlignBadges() {
 function updatePrimaryAction() {
   updatePasteLyricsButton();
   updateExportVideoButton();
+  updateAlbumBackdropControls();
   const item = selectedBrowseItem();
   const track = selectedTrack();
   const syncActions = isSyncActionMode();
@@ -5544,6 +5832,11 @@ function songDurationSeconds() {
 
 let seekDragging = false;
 
+function setSeekDragging(active) {
+  seekDragging = Boolean(active);
+  stageDockLayer?.classList.toggle("is-seeking", seekDragging);
+}
+
 function paintSeekBar(current, duration) {
   if (!stageSeekBar) return;
   const dur = Number.isFinite(duration) && duration > 0 ? duration : 0;
@@ -5585,7 +5878,7 @@ function seekSongTo(seconds) {
 
 function onSeekBarInput() {
   if (!stageSeekBar || stageSeekBar.disabled) return;
-  seekDragging = true;
+  setSeekDragging(true);
   const duration = songDurationSeconds();
   const next = Number(stageSeekBar.value) || 0;
   paintSeekBar(next, duration);
@@ -5594,7 +5887,7 @@ function onSeekBarInput() {
 
 function onSeekBarCommit() {
   if (!stageSeekBar) return;
-  seekDragging = false;
+  setSeekDragging(false);
   seekSongTo(Number(stageSeekBar.value) || 0);
   updateSeekBar();
 }
@@ -6057,6 +6350,8 @@ async function openSong(trackId, { autoplay = true } = {}) {
   currentId = trackId;
   showStage();
   setStageCover(trackId);
+  setStageBackdrop(track);
+  applyVideoModeButtons();
   songTitle.textContent = track.title;
   songArtist.textContent = track.artist || "Artista desconegut";
   // Fall back to the original mix while the instrumental is still cooking.
@@ -6065,7 +6360,7 @@ async function openSong(trackId, { autoplay = true } = {}) {
   audioClockReady = false;
   player.src = audioUrlFor(trackId, useInstrumental ? "instrumental" : "original");
   resetAudioClock();
-  seekDragging = false;
+  setSeekDragging(false);
   updateSeekBar();
   applyAudioModeButtons();
   loadYoutubeBackdrop(trackId);
@@ -6173,7 +6468,8 @@ resyncCoverBtn.addEventListener("click", () => {
     });
 });
 backBtn.addEventListener("click", showMenu);
-document.querySelector(".stage-dock-layer")?.addEventListener("mouseleave", () => {
+stageDockLayer?.addEventListener("mouseleave", () => {
+  if (seekDragging) return;
   const active = document.activeElement;
   if (active instanceof HTMLElement && viewStage?.contains(active)) active.blur();
 });
@@ -6803,8 +7099,19 @@ audioModeOriginalBtn?.addEventListener("click", () => setAudioMode("original"));
 audioModeInstrumentalBtn?.addEventListener("click", () => setAudioMode("instrumental"));
 videoModeOnBtn?.addEventListener("click", () => setStageBgMode("video"));
 videoModeCoverBtn?.addEventListener("click", () => setStageBgMode("cover"));
+videoModeImageBtn?.addEventListener("click", () => setStageBgMode("image"));
 videoModeAuraBtn?.addEventListener("click", () => setStageBgMode("aura"));
 videoModeOffBtn?.addEventListener("click", () => setStageBgMode("stage"));
+albumBackdropBtn?.addEventListener("click", () => albumBackdropInput?.click());
+albumBackdropClearBtn?.addEventListener("click", () => {
+  clearAlbumBackdrop().catch(() => {});
+});
+albumBackdropTemplateBtn?.addEventListener("click", () => downloadAlbumBackdropTemplate());
+albumBackdropInput?.addEventListener("change", () => {
+  const file = albumBackdropInput.files?.[0];
+  albumBackdropInput.value = "";
+  if (file) uploadAlbumBackdropFile(file).catch(() => {});
+});
 generateStemsBtn?.addEventListener("click", () => startStemsGeneration());
 searchYoutubeMissingBtn?.addEventListener("click", () => startYoutubeSearch("missing"));
 searchYoutubeAllBtn?.addEventListener("click", () => startYoutubeSearch("all"));
@@ -6932,12 +7239,18 @@ playBtn.addEventListener("click", () => {
   togglePlayback().catch(() => updatePlayButton());
 });
 stageSeekBar?.addEventListener("pointerdown", () => {
-  seekDragging = true;
+  setSeekDragging(true);
 });
 stageSeekBar?.addEventListener("input", onSeekBarInput);
 stageSeekBar?.addEventListener("change", onSeekBarCommit);
 stageSeekBar?.addEventListener("pointerup", onSeekBarCommit);
 stageSeekBar?.addEventListener("pointercancel", onSeekBarCommit);
+window.addEventListener("pointerup", () => {
+  if (seekDragging) onSeekBarCommit();
+});
+window.addEventListener("pointercancel", () => {
+  if (seekDragging) onSeekBarCommit();
+});
 player.addEventListener("play", () => {
   markAudioClockReady();
   startTicker();

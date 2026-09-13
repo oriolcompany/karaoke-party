@@ -1672,6 +1672,32 @@ button:hover {
   border-color: var(--ink);
 }
 
+.album-backdrop-btn {
+  min-width: 8.5rem;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.86rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.album-backdrop-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.album-backdrop-btn.is-set {
+  color: var(--cyan);
+  border-color: rgba(61, 231, 255, 0.45);
+}
+
+.album-backdrop-btn[hidden] {
+  display: none !important;
+}
+
 .sing-btn.is-sync-mode {
   background: linear-gradient(135deg, #2fd67b, #1aa85a);
   color: #04140c;
@@ -1970,6 +1996,8 @@ body.is-exporting-video .fx {
 .view-stage.has-video .stage-video-dim,
 .view-stage.has-cover .stage-cover,
 .view-stage.has-cover .stage-video-dim,
+.view-stage.has-image .stage-backdrop,
+.view-stage.has-image .stage-video-dim,
 .view-stage.has-aura .stage-aura {
   opacity: 1;
   visibility: visible;
@@ -1977,6 +2005,7 @@ body.is-exporting-video .fx {
 
 .view-stage.has-video .stage-fx,
 .view-stage.has-cover .stage-fx,
+.view-stage.has-image .stage-fx,
 .view-stage.has-aura .stage-fx {
   opacity: 0;
 }
@@ -2025,12 +2054,40 @@ body.is-exporting-video .fx {
     linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, transparent 16%, transparent 84%, rgba(0, 0, 0, 0.5) 100%);
 }
 
+.stage-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  background: #08060a;
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.stage-backdrop-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  user-select: none;
+}
+
 .view-stage.has-aura .stage-artist,
 .view-stage.has-aura .stage-title,
 .view-stage.has-aura .k-word,
 .view-stage.has-aura .k-word-base,
 .view-stage.has-aura .k-word-fill,
-.view-stage.has-aura .k-slot-next .k-word {
+.view-stage.has-aura .k-slot-next .k-word,
+.view-stage.has-image .stage-artist,
+.view-stage.has-image .stage-title,
+.view-stage.has-image .k-word,
+.view-stage.has-image .k-word-base,
+.view-stage.has-image .k-word-fill,
+.view-stage.has-image .k-slot-next .k-word {
   text-shadow:
     0 1px 0 rgba(0, 0, 0, 0.7),
     0 2px 8px rgba(0, 0, 0, 0.85),
@@ -2542,12 +2599,14 @@ body.is-exporting-video .fx {
 }
 
 .k-rest-count-dial {
+  --k-rest-size: min(21.5rem, 32vmin);
+  --k-rest-stroke: max(10px, calc(var(--k-rest-size) * 0.042));
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: calc(var(--k-lyrics-fitted) * 2.35);
-  height: calc(var(--k-lyrics-fitted) * 2.35);
+  width: var(--k-rest-size);
+  height: var(--k-rest-size);
 }
 
 .k-rest-count-dial::before {
@@ -2568,8 +2627,16 @@ body.is-exporting-video .fx {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 7px), #000 calc(100% - 6px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 7px), #000 calc(100% - 6px));
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--k-rest-stroke) - 1px),
+    #000 calc(100% - var(--k-rest-stroke))
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--k-rest-stroke) - 1px),
+    #000 calc(100% - var(--k-rest-stroke))
+  );
 }
 
 .k-rest-ring-track {
@@ -2590,7 +2657,7 @@ body.is-exporting-video .fx {
   position: relative;
   z-index: 1;
   font-family: var(--font-display);
-  font-size: calc(var(--k-lyrics-fitted) * 0.88);
+  font-size: calc(var(--k-rest-size) * 0.38);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
   line-height: 1;
@@ -2966,14 +3033,16 @@ body.is-exporting-video .fx {
   }
 
   .view-stage:not(.is-outro) .stage-dock-layer:hover .stage-dock,
-  .view-stage:not(.is-outro) .stage-dock-layer:has(:focus-visible) .stage-dock {
+  .view-stage:not(.is-outro) .stage-dock-layer:has(:focus-visible) .stage-dock,
+  .view-stage:not(.is-outro) .stage-dock-layer.is-seeking .stage-dock {
     opacity: 1;
     transform: none;
     pointer-events: auto;
   }
 
   .view-stage:not(.is-outro) .stage-dock-layer:hover::before,
-  .view-stage:not(.is-outro) .stage-dock-layer:has(:focus-visible)::before {
+  .view-stage:not(.is-outro) .stage-dock-layer:has(:focus-visible)::before,
+  .view-stage:not(.is-outro) .stage-dock-layer.is-seeking::before {
     opacity: 1;
   }
 
