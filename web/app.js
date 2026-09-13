@@ -449,6 +449,8 @@ let exportVideoTrackId = "";
 let stageCapture = null;
 const EXPORT_VIDEO_W = 1920;
 const EXPORT_VIDEO_H = 1080;
+const EXPORT_THUMB_W = 1280;
+const EXPORT_THUMB_H = 720;
 const EXPORT_VIDEO_FPS = 30;
 // Keep in sync with INTRO_SECONDS / OUTRO_SECONDS in video.py.
 const EXPORT_INTRO_SECONDS = 5;
@@ -2871,6 +2873,210 @@ function videoPhaseLabel(phase, progress, stemPhase) {
   return "Preparant el vídeo…";
 }
 
+function triggerDownload(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function thumbnailFilename(videoName) {
+  const base = String(videoName || "karaoke.mp4").replace(/\.mp4$/i, "").trim() || "karaoke";
+  return `${base}.jpg`;
+}
+
+function loadExportImage(url) {
+  return new Promise((resolve) => {
+    if (!url) {
+      resolve(null);
+      return;
+    }
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve(img.naturalWidth ? img : null);
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+function paintThumbnailDim(ctx, width, height) {
+  const linear = ctx.createLinearGradient(0, 0, 0, height);
+  linear.addColorStop(0, "rgba(0,0,0,0.58)");
+  linear.addColorStop(0.32, "rgba(0,0,0,0.28)");
+  linear.addColorStop(0.68, "rgba(0,0,0,0.32)");
+  linear.addColorStop(1, "rgba(0,0,0,0.72)");
+  ctx.fillStyle = linear;
+  ctx.fillRect(0, 0, width, height);
+  const cx = width / 2;
+  const cy = height / 2;
+  const radial = ctx.createRadialGradient(
+    cx,
+    cy,
+    Math.min(width, height) * 0.15,
+    cx,
+    cy,
+    Math.max(width, height) * 0.65
+  );
+  radial.addColorStop(0, "rgba(0,0,0,0.12)");
+  radial.addColorStop(1, "rgba(0,0,0,0.45)");
+  ctx.fillStyle = radial;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function wrapThumbnailTitle(ctx, title, family, maxPx, minPx, maxWidth) {
+  const text = String(title || "").trim();
+  const one = fitExportFont(ctx, text, family, maxPx, minPx, maxWidth);
+  ctx.font = `${one}px ${family}`;
+  if (!text || ctx.measureText(text).width <= maxWidth || !text.includes(" ")) {
+    return { lines: [text], size: one };
+  }
+  const words = text.split(/\s+/);
+  let best = [text];
+  let bestSize = minPx;
+  for (let i = 1; i < words.length; i += 1) {
+    const first = words.slice(0, i).join(" ");
+    const second = words.slice(i).join(" ");
+    const size = Math.min(
+      fitExportFont(ctx, first, family, maxPx, minPx, maxWidth),
+      fitExportFont(ctx, second, family, maxPx, minPx, maxWidth)
+    );
+    if (size > bestSize) {
+      bestSize = size;
+      best = [first, second];
+    }
+  }
+  return { lines: best, size: bestSize };
+}
+
+function fillThumbnailHeadline(ctx, text, x, y, stroke) {
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  ctx.lineWidth = stroke;
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.78)";
+  ctx.strokeText(text, x, y);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
+  ctx.shadowBlur = 28;
+  ctx.shadowOffsetY = 4;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+  ctx.fillText(text, x, y);
+}
+
+function paintThumbnailCard(ctx, track) {
+  const artist = (track?.artist || "").toLocaleUpperCase("ca");
+  const title = track?.title || "";
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(3, 2, 8, 0.58)";
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  const cx = EXPORT_VIDEO_W / 2;
+  const maxTextW = 1760;
+  const artistSize = fitExportFont(ctx, artist, "Outfit, sans-serif", 96, 60, maxTextW);
+  const wrapped = wrapThumbnailTitle(ctx, title, "Bebas Neue, sans-serif", 268, 132, maxTextW);
+  const titleSize = wrapped.size;
+  const titleGap = Math.round(titleSize * 0.12);
+  const titlesH = wrapped.lines.length * titleSize + Math.max(0, wrapped.lines.length - 1) * titleGap;
+  const subSize = 64;
+  const artistToTitle = 28;
+  const titleToSub = 40;
+  const stackH = artistSize + artistToTitle + titlesH + titleToSub + subSize;
+  let y = (EXPORT_VIDEO_H - stackH) / 2 + artistSize;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  setExportLetterSpacing(ctx, 8);
+  ctx.font = `800 ${artistSize}px Outfit, sans-serif`;
+  ctx.fillStyle = "#ffe14a";
+  fillThumbnailHeadline(ctx, artist, cx, y, 10);
+  setExportLetterSpacing(ctx, 1);
+  ctx.font = `${titleSize}px Bebas Neue, sans-serif`;
+  ctx.fillStyle = "#fff6ea";
+  wrapped.lines.forEach((line, index) => {
+    y += (index ? titleGap : artistToTitle) + titleSize;
+    fillThumbnailHeadline(ctx, line, cx, y, 16);
+  });
+  y += titleToSub + subSize;
+  setExportLetterSpacing(ctx, 8);
+  ctx.font = `800 ${subSize}px Outfit, sans-serif`;
+  ctx.fillStyle = "#3de7ff";
+  fillThumbnailHeadline(ctx, "KARAOKE", cx, y, 8);
+  ctx.restore();
+}
+
+function paintThumbnailBackground(ctx, image) {
+  ctx.fillStyle = "#07060b";
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+  if (image?.naturalWidth) {
+    ctx.save();
+    ctx.filter = "blur(18px)";
+    drawImageCoverFit(ctx, image, -40, -40, EXPORT_VIDEO_W + 80, EXPORT_VIDEO_H + 80);
+    ctx.filter = "none";
+    drawImageCoverFit(ctx, image, 0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+    ctx.restore();
+    paintThumbnailDim(ctx, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+    return;
+  }
+  const glow = ctx.createRadialGradient(
+    EXPORT_VIDEO_W * 0.5,
+    EXPORT_VIDEO_H * 0.35,
+    80,
+    EXPORT_VIDEO_W * 0.5,
+    EXPORT_VIDEO_H * 0.5,
+    EXPORT_VIDEO_W * 0.62
+  );
+  glow.addColorStop(0, "rgba(255, 45, 106, 0.28)");
+  glow.addColorStop(0.45, "rgba(61, 231, 255, 0.1)");
+  glow.addColorStop(1, "rgba(3, 2, 8, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
+}
+
+async function renderExportThumbnailBlob(track) {
+  await document.fonts.ready.catch(() => {});
+  const mode = exportStageBgMode(track);
+  const backdropKey = mode === "image" ? albumKeyForItem(track) : "";
+  const image = await loadExportImage(
+    backdropKey ? albumBackdropUrl(backdropKey) : coverUrlFor(track?.id)
+  );
+  const source = document.createElement("canvas");
+  source.width = EXPORT_VIDEO_W;
+  source.height = EXPORT_VIDEO_H;
+  const ctx = source.getContext("2d");
+  if (!ctx) throw new Error("No s’ha pogut crear la miniatura");
+  ctx.imageSmoothingEnabled = true;
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
+  paintThumbnailBackground(ctx, image);
+  paintThumbnailCard(ctx, track);
+  const out = document.createElement("canvas");
+  out.width = EXPORT_THUMB_W;
+  out.height = EXPORT_THUMB_H;
+  const outCtx = out.getContext("2d");
+  if (!outCtx) throw new Error("No s’ha pogut crear la miniatura");
+  outCtx.imageSmoothingEnabled = true;
+  if (outCtx.imageSmoothingQuality) outCtx.imageSmoothingQuality = "high";
+  outCtx.drawImage(source, 0, 0, EXPORT_THUMB_W, EXPORT_THUMB_H);
+  const blob = await new Promise((resolve, reject) => {
+    out.toBlob(
+      (result) => (result ? resolve(result) : reject(new Error("No s’ha pogut crear la miniatura"))),
+      "image/jpeg",
+      0.92
+    );
+  });
+  return blob;
+}
+
+async function downloadExportThumbnail(track, videoName) {
+  const blob = await renderExportThumbnailBlob(track);
+  const name = thumbnailFilename(videoName);
+  triggerDownload(blob, name);
+  return name;
+}
+
 async function downloadVideoFile(job) {
   const jobId = job.job_id;
   const response = await fetch(`/api/video/${encodeURIComponent(jobId)}/file`);
@@ -2890,14 +3096,7 @@ async function downloadVideoFile(job) {
   const name = match
     ? decodeURIComponent(match[1].replace(/"/g, ""))
     : job.filename || "karaoke.mp4";
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+  triggerDownload(blob, name);
   return name;
 }
 
@@ -4317,7 +4516,18 @@ async function exportKaraokeVideo(track, regenerate = false) {
     ready = await buildKaraokeVideo(track, label);
   }
   const name = await downloadVideoFile(ready);
-  setExportVideoStatus(`Vídeo desat · ${name}`, "ok");
+  let thumbName = "";
+  try {
+    setExportVideoStatus(`${label} · creant la miniatura…`, "running");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    thumbName = await downloadExportThumbnail(track, name);
+  } catch (err) {
+    console.warn("thumbnail", err);
+  }
+  setExportVideoStatus(
+    thumbName ? `Vídeo i miniatura desats · ${name}` : `Vídeo desat · ${name}`,
+    "ok"
+  );
   loadLibrary().catch(() => {});
 }
 
