@@ -39,6 +39,9 @@ const songArtist = document.getElementById("songArtist");
 const lyricsStatus = document.getElementById("lyricsStatus");
 const libraryMeta = document.getElementById("libraryMeta");
 const playBtn = document.getElementById("playBtn");
+const stageSeekBar = document.getElementById("stageSeekBar");
+const stageSeekTime = document.getElementById("stageSeekTime");
+const stageSeekDuration = document.getElementById("stageSeekDuration");
 const coverArtist = document.getElementById("coverArtist");
 const coverTitle = document.getElementById("coverTitle");
 const coverIndex = document.getElementById("coverIndex");
@@ -5393,6 +5396,83 @@ function updatePlayButton() {
   playBtn.classList.toggle("is-playing", playing);
   playBtn.hidden = playing;
   viewStage.classList.toggle("is-live", playing);
+  updateSeekBar();
+}
+
+function formatSeekTime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function songDurationSeconds() {
+  const fromPlayer = Number(player.duration);
+  if (Number.isFinite(fromPlayer) && fromPlayer > 0) return fromPlayer;
+  const track = currentId ? tracks.find((item) => item.id === currentId) : null;
+  const fromTrack = Number(track?.duration);
+  return Number.isFinite(fromTrack) && fromTrack > 0 ? fromTrack : 0;
+}
+
+let seekDragging = false;
+
+function paintSeekBar(current, duration) {
+  if (!stageSeekBar) return;
+  const dur = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const time = Math.min(dur || 0, Math.max(0, Number(current) || 0));
+  const canSeek = Boolean(player.src) && dur > 0 && !stageCapture;
+  stageSeekBar.max = dur ? String(dur) : "0";
+  stageSeekBar.value = String(dur ? time : 0);
+  stageSeekBar.disabled = !canSeek;
+  const pct = dur ? (time / dur) * 100 : 0;
+  stageSeekBar.style.setProperty("--seek-pct", `${pct}%`);
+  stageSeekBar.setAttribute(
+    "aria-valuetext",
+    dur ? `${formatSeekTime(time)} de ${formatSeekTime(dur)}` : "0:00"
+  );
+  if (stageSeekTime) stageSeekTime.textContent = formatSeekTime(time);
+  if (stageSeekDuration) stageSeekDuration.textContent = formatSeekTime(dur);
+}
+
+function updateSeekBar() {
+  if (seekDragging) return;
+  paintSeekBar(karaokeNow(), songDurationSeconds());
+}
+
+function seekSongTo(seconds) {
+  if (stageCapture || !player.src) return;
+  const duration = songDurationSeconds();
+  let next = Math.max(0, Number(seconds) || 0);
+  if (duration > 0) next = Math.min(duration, next);
+  markAudioClockReady();
+  try {
+    player.currentTime = next;
+  } catch {
+    /* seeking before metadata is ready is not fatal */
+  }
+  paintSeekBar(next, duration);
+  syncKaraoke();
+  syncYoutubeToAudio();
+}
+
+function onSeekBarInput() {
+  if (!stageSeekBar || stageSeekBar.disabled) return;
+  seekDragging = true;
+  const duration = songDurationSeconds();
+  const next = Number(stageSeekBar.value) || 0;
+  paintSeekBar(next, duration);
+  seekSongTo(next);
+}
+
+function onSeekBarCommit() {
+  if (!stageSeekBar) return;
+  seekDragging = false;
+  seekSongTo(Number(stageSeekBar.value) || 0);
+  updateSeekBar();
 }
 
 async function togglePlayback() {
@@ -5432,6 +5512,7 @@ function tick() {
       syncYoutubeToAudio();
     }
   }
+  updateSeekBar();
   rafId = requestAnimationFrame(tick);
 }
 
@@ -5859,6 +5940,8 @@ async function openSong(trackId, { autoplay = true } = {}) {
   audioClockReady = false;
   player.src = audioUrlFor(trackId, useInstrumental ? "instrumental" : "original");
   resetAudioClock();
+  seekDragging = false;
+  updateSeekBar();
   applyAudioModeButtons();
   loadYoutubeBackdrop(trackId);
   setStemStatus("");
@@ -6723,6 +6806,13 @@ previewPlayers.forEach((el) => el.addEventListener("ended", onPreviewEnded));
 playBtn.addEventListener("click", () => {
   togglePlayback().catch(() => updatePlayButton());
 });
+stageSeekBar?.addEventListener("pointerdown", () => {
+  seekDragging = true;
+});
+stageSeekBar?.addEventListener("input", onSeekBarInput);
+stageSeekBar?.addEventListener("change", onSeekBarCommit);
+stageSeekBar?.addEventListener("pointerup", onSeekBarCommit);
+stageSeekBar?.addEventListener("pointercancel", onSeekBarCommit);
 player.addEventListener("play", () => {
   markAudioClockReady();
   startTicker();
@@ -6741,8 +6831,15 @@ player.addEventListener("pause", () => {
   syncYoutubeToAudio();
 });
 player.addEventListener("seeked", () => {
+  syncKaraoke();
+  updateSeekBar();
   syncYoutubeToAudio();
 });
+player.addEventListener("loadedmetadata", () => {
+  markAudioClockReady();
+  updateSeekBar();
+});
+player.addEventListener("durationchange", () => updateSeekBar());
 player.addEventListener("ended", () => {
   syncWordFills(Number.POSITIVE_INFINITY);
   if (stageCapture && !stageCapture.aborted) {
