@@ -207,6 +207,9 @@ def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
     assert "apad=pad_dur=8.000" in joined
     assert "amix=" in joined
     assert "[a]" in command
+    assert "sine=f=196" not in joined
+    assert "anoisesrc=" in joined
+    assert "color=pink" in joined
 
 
 def test_copy_mux_uses_client_intro_seconds() -> None:

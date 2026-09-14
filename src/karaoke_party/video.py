@@ -31,7 +31,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 19
+KARAOKE_RENDER_VERSION = 20
 STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
 LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
 AUDIO_MODES = frozenset({"original", "instrumental"})
@@ -41,6 +41,8 @@ YOUTUBE_AUDIO_BITRATE = "384k"
 INTRO_SECONDS = 3.0
 OUTRO_SECONDS = 8.0
 OUTRO_PAD_SECONDS = 2.0
+# Soft air swell under the logo fade-in. Keep shorter than INTRO_SECONDS.
+INTRO_APPEAR_SECONDS = 0.9
 # Stage palette (styles.css): ink, gold, cyan, bg.
 _INK = "&H00EAF6FF"
 _GOLD = "&H004AE1FF"
@@ -593,6 +595,13 @@ def build_mux_command(
     ]
 
 
+def _intro_appear_source() -> str:
+    """Pink-noise whoosh: an appearance, not a pitched beep."""
+    return (
+        f"anoisesrc=color=pink:r={YOUTUBE_AUDIO_RATE}:d={INTRO_APPEAR_SECONDS:.2f}:seed=11"
+    )
+
+
 def bumpered_duration(song_seconds: float, intro_seconds: float | None = None) -> float:
     """Song length plus the YouTube intro and outro bumpers."""
     intro = resolve_intro_seconds(intro_seconds)
@@ -608,7 +617,8 @@ def _copy_mux_audio_graph(song_seconds: float, intro_seconds: float | None = Non
     fmt = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts=stereo"
     return (
         f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}[song];"
-        f"[2:a]{fmt},afade=t=out:st=0.05:d=0.35,volume=0.55[sting];"
+        f"[2:a]{fmt},highpass=f=140,lowpass=f=1600,"
+        f"afade=t=in:d=0.20,afade=t=out:st=0.26:d=0.58,volume=0.34[sting];"
         f"[3:a]{fmt},afade=t=in:d=0.15,afade=t=out:st=1.2:d=0.8,"
         f"adelay={pad_ms}|{pad_ms},volume=0.28[pad];"
         "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
@@ -649,7 +659,7 @@ def build_copy_mux_command(
         "-f",
         "lavfi",
         "-i",
-        f"sine=f=196:r={YOUTUBE_AUDIO_RATE}:d=0.4",
+        _intro_appear_source(),
         "-f",
         "lavfi",
         "-i",
