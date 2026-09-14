@@ -3777,31 +3777,77 @@ function paintExportRestRing(ctx) {
   ctx.restore();
 }
 
-function paintExportApproachBar(ctx) {
+function parseCssBlur(filter) {
+  const match = /blur\(([\d.]+)px\)/.exec(filter || "");
+  return match ? Number(match[1]) : 0;
+}
+
+function cssGradientStops(backgroundImage) {
+  const colors = [];
+  const re = /rgba?\([^)]+\)/g;
+  let match;
+  while ((match = re.exec(backgroundImage || ""))) colors.push(match[0]);
+  return colors;
+}
+
+function paintExportApproachTrail(ctx, box, view, pseudo) {
+  if (!pseudo || pseudo.content === "none") return;
+  const trailW = Number.parseFloat(pseudo.width);
+  if (!Number.isFinite(trailW) || trailW < 0.5) return;
+  const scale = view.scale;
+  const x = box.left * scale + view.tx;
+  const y = box.top * scale + view.ty;
+  const w = box.width * scale;
+  const h = box.height * scale;
+  const width = trailW * scale;
+  const rightInset = (Number.parseFloat(pseudo.right) || 0) * scale;
+  const blur = parseCssBlur(pseudo.filter) * scale;
+  const trailRight = x + w - rightInset;
+  const trailLeft = trailRight - width;
+  const stops = cssGradientStops(pseudo.backgroundImage);
+  const grad = ctx.createLinearGradient(trailLeft, 0, trailRight, 0);
+  if (stops.length >= 2) {
+    grad.addColorStop(0, stops[0]);
+    grad.addColorStop(1, stops[stops.length - 1]);
+  } else {
+    grad.addColorStop(0, "rgba(255, 225, 74, 0)");
+    grad.addColorStop(1, "rgba(255, 225, 74, 0.4)");
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(trailLeft - blur, y - blur, width + blur, h + blur * 2);
+  ctx.clip();
+  if (blur > 0) ctx.filter = `blur(${blur}px)`;
+  ctx.fillStyle = grad;
+  ctx.fillRect(trailLeft, y, width, h);
+  ctx.restore();
+}
+
+function paintExportApproachBar(ctx, view) {
   if (!approachEl?.classList.contains("is-on")) return;
   const opacity = elementOpacity(approachEl);
   if (opacity < 0.02) return;
   const box = approachEl.getBoundingClientRect();
   if (box.width < 0.5 || box.height < 0.5) return;
-  const glowW = Math.max(46, box.height * 3.4);
+  const style = getComputedStyle(approachEl);
   ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = opacity;
-  ctx.save();
-  ctx.filter = "blur(10px)";
-  const wash = ctx.createLinearGradient(box.left - glowW, 0, box.left + box.width, 0);
-  wash.addColorStop(0, "rgba(255, 225, 74, 0)");
-  wash.addColorStop(0.58, "rgba(255, 225, 74, 0.22)");
-  wash.addColorStop(1, "rgba(255, 225, 74, 0.55)");
-  ctx.fillStyle = wash;
-  ctx.fillRect(box.left - glowW, box.top - 6, glowW + box.width + 8, box.height + 12);
-  ctx.restore();
-  ctx.fillStyle = "#ffe14a";
+  paintExportApproachTrail(ctx, box, view, getComputedStyle(approachEl, "::before"));
+  paintExportApproachTrail(ctx, box, view, getComputedStyle(approachEl, "::after"));
+  const scale = view.scale;
+  const x = box.left * scale + view.tx;
+  const y = box.top * scale + view.ty;
+  const w = box.width * scale;
+  const h = box.height * scale;
+  ctx.filter = "none";
+  ctx.fillStyle = style.backgroundColor || "#ffe14a";
   if (typeof ctx.roundRect === "function") {
     ctx.beginPath();
-    ctx.roundRect(box.left, box.top, box.width, box.height, box.width / 2);
+    ctx.roundRect(x, y, w, h, w / 2);
     ctx.fill();
   } else {
-    ctx.fillRect(box.left, box.top, box.width, box.height);
+    ctx.fillRect(x, y, w, h);
   }
   ctx.restore();
 }
@@ -3957,7 +4003,7 @@ function paintExportFrame(options = {}) {
   exportProfile.bg += afterBackground - startedAt;
   if (!options.skipText) {
     paintExportRestRing(ctx);
-    paintExportApproachBar(ctx);
+    paintExportApproachBar(ctx, view);
     paintExportText(ctx, view);
     exportProfile.text += performance.now() - afterBackground;
   }

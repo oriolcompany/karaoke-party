@@ -31,7 +31,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 22
+KARAOKE_RENDER_VERSION = 23
 STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
 LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
 AUDIO_MODES = frozenset({"original", "instrumental"})
