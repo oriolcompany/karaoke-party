@@ -2232,6 +2232,7 @@ async def upload_stage_video(
     lyrics_size: str = Query("normal"),
     aura_particles: bool = Query(True),
     audio: str = Query("original"),
+    intro_seconds: float | None = Query(None),
 ) -> dict:
     """Accept a browser capture of the live stage and mux it with the chosen audio."""
     from .track_cache import karaoke_path
@@ -2243,6 +2244,7 @@ async def upload_stage_video(
         lyrics_size=lyrics_size,
         aura_particles=aura_particles,
         audio=audio,
+        intro_seconds=intro_seconds,
     )
     key = cache_key(track.artist, track.title, track.duration)
     if load_aligned_cached(aligned_cache_dir(), key) is None:
@@ -2271,6 +2273,7 @@ async def upload_stage_video(
             ),
             output_path=output,
             duration=float(track.duration) or 0.0,
+            intro_seconds=look["intro_seconds"],
         )
         mark_karaoke_exported(aligned_cache_dir(), key, look)
     except HTTPException:

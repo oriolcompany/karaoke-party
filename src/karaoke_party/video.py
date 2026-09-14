@@ -31,14 +31,14 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 18
+KARAOKE_RENDER_VERSION = 19
 STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
 LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
 AUDIO_MODES = frozenset({"original", "instrumental"})
 YOUTUBE_AUDIO_RATE = 48000
 YOUTUBE_AUDIO_BITRATE = "384k"
 # YouTube bumpers painted by the browser encoder. Keep in sync with app.js.
-INTRO_SECONDS = 5.0
+INTRO_SECONDS = 3.0
 OUTRO_SECONDS = 8.0
 OUTRO_PAD_SECONDS = 2.0
 # Stage palette (styles.css): ink, gold, cyan, bg.
@@ -67,6 +67,19 @@ def download_filename(artist: str, title: str) -> str:
     return f"{safe}.mp4"
 
 
+def resolve_intro_seconds(value: float | None = None) -> float:
+    """Clamp the YouTube intro length the browser actually painted."""
+    if value is None:
+        return float(INTRO_SECONDS)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return float(INTRO_SECONDS)
+    if not math.isfinite(seconds):
+        return float(INTRO_SECONDS)
+    return max(0.0, min(15.0, round(seconds, 3)))
+
+
 def normalize_stage_look(
     *,
     background: str = "aura",
@@ -74,6 +87,7 @@ def normalize_stage_look(
     lyrics_size: str = "normal",
     aura_particles: bool = True,
     audio: str = "original",
+    intro_seconds: float | None = None,
     **_unused,
 ) -> dict:
     bg = str(background or "aura").strip().lower()
@@ -85,6 +99,7 @@ def normalize_stage_look(
         "lyrics_size": size if size in LYRICS_SIZES else "normal",
         "aura_particles": bool(aura_particles),
         "audio": mix if mix in AUDIO_MODES else "original",
+        "intro_seconds": resolve_intro_seconds(intro_seconds),
     }
 
 
@@ -122,6 +137,10 @@ def karaoke_is_current(
     if bool(meta.get("aura_particles", True)) != bool(expected["aura_particles"]):
         return None
     if str(meta.get("audio") or "original") != expected["audio"]:
+        return None
+    if "intro_seconds" not in meta:
+        return None
+    if abs(float(meta.get("intro_seconds")) - expected["intro_seconds"]) > 0.001:
         return None
     if str(meta.get("source") or "") != "stage":
         return None
@@ -161,6 +180,7 @@ def _write_karaoke_meta(tracks_root: Path, key: str, look: dict | str) -> None:
                 "lyrics_size": payload["lyrics_size"],
                 "aura_particles": payload["aura_particles"],
                 "audio": payload["audio"],
+                "intro_seconds": payload["intro_seconds"],
                 "source": "stage",
             },
             ensure_ascii=False,
@@ -573,15 +593,17 @@ def build_mux_command(
     ]
 
 
-def bumpered_duration(song_seconds: float) -> float:
+def bumpered_duration(song_seconds: float, intro_seconds: float | None = None) -> float:
     """Song length plus the YouTube intro and outro bumpers."""
-    return INTRO_SECONDS + max(float(song_seconds), 0.2) + OUTRO_SECONDS
+    intro = resolve_intro_seconds(intro_seconds)
+    return intro + max(float(song_seconds), 0.2) + OUTRO_SECONDS
 
 
-def _copy_mux_audio_graph(song_seconds: float) -> str:
+def _copy_mux_audio_graph(song_seconds: float, intro_seconds: float | None = None) -> str:
     """Delay the mix for the intro, then pad silence under the outro."""
-    intro_ms = int(round(INTRO_SECONDS * 1000.0))
-    pad_ms = int(round((INTRO_SECONDS + song_seconds) * 1000.0))
+    intro = resolve_intro_seconds(intro_seconds)
+    intro_ms = int(round(intro * 1000.0))
+    pad_ms = int(round((intro + song_seconds) * 1000.0))
     rate = YOUTUBE_AUDIO_RATE
     fmt = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts=stereo"
     return (
@@ -599,10 +621,12 @@ def build_copy_mux_command(
     audio_name: str,
     output_name: str,
     duration: float,
+    intro_seconds: float | None = None,
 ) -> list[str]:
     """Wrap an already encoded H.264 stream: no second generation of losses."""
+    intro = resolve_intro_seconds(intro_seconds)
     song = max(float(duration), 0.2)
-    total = bumpered_duration(song)
+    total = bumpered_duration(song, intro)
     return [
         "ffmpeg",
         "-y",
@@ -631,7 +655,7 @@ def build_copy_mux_command(
         "-i",
         f"sine=f=131:r={YOUTUBE_AUDIO_RATE}:d={OUTRO_PAD_SECONDS:.1f}",
         "-filter_complex",
-        _copy_mux_audio_graph(song),
+        _copy_mux_audio_graph(song, intro),
         "-t",
         f"{total:.3f}",
         "-map",
@@ -663,6 +687,7 @@ def mux_stage_recording(
     audio_path: Path,
     output_path: Path,
     duration: float,
+    intro_seconds: float | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> Path:
     if not ffmpeg_available():
@@ -693,14 +718,24 @@ def mux_stage_recording(
         shutil.copy2(video_path, work_dir / video_name)
         shutil.copy2(audio_path, work_dir / audio_name)
         out_name = "out.mp4"
-        build = build_copy_mux_command if stream_copy else build_mux_command
-        command = build(
-            video_name=video_name,
-            audio_name=audio_name,
-            output_name=out_name,
-            duration=duration,
-        )
-        progress_span = bumpered_duration(duration) if stream_copy else duration
+        intro = resolve_intro_seconds(intro_seconds)
+        if stream_copy:
+            command = build_copy_mux_command(
+                video_name=video_name,
+                audio_name=audio_name,
+                output_name=out_name,
+                duration=duration,
+                intro_seconds=intro,
+            )
+            progress_span = bumpered_duration(duration, intro)
+        else:
+            command = build_mux_command(
+                video_name=video_name,
+                audio_name=audio_name,
+                output_name=out_name,
+                duration=duration,
+            )
+            progress_span = duration
         _run_ffmpeg(command, work_dir, progress_span, on_progress)
         produced = work_dir / out_name
         if not produced.is_file() or produced.stat().st_size <= 0:

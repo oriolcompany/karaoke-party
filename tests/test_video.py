@@ -198,21 +198,35 @@ def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
     assert command[command.index("-r") + 1] == "30"
     assert command.index("-r") < command.index("stage.h264")
     assert command[command.index("-c:a") + 1] == "aac"
-    assert command[command.index("-t") + 1] == "25.500"
+    assert command[command.index("-t") + 1] == "23.500"
     assert "libx264" not in command
     assert "+faststart" in command
     # -shortest would make ffmpeg drop the buffered audio of a copied raw stream.
     assert "-shortest" not in command
-    assert "adelay=5000" in joined
+    assert "adelay=3000" in joined
     assert "apad=pad_dur=8.000" in joined
     assert "amix=" in joined
     assert "[a]" in command
 
 
+def test_copy_mux_uses_client_intro_seconds() -> None:
+    command = build_copy_mux_command(
+        video_name="stage.h264",
+        audio_name="audio.mp3",
+        output_name="out.mp4",
+        duration=12.5,
+        intro_seconds=5.0,
+    )
+    joined = " ".join(command)
+    assert command[command.index("-t") + 1] == "25.500"
+    assert "adelay=5000" in joined
+    assert bumpered_duration(12.5, 5.0) == 25.5
+
+
 def test_bumpers_extend_copy_mux_to_intro_song_outro() -> None:
-    assert INTRO_SECONDS == 5.0
+    assert INTRO_SECONDS == 3.0
     assert OUTRO_SECONDS == 8.0
-    assert bumpered_duration(12.5) == 25.5
+    assert bumpered_duration(12.5) == 23.5
 
 
 def test_choose_audio_uses_original_even_with_instrumental(tmp_path: Path) -> None:
@@ -236,6 +250,7 @@ def test_normalize_stage_look_defaults_and_aliases() -> None:
         "lyrics_size": "normal",
         "aura_particles": True,
         "audio": "original",
+        "intro_seconds": 3.0,
     }
     assert normalize_stage_look(audio="instrumental")["audio"] == "instrumental"
     assert normalize_stage_look(background="nope", lyrics_size="huge")["background"] == "aura"
@@ -269,7 +284,7 @@ def test_karaoke_is_current_requires_newer_than_align(tmp_path: Path) -> None:
     aligned.write_text("{}", encoding="utf-8")
     video.write_bytes(b"mp4")
     karaoke_meta_path(tmp_path, key).write_text(
-        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "aura", "audio": "original", "source": "stage"}}',
+        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "aura", "audio": "original", "intro_seconds": 3.0, "source": "stage"}}',
         encoding="utf-8",
     )
     os.utime(aligned, (1_000_000, 1_000_000))
@@ -287,7 +302,7 @@ def test_karaoke_is_current_rejects_other_stage_look(tmp_path: Path) -> None:
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"mp4")
     karaoke_meta_path(tmp_path, key).write_text(
-        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "cover", "lyrics_layout": "stack", "lyrics_size": "normal", "aura_particles": true, "audio": "original", "source": "stage"}}',
+        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "cover", "lyrics_layout": "stack", "lyrics_size": "normal", "aura_particles": true, "audio": "original", "intro_seconds": 3.0, "source": "stage"}}',
         encoding="utf-8",
     )
     os.utime(aligned_path(tmp_path, key), (1_000_000, 1_000_000))
@@ -296,6 +311,23 @@ def test_karaoke_is_current_rejects_other_stage_look(tmp_path: Path) -> None:
     assert karaoke_is_current(tmp_path, key, {"background": "aura"}) is None
     assert karaoke_is_current(tmp_path, key, {"background": "cover", "lyrics_layout": "dual"}) is None
     assert karaoke_is_current(tmp_path, key, {"background": "cover", "audio": "instrumental"}) is None
+    assert karaoke_is_current(tmp_path, key, {"background": "cover", "intro_seconds": 5.0}) is None
+
+
+def test_karaoke_is_current_rejects_missing_intro_seconds(tmp_path: Path) -> None:
+    key = cache_key("A", "B", 10.0)
+    write_meta(tmp_path, key, artist="A", title="B", duration=10.0)
+    video = karaoke_path(tmp_path, key)
+    aligned_path(tmp_path, key).write_text("{}", encoding="utf-8")
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"mp4")
+    karaoke_meta_path(tmp_path, key).write_text(
+        f'{{"version": {KARAOKE_RENDER_VERSION}, "background": "aura", "audio": "original", "source": "stage"}}',
+        encoding="utf-8",
+    )
+    os.utime(aligned_path(tmp_path, key), (1_000_000, 1_000_000))
+    os.utime(video, (2_000_000, 2_000_000))
+    assert karaoke_is_current(tmp_path, key) is None
 
 
 def test_karaoke_is_current_rejects_old_cover_export(tmp_path: Path) -> None:

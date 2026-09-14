@@ -453,7 +453,7 @@ const EXPORT_THUMB_W = 1280;
 const EXPORT_THUMB_H = 720;
 const EXPORT_VIDEO_FPS = 30;
 // Keep in sync with INTRO_SECONDS / OUTRO_SECONDS in video.py.
-const EXPORT_INTRO_SECONDS = 5;
+const EXPORT_INTRO_SECONDS = 3;
 const EXPORT_OUTRO_SECONDS = 8;
 // 1:1 with the output frame: supersampling the aura cost four times the fill
 // work and bought nothing once the video was scaled back down to 1080p.
@@ -3579,15 +3579,15 @@ function drawExportBrandMark(ctx, x, y, size) {
 
 function paintExportIntro(ctx, t, track) {
   const fadeIn = smoothstep(t / 0.55);
-  const fadeOut = smoothstep((t - 4.2) / 0.8);
+  const fadeOut = smoothstep((t - 2.32) / 0.68);
   const veil = fadeIn * (1 - fadeOut);
   if (veil < 0.01) return;
   const mark = 236;
-  const settle = smoothstep((t - 1.2) / 0.42);
+  const settle = smoothstep((t - 0.7) / 0.42);
   const endLogoSize = mark;
   const startLogoSize = mark * 1.72;
   const logoSize = startLogoSize + (endLogoSize - startLogoSize) * settle;
-  const textIn = smoothstep((t - 1.28) / 0.36);
+  const textIn = smoothstep((t - 0.78) / 0.36);
   const artist = (track?.artist || "").toLocaleUpperCase("ca");
   const title = track?.title || "";
   const maxTextW = 1680;
@@ -4084,6 +4084,7 @@ async function uploadStageRecording(track, blob, filename) {
     lyrics_size: look.lyrics_size,
     aura_particles: look.aura_particles ? "true" : "false",
     audio: look.audio,
+    intro_seconds: String(EXPORT_INTRO_SECONDS),
   });
   return api(`/api/video/upload?${query}`, {
     method: "POST",
