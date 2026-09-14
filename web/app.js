@@ -3241,23 +3241,67 @@ function elementOpacity(el) {
   return opacity;
 }
 
-const EXPORT_TEXT_SHADOWS = [
-  { x: 0, y: 1, blur: 0, color: "rgba(0,0,0,0.7)" },
-  { x: 0, y: 2, blur: 8, color: "rgba(0,0,0,0.85)" },
-  { x: 0, y: 0, blur: 18, color: "rgba(0,0,0,0.8)" },
-  { x: 0, y: 0, blur: 36, color: "rgba(0,0,0,0.55)" },
-];
+function parseCssTextShadow(value) {
+  if (!value || value === "none") return [];
+  const color = "(?:rgba?\\([^)]+\\)|hsla?\\([^)]+\\)|#[0-9a-fA-F]{3,8}|[a-z]+)";
+  const len = "(-?[\\d.]+)px";
+  const re = new RegExp(
+    `(?:(${color})\\s+)?${len}\\s+${len}(?:\\s+${len})?(?:\\s+(${color}))?`,
+    "gi"
+  );
+  const layers = [];
+  let match;
+  while ((match = re.exec(value))) {
+    const tint = match[1] || match[5];
+    if (!tint || tint === "transparent") continue;
+    layers.push({
+      color: tint,
+      x: Number(match[2]),
+      y: Number(match[3]),
+      blur: Number(match[4] || 0),
+    });
+  }
+  return layers;
+}
 
-function drawShadowedText(ctx, text, x, y, fill, withAuraShadow) {
-  if (withAuraShadow) {
-    for (const layer of EXPORT_TEXT_SHADOWS) {
-      ctx.shadowOffsetX = layer.x;
-      ctx.shadowOffsetY = layer.y;
-      ctx.shadowBlur = layer.blur;
-      ctx.shadowColor = layer.color;
-      ctx.fillStyle = fill;
-      ctx.fillText(text, x, y);
-    }
+function scaleCanvasFont(font, scale) {
+  return String(font).replace(/(\d+(?:\.\d+)?)px/g, (_, n) => `${Number(n) * scale}px`);
+}
+
+function mapExportPoint(x, y, view) {
+  return { x: x * view.scale + view.tx, y: y * view.scale + view.ty };
+}
+
+function mapExportRect(rect, view) {
+  if (!rect) return null;
+  return {
+    left: rect.left * view.scale + view.tx,
+    top: rect.top * view.scale + view.ty,
+    width: rect.width * view.scale,
+    height: rect.height * view.scale,
+  };
+}
+
+function mapExportShadows(shadows, scale) {
+  return (shadows || []).map((layer) => ({
+    color: layer.color,
+    x: layer.x * scale,
+    y: layer.y * scale,
+    blur: layer.blur * scale,
+  }));
+}
+
+/** CSS text-shadow: halo only, then the fill once — not 4 stacked fills. */
+function drawCssTextShadows(ctx, text, x, y, fill, shadows) {
+  for (const layer of shadows) {
+    ctx.save();
+    ctx.shadowColor = layer.color;
+    ctx.shadowBlur = layer.blur;
+    ctx.shadowOffsetX = layer.x + 4096;
+    ctx.shadowOffsetY = layer.y;
+    ctx.fillStyle = fill;
+    ctx.fillText(text, x - 4096, y);
+    ctx.restore();
   }
   ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
@@ -3285,7 +3329,7 @@ function glyphBaseline(ctx, text, glyph) {
   );
 }
 
-function measuredTextItem(ctx, { text, style, glyph, color, opacity, shadow, clip, fill }) {
+function measuredTextItem(ctx, { text, style, glyph, color, opacity, shadows, clip, fill }) {
   const font = canvasFontFrom(style);
   ctx.font = font;
   applyCanvasLetterSpacing(ctx, style);
@@ -3295,7 +3339,7 @@ function measuredTextItem(ctx, { text, style, glyph, color, opacity, shadow, cli
     spacing: style.letterSpacing || "0px",
     color,
     opacity,
-    shadow,
+    shadows,
     clip,
     fill,
     x: glyph.left,
@@ -3303,7 +3347,7 @@ function measuredTextItem(ctx, { text, style, glyph, color, opacity, shadow, cli
   };
 }
 
-function collectExportElementText(ctx, items, el, { shadow, clip = null }) {
+function collectExportElementText(ctx, items, el, { clip = null } = {}) {
   if (!el) return;
   const opacity = elementOpacity(el);
   if (opacity < 0.02) return;
@@ -3319,14 +3363,14 @@ function collectExportElementText(ctx, items, el, { shadow, clip = null }) {
       glyph,
       color: style.color,
       opacity,
-      shadow,
+      shadows: parseCssTextShadow(style.textShadow),
       clip,
       fill: null,
     })
   );
 }
 
-function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
+function collectExportWord(ctx, items, wordEl, { clip }) {
   const opacity = elementOpacity(wordEl);
   if (opacity < 0.02) return;
   const base = wordEl.querySelector(".k-word-base") || wordEl;
@@ -3352,7 +3396,7 @@ function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
       glyph,
       color: baseStyle.color || style.color,
       opacity,
-      shadow,
+      shadows: parseCssTextShadow(baseStyle.textShadow || style.textShadow),
       clip,
       fill,
     })
@@ -3361,43 +3405,48 @@ function collectExportWord(ctx, items, wordEl, { shadow, clip }) {
 
 function collectExportText(ctx) {
   const items = [];
-  const shadow =
-    viewStage.classList.contains("has-aura") || viewStage.classList.contains("has-image");
   if (lyricsEl) {
     const clip = lyricsEl.getBoundingClientRect();
     lyricsEl
       .querySelectorAll(".k-word")
-      .forEach((node) => collectExportWord(ctx, items, node, { shadow, clip }));
+      .forEach((node) => collectExportWord(ctx, items, node, { clip }));
     const empty = lyricsEl.querySelector(".lyrics-empty");
-    if (empty) collectExportElementText(ctx, items, empty, { shadow: false, clip });
+    if (empty) collectExportElementText(ctx, items, empty, { clip });
     const restCount = lyricsEl.querySelector(
       ".k-rest-count.is-on .k-rest-count-num, .k-rest-count.is-leaving .k-rest-count-num"
     );
-    if (restCount) collectExportElementText(ctx, items, restCount, { shadow: true, clip });
+    if (restCount) collectExportElementText(ctx, items, restCount, { clip });
   }
   return items;
 }
 
-function clipTextItem(ctx, item) {
-  if (!item.clip) return;
-  ctx.beginPath();
-  ctx.rect(item.clip.left, item.clip.top, item.clip.width, item.clip.height);
-  ctx.clip();
-}
-
-function prepareTextItem(ctx, item) {
+function prepareExportTextItem(ctx, item, view) {
   ctx.globalAlpha = item.opacity;
-  ctx.font = item.font;
-  if (typeof ctx.letterSpacing === "string") ctx.letterSpacing = item.spacing;
+  ctx.font = scaleCanvasFont(item.font, view.scale);
+  if (typeof ctx.letterSpacing === "string") {
+    const spacing = Number.parseFloat(item.spacing) || 0;
+    ctx.letterSpacing = `${spacing * view.scale}px`;
+  }
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
+}
+
+function clipExportRect(ctx, rect, view) {
+  const box = mapExportRect(rect, view);
+  if (!box) return;
+  ctx.beginPath();
+  ctx.rect(box.left, box.top, box.width, box.height);
+  ctx.clip();
 }
 
 /** Everything but the gold fill: the part that only changes when the line does. */
 function exportTextSignature(items) {
   let signature = "";
   for (const item of items) {
-    signature += `${item.text}|${item.font}|${item.spacing}|${item.color}|${item.shadow ? 1 : 0}`;
+    const halo = (item.shadows || [])
+      .map((layer) => `${layer.color}:${layer.x}:${layer.y}:${layer.blur}`)
+      .join(",");
+    signature += `${item.text}|${item.font}|${item.spacing}|${item.color}|${halo}`;
     signature += `|${item.opacity.toFixed(3)}|${item.x.toFixed(2)}|${item.y.toFixed(2)}`;
     if (item.clip) {
       signature += `|${item.clip.left.toFixed(1)},${item.clip.top.toFixed(1)}`;
@@ -3408,29 +3457,41 @@ function exportTextSignature(items) {
   return signature;
 }
 
-function drawExportTextLayer(ctx, items) {
+function drawExportTextLayer(ctx, items, view) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   for (const item of items) {
     ctx.save();
-    clipTextItem(ctx, item);
-    prepareTextItem(ctx, item);
-    drawShadowedText(ctx, item.text, item.x, item.y, item.color, item.shadow);
+    clipExportRect(ctx, item.clip, view);
+    prepareExportTextItem(ctx, item, view);
+    const at = mapExportPoint(item.x, item.y, view);
+    drawCssTextShadows(
+      ctx,
+      item.text,
+      at.x,
+      at.y,
+      item.color,
+      mapExportShadows(item.shadows, view.scale)
+    );
     ctx.restore();
   }
 }
 
-function drawExportTextFills(ctx, items) {
+function drawExportTextFills(ctx, items, view) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   for (const item of items) {
     if (!item.fill) continue;
     ctx.save();
-    clipTextItem(ctx, item);
-    prepareTextItem(ctx, item);
+    clipExportRect(ctx, item.clip, view);
+    prepareExportTextItem(ctx, item, view);
+    const box = mapExportRect(item.fill.rect, view);
     ctx.beginPath();
-    ctx.rect(item.fill.rect.left, item.fill.rect.top, item.fill.rect.width, item.fill.rect.height);
+    ctx.rect(box.left, box.top, box.width, box.height);
     ctx.clip();
     ctx.shadowColor = "transparent";
     ctx.shadowBlur = 0;
     ctx.fillStyle = item.fill.color;
-    ctx.fillText(item.text, item.x, item.y);
+    const at = mapExportPoint(item.x, item.y, view);
+    ctx.fillText(item.text, at.x, at.y);
     ctx.restore();
   }
 }
@@ -3444,8 +3505,8 @@ function paintExportText(ctx, view) {
   const items = collectExportText(ctx);
   const layer = stageCapture?.textLayer;
   if (!layer) {
-    drawExportTextLayer(ctx, items);
-    drawExportTextFills(ctx, items);
+    drawExportTextLayer(ctx, items, view);
+    drawExportTextFills(ctx, items, view);
     return;
   }
   const signature = exportTextSignature(items);
@@ -3454,16 +3515,14 @@ function paintExportText(ctx, view) {
     layer.signature = signature;
     layer.ctx.setTransform(1, 0, 0, 1, 0, 0);
     layer.ctx.clearRect(0, 0, EXPORT_VIDEO_W, EXPORT_VIDEO_H);
-    layer.ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     layer.ctx.imageSmoothingEnabled = true;
     if (layer.ctx.imageSmoothingQuality) layer.ctx.imageSmoothingQuality = "high";
-    drawExportTextLayer(layer.ctx, items);
+    drawExportTextLayer(layer.ctx, items, view);
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.drawImage(layer.canvas, 0, 0);
-  ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
-  drawExportTextFills(ctx, items);
+  drawExportTextFills(ctx, items, view);
 }
 
 // Map the stage layout onto the 1920x1080 frame. Text is drawn through the same
