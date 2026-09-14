@@ -12,8 +12,10 @@ import os
 import random
 import re
 import shutil
+import struct
 import subprocess
 import threading
+import wave
 from collections.abc import Callable
 from pathlib import Path
 
@@ -31,7 +33,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 23
+KARAOKE_RENDER_VERSION = 25
 STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
 LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
 AUDIO_MODES = frozenset({"original", "instrumental"})
@@ -41,8 +43,11 @@ YOUTUBE_AUDIO_BITRATE = "384k"
 INTRO_SECONDS = 3.0
 OUTRO_SECONDS = 8.0
 OUTRO_PAD_SECONDS = 2.0
-# Soft air swell under the logo fade-in. Keep shorter than INTRO_SECONDS.
-INTRO_APPEAR_SECONDS = 0.9
+# Logo ident under the fade-in. Keep shorter than INTRO_SECONDS.
+INTRO_APPEAR_SECONDS = 0.95
+INTRO_STING_NAME = "intro.wav"
+# Parked: gold sparkle ident. Set True to restore the intro sound.
+INTRO_STING_ENABLED = False
 # Stage palette (styles.css): ink, gold, cyan, bg.
 _INK = "&H00EAF6FF"
 _GOLD = "&H004AE1FF"
@@ -595,11 +600,91 @@ def build_mux_command(
     ]
 
 
-def _intro_appear_source() -> str:
-    """Pink-noise whoosh: an appearance, not a pitched beep."""
-    return (
-        f"anoisesrc=color=pink:r={YOUTUBE_AUDIO_RATE}:d={INTRO_APPEAR_SECONDS:.2f}:seed=11"
-    )
+def _exp_env(t: float, attack: float, decay: float) -> float:
+    if t < 0.0:
+        return 0.0
+    if t < attack:
+        ramp = t / max(attack, 1e-6)
+        return ramp * ramp
+    return math.exp(-(t - attack) / max(decay, 1e-6))
+
+
+def write_intro_appear_wav(path: Path, rate: int = YOUTUBE_AUDIO_RATE) -> Path:
+    """Gold sparkle + fifth that settles, with a short air whoosh under the logo."""
+    n = int(rate * INTRO_APPEAR_SECONDS)
+    left = [0.0] * n
+    right = [0.0] * n
+    rng = random.Random(11)
+    pink = 0.0
+    for i in range(n):
+        t = i / rate
+        white = rng.uniform(-1.0, 1.0)
+        pink = 0.97 * pink + 0.03 * white
+        whoosh = 0.38 * _exp_env(t, 0.14, 0.26)
+        sample = pink * 0.78 + white * 0.10
+        left[i] += sample * whoosh * 0.9
+        right[i] += sample * whoosh
+
+    def add_partial(
+        freq: float,
+        t0: float,
+        amp: float,
+        attack: float,
+        decay: float,
+        pan: float = 0.0,
+        end_freq: float | None = None,
+    ) -> None:
+        i0 = max(0, int(t0 * rate))
+        left_g = math.sqrt(max(0.0, 1.0 - pan))
+        right_g = math.sqrt(max(0.0, 1.0 + pan))
+        span = attack + decay * 1.35
+        for i in range(i0, n):
+            t = i / rate - t0
+            gain = amp * _exp_env(t, attack, decay)
+            if gain < 1e-5:
+                if t > attack:
+                    break
+                continue
+            if end_freq and end_freq != freq:
+                u = min(1.0, max(0.0, t / max(span, 1e-6)))
+                hz = freq * ((end_freq / freq) ** u)
+            else:
+                hz = freq
+            s = math.sin(2.0 * math.pi * hz * t) * gain
+            left[i] += s * left_g
+            right[i] += s * right_g
+
+    # Appear chirp as the logo blooms.
+    add_partial(220.0, 0.02, 0.10, 0.03, 0.10, pan=-0.12, end_freq=740.0)
+    # High glint.
+    add_partial(2093.0, 0.05, 0.06, 0.004, 0.06, pan=-0.2)
+    add_partial(1568.0, 0.055, 0.075, 0.006, 0.09, pan=0.22)
+    # Gold sparkle: G5 – B5 – D6.
+    add_partial(784.0, 0.07, 0.22, 0.007, 0.22, pan=-0.08)
+    add_partial(988.0, 0.078, 0.16, 0.007, 0.18, pan=0.12)
+    add_partial(1175.0, 0.09, 0.11, 0.006, 0.14, pan=0.04)
+    # Warm fifth that hangs while the logo holds.
+    add_partial(392.0, 0.16, 0.17, 0.04, 0.44, pan=-0.05)
+    add_partial(588.0, 0.18, 0.13, 0.05, 0.38, pan=0.07)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        frames = bytearray()
+        peak = 1e-6
+        for i in range(n):
+            peak = max(peak, abs(left[i]), abs(right[i]))
+        norm = 0.78 / peak
+        for i in range(n):
+            frames += struct.pack(
+                "<hh",
+                int(max(-1.0, min(1.0, math.tanh(left[i] * norm))) * 32767),
+                int(max(-1.0, min(1.0, math.tanh(right[i] * norm))) * 32767),
+            )
+        wav.writeframes(frames)
+    return path
 
 
 def bumpered_duration(song_seconds: float, intro_seconds: float | None = None) -> float:
@@ -615,14 +700,24 @@ def _copy_mux_audio_graph(song_seconds: float, intro_seconds: float | None = Non
     pad_ms = int(round((intro + song_seconds) * 1000.0))
     rate = YOUTUBE_AUDIO_RATE
     fmt = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts=stereo"
-    return (
-        f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}[song];"
-        f"[2:a]{fmt},highpass=f=140,lowpass=f=1600,"
-        f"afade=t=in:d=0.20,afade=t=out:st=0.26:d=0.58,volume=0.34[sting];"
-        f"[3:a]{fmt},afade=t=in:d=0.15,afade=t=out:st=1.2:d=0.8,"
+    song = f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}[song];"
+    # Intro ident (write_intro_appear_wav). Uncomment with INTRO_STING_ENABLED.
+    # sting = f"[2:a]{fmt},volume=0.82[sting];"
+    # pad_in = "[3:a]"
+    # mix = "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
+    if INTRO_STING_ENABLED:
+        pad_in = "[3:a]"
+        sting = f"[2:a]{fmt},volume=0.82[sting];"
+        mix = "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
+    else:
+        pad_in = "[2:a]"
+        sting = ""
+        mix = "[song][pad]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+    pad = (
+        f"{pad_in}{fmt},afade=t=in:d=0.15,afade=t=out:st=1.2:d=0.8,"
         f"adelay={pad_ms}|{pad_ms},volume=0.28[pad];"
-        "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
     )
+    return song + sting + pad + mix
 
 
 def build_copy_mux_command(
@@ -632,12 +727,13 @@ def build_copy_mux_command(
     output_name: str,
     duration: float,
     intro_seconds: float | None = None,
+    sting_name: str = INTRO_STING_NAME,
 ) -> list[str]:
     """Wrap an already encoded H.264 stream: no second generation of losses."""
     intro = resolve_intro_seconds(intro_seconds)
     song = max(float(duration), 0.2)
     total = bumpered_duration(song, intro)
-    return [
+    command = [
         "ffmpeg",
         "-y",
         "-hide_banner",
@@ -656,10 +752,10 @@ def build_copy_mux_command(
         video_name,
         "-i",
         audio_name,
-        "-f",
-        "lavfi",
-        "-i",
-        _intro_appear_source(),
+    ]
+    if INTRO_STING_ENABLED:
+        command += ["-i", sting_name]
+    command += [
         "-f",
         "lavfi",
         "-i",
@@ -689,6 +785,7 @@ def build_copy_mux_command(
         "+faststart",
         output_name,
     ]
+    return command
 
 
 def mux_stage_recording(
@@ -730,12 +827,15 @@ def mux_stage_recording(
         out_name = "out.mp4"
         intro = resolve_intro_seconds(intro_seconds)
         if stream_copy:
+            if INTRO_STING_ENABLED:
+                write_intro_appear_wav(work_dir / INTRO_STING_NAME)
             command = build_copy_mux_command(
                 video_name=video_name,
                 audio_name=audio_name,
                 output_name=out_name,
                 duration=duration,
                 intro_seconds=intro,
+                sting_name=INTRO_STING_NAME,
             )
             progress_span = bumpered_duration(duration, intro)
         else:

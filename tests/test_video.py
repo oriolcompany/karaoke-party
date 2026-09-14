@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import wave
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,10 @@ from karaoke_party.track_cache import (
     write_meta,
 )
 from karaoke_party.video import (
+    INTRO_APPEAR_SECONDS,
     INTRO_SECONDS,
+    INTRO_STING_ENABLED,
+    INTRO_STING_NAME,
     KARAOKE_RENDER_VERSION,
     OUTRO_SECONDS,
     ass_timestamp,
@@ -32,6 +36,7 @@ from karaoke_party.video import (
     karaoke_is_current,
     normalize_stage_look,
     render_karaoke_mp4,
+    write_intro_appear_wav,
 )
 
 
@@ -208,8 +213,11 @@ def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
     assert "amix=" in joined
     assert "[a]" in command
     assert "sine=f=196" not in joined
-    assert "anoisesrc=" in joined
-    assert "color=pink" in joined
+    assert "anoisesrc=" not in joined
+    assert INTRO_STING_ENABLED is False
+    assert INTRO_STING_NAME not in command
+    assert "[sting]" not in joined
+    assert "amix=inputs=2" in joined
 
 
 def test_copy_mux_uses_client_intro_seconds() -> None:
@@ -230,6 +238,17 @@ def test_bumpers_extend_copy_mux_to_intro_song_outro() -> None:
     assert INTRO_SECONDS == 3.0
     assert OUTRO_SECONDS == 8.0
     assert bumpered_duration(12.5) == 23.5
+
+
+def test_intro_appear_wav_is_short_stereo_ident(tmp_path: Path) -> None:
+    path = write_intro_appear_wav(tmp_path / "intro.wav")
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getnchannels() == 2
+        assert wav.getframerate() == 48000
+        seconds = wav.getnframes() / wav.getframerate()
+        assert abs(seconds - INTRO_APPEAR_SECONDS) < 0.02
+        pcm = wav.readframes(wav.getnframes())
+    assert any(pcm[i] or pcm[i + 1] for i in range(0, len(pcm), 4))
 
 
 def test_choose_audio_uses_original_even_with_instrumental(tmp_path: Path) -> None:
