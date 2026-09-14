@@ -2097,6 +2097,12 @@ body.is-exporting-video .view-stage.is-exporting {
   z-index: -1;
 }
 
+/* vmin follows the window, not this 16:9 box. Lock the dial to a third of
+   the export frame so the 1080p scale matches the live karaoke size. */
+body.is-exporting-video .view-stage.is-exporting .k-rest-count-dial {
+  --k-rest-size: calc(100vw * 9 / 16 * 0.32);
+}
+
 /* While a video renders the browse view is taken out of the layout: a library
    with hundreds of animated cards costs more per frame than the render itself. */
 body.is-exporting-video .fx {
@@ -2839,7 +2845,7 @@ body.is-exporting-video .fx {
 }
 
 .k-rest-count-dial {
-  --k-rest-size: min(21.5rem, 32vmin);
+  --k-rest-size: 32vmin;
   --k-rest-stroke: max(10px, calc(var(--k-rest-size) * 0.042));
   position: relative;
   display: flex;

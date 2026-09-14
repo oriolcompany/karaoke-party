@@ -3666,10 +3666,23 @@ function paintExportDonut(ctx, cx, cy, outer, inner, start, end, color) {
   ctx.fill();
 }
 
+function lockExportRestCountSize() {
+  const dial = restCountEl?.querySelector(".k-rest-count-dial");
+  if (!dial) return;
+  if (!document.body.classList.contains("is-exporting-video") || !viewStage) {
+    dial.style.removeProperty("--k-rest-size");
+    return;
+  }
+  const stage = viewStage.getBoundingClientRect();
+  const size = Math.min(stage.width, stage.height) * 0.32;
+  dial.style.setProperty("--k-rest-size", `${size}px`);
+}
+
 function paintExportRestRing(ctx) {
   if (!restCountEl?.classList.contains("is-on") && !restCountEl?.classList.contains("is-leaving")) {
     return;
   }
+  lockExportRestCountSize();
   const opacity = elementOpacity(restCountEl);
   if (opacity < 0.02) return;
   const dial = restCountEl.querySelector(".k-rest-count-dial") || restCountEl.querySelector(".k-rest-ring");
@@ -3678,7 +3691,9 @@ function paintExportRestRing(ctx) {
   if (box.width < 2 || box.height < 2) return;
   const raw = Number.parseFloat(restCountEl.style.getPropertyValue("--k-rest-progress"));
   const progress = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
-  const size = Math.min(box.width, box.height);
+  const stage = viewStage?.getBoundingClientRect();
+  const forced = stage ? Math.min(stage.width, stage.height) * 0.32 : 0;
+  const size = forced > 2 ? forced : Math.min(box.width, box.height);
   const strokeVar = Number.parseFloat(getComputedStyle(dial).getPropertyValue("--k-rest-stroke"));
   const stroke = Number.isFinite(strokeVar) && strokeVar > 0 ? strokeVar : Math.max(10, size * 0.042);
   const cx = box.left + box.width / 2;
@@ -3925,6 +3940,7 @@ function detachStageCapture() {
   stageCapture = null;
   document.body.classList.remove("is-exporting-video");
   viewStage?.classList.remove("is-exporting");
+  lockExportRestCountSize();
   setExportCaptureBadge("");
 }
 
