@@ -3711,7 +3711,7 @@ function paintExportOutro(ctx, t) {
   const size = fitExportFont(ctx, text, "Bebas Neue, sans-serif", 120, 64, 1680);
   ctx.font = `${size}px Bebas Neue, sans-serif`;
   ctx.fillStyle = "#fff6ea";
-  fillExportHeadline(ctx, text, EXPORT_VIDEO_W / 2, EXPORT_VIDEO_H / 2);
+  fillExportHeadline(ctx, text, EXPORT_VIDEO_W / 2, EXPORT_VIDEO_H / 6);
   ctx.restore();
 }
 

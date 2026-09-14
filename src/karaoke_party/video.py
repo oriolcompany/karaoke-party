@@ -33,7 +33,7 @@ from .track_cache import (
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 VIDEO_FPS = 30
-KARAOKE_RENDER_VERSION = 25
+KARAOKE_RENDER_VERSION = 27
 STAGE_BG_MODES = frozenset({"video", "cover", "image", "aura", "stage"})
 LYRICS_SIZES = frozenset({"small", "normal", "large", "xlarge"})
 AUDIO_MODES = frozenset({"original", "instrumental"})
@@ -42,6 +42,7 @@ YOUTUBE_AUDIO_BITRATE = "384k"
 # YouTube bumpers painted by the browser encoder. Keep in sync with app.js.
 INTRO_SECONDS = 3.0
 OUTRO_SECONDS = 8.0
+# Parked: length of the old outro sine. The end card is silent now.
 OUTRO_PAD_SECONDS = 2.0
 # Logo ident under the fade-in. Keep shorter than INTRO_SECONDS.
 INTRO_APPEAR_SECONDS = 0.95
@@ -697,27 +698,17 @@ def _copy_mux_audio_graph(song_seconds: float, intro_seconds: float | None = Non
     """Delay the mix for the intro, then pad silence under the outro."""
     intro = resolve_intro_seconds(intro_seconds)
     intro_ms = int(round(intro * 1000.0))
-    pad_ms = int(round((intro + song_seconds) * 1000.0))
     rate = YOUTUBE_AUDIO_RATE
     fmt = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts=stereo"
-    song = f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}[song];"
+    delayed = f"[1:a]{fmt},adelay={intro_ms}|{intro_ms},apad=pad_dur={OUTRO_SECONDS:.3f}"
     # Intro ident (write_intro_appear_wav). Uncomment with INTRO_STING_ENABLED.
-    # sting = f"[2:a]{fmt},volume=0.82[sting];"
-    # pad_in = "[3:a]"
-    # mix = "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
     if INTRO_STING_ENABLED:
-        pad_in = "[3:a]"
-        sting = f"[2:a]{fmt},volume=0.82[sting];"
-        mix = "[song][sting][pad]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]"
-    else:
-        pad_in = "[2:a]"
-        sting = ""
-        mix = "[song][pad]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
-    pad = (
-        f"{pad_in}{fmt},afade=t=in:d=0.15,afade=t=out:st=1.2:d=0.8,"
-        f"adelay={pad_ms}|{pad_ms},volume=0.28[pad];"
-    )
-    return song + sting + pad + mix
+        return (
+            f"{delayed}[song];"
+            f"[2:a]{fmt},volume=0.82[sting];"
+            "[song][sting]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+        )
+    return f"{delayed}[a]"
 
 
 def build_copy_mux_command(
@@ -756,10 +747,6 @@ def build_copy_mux_command(
     if INTRO_STING_ENABLED:
         command += ["-i", sting_name]
     command += [
-        "-f",
-        "lavfi",
-        "-i",
-        f"sine=f=131:r={YOUTUBE_AUDIO_RATE}:d={OUTRO_PAD_SECONDS:.1f}",
         "-filter_complex",
         _copy_mux_audio_graph(song, intro),
         "-t",

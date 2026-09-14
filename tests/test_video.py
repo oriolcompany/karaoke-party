@@ -210,14 +210,14 @@ def test_copy_mux_keeps_browser_encode_and_adds_original_audio() -> None:
     assert "-shortest" not in command
     assert "adelay=3000" in joined
     assert "apad=pad_dur=8.000" in joined
-    assert "amix=" in joined
     assert "[a]" in command
     assert "sine=f=196" not in joined
+    assert "sine=f=131" not in joined
     assert "anoisesrc=" not in joined
     assert INTRO_STING_ENABLED is False
     assert INTRO_STING_NAME not in command
     assert "[sting]" not in joined
-    assert "amix=inputs=2" in joined
+    assert "amix=" not in joined
 
 
 def test_copy_mux_uses_client_intro_seconds() -> None:
