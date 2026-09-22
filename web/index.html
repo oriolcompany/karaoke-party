@@ -215,6 +215,15 @@
           <button id="pasteLyricsBtn" class="paste-lyrics-btn" type="button" hidden>
             Editar lletra
           </button>
+          <button
+            id="syllableEditorBtn"
+            class="paste-lyrics-btn syllable-editor-btn"
+            type="button"
+            hidden
+            title="Ajustar el temps de cada síl·laba a mà"
+          >
+            Ajustar temps
+          </button>
           <button id="resyncCoverBtn" class="resync-cover-btn" type="button" hidden>Nova portada</button>
           <button id="albumBackdropBtn" class="album-backdrop-btn" type="button" hidden>
             Fons karaoke
@@ -835,6 +844,122 @@
     </div>
 
     <div
+      id="syllableEditorModal"
+      class="settings-modal syllable-editor-modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="syllableEditorTitle"
+      hidden
+    >
+      <div class="settings-backdrop" data-syllable-close></div>
+      <div class="settings-panel syllable-editor-panel">
+        <header class="settings-header syllable-editor-header">
+          <div class="syllable-editor-heading">
+            <h2 id="syllableEditorTitle">Ajustar temps</h2>
+            <p id="syllableEditorMeta" class="syllable-editor-meta"></p>
+          </div>
+          <button
+            id="syllableEditorCloseBtn"
+            class="settings-close"
+            type="button"
+            aria-label="Tancar"
+            data-syllable-close
+          >
+            ×
+          </button>
+        </header>
+        <div class="syllable-editor-body">
+          <aside class="syllable-lines">
+            <p class="syllable-lines-head">Línies</p>
+            <div id="syllableLineList" class="syllable-line-list" aria-label="Línies de la lletra"></div>
+          </aside>
+          <div class="syllable-stage">
+            <div id="syllableTimeline" class="syllable-timeline">
+              <canvas id="syllableCanvas" class="syllable-canvas"></canvas>
+              <div id="syllableTapOverlay" class="syllable-tap-overlay" hidden>
+                <p id="syllableTapCount" class="syllable-tap-count"></p>
+                <p id="syllableTapHint" class="syllable-tap-hint"></p>
+              </div>
+              <p id="syllableLoading" class="syllable-loading" hidden>Carregant l’ona de la veu…</p>
+            </div>
+            <p id="syllableHint" class="syllable-hint">
+              Arrossega una síl·laba per moure-la i les vores per estirar-la. Fletxes: 10 ms
+              (50 ms amb Majúscules). Majúscules mentre arrossegues desplaça la resta de la línia;
+              Ctrl+Majúscules, la resta de la cançó.
+            </p>
+          </div>
+        </div>
+        <footer class="syllable-editor-bar">
+          <div class="syllable-bar-group">
+            <button id="syllablePlayBtn" class="settings-secondary-btn" type="button">Reproduir</button>
+            <button id="syllablePlayLineBtn" class="settings-secondary-btn" type="button">
+              Escoltar línia
+            </button>
+            <button
+              id="syllableLoopBtn"
+              class="settings-secondary-btn"
+              type="button"
+              aria-pressed="false"
+            >
+              Bucle
+            </button>
+            <button id="syllableTapBtn" class="settings-secondary-btn" type="button">
+              Picar el ritme
+            </button>
+          </div>
+          <div class="syllable-bar-group">
+            <div id="syllableTrackToggle" class="settings-toggle" role="group" aria-label="Pista d’àudio">
+              <button
+                type="button"
+                class="settings-toggle-btn is-active"
+                data-syllable-track="vocals"
+                aria-pressed="true"
+              >
+                Veu
+              </button>
+              <button
+                type="button"
+                class="settings-toggle-btn"
+                data-syllable-track="instrumental"
+                aria-pressed="false"
+              >
+                Instrumental
+              </button>
+              <button
+                type="button"
+                class="settings-toggle-btn"
+                data-syllable-track="original"
+                aria-pressed="false"
+              >
+                Original
+              </button>
+            </div>
+            <button id="syllableZoomOutBtn" class="settings-secondary-btn" type="button" aria-label="Allunyar">
+              −
+            </button>
+            <button id="syllableZoomInBtn" class="settings-secondary-btn" type="button" aria-label="Apropar">
+              +
+            </button>
+          </div>
+          <div class="syllable-bar-group syllable-bar-end">
+            <button id="syllableUndoBtn" class="settings-secondary-btn" type="button" disabled>
+              Desfer
+            </button>
+            <button id="syllableRedoBtn" class="settings-secondary-btn" type="button" disabled>
+              Refer
+            </button>
+            <p id="syllableStatus" class="settings-status" aria-live="polite"></p>
+            <button id="syllableCancelBtn" class="settings-secondary-btn" type="button">
+              Tancar
+            </button>
+            <button id="syllableSaveBtn" type="button" disabled>Desar temps</button>
+          </div>
+        </footer>
+        <audio id="syllablePlayer" preload="auto"></audio>
+      </div>
+    </div>
+
+    <div
       id="exportVideoModal"
       class="settings-modal lyrics-paste-modal export-video-modal hidden"
       role="dialog"
@@ -1117,6 +1242,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=143"></script>
+    <script src="/app.js?v=144"></script>
   </body>
 </html>

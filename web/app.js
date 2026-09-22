@@ -83,6 +83,30 @@ const lyricsPasteInput = document.getElementById("lyricsPasteInput");
 const lyricsPasteMeta = document.getElementById("lyricsPasteMeta");
 const lyricsPasteStatus = document.getElementById("lyricsPasteStatus");
 const lyricsPasteTitle = document.getElementById("lyricsPasteTitle");
+const syllableEditorBtn = document.getElementById("syllableEditorBtn");
+const syllableEditorModal = document.getElementById("syllableEditorModal");
+const syllableEditorMeta = document.getElementById("syllableEditorMeta");
+const syllableEditorCloseBtn = document.getElementById("syllableEditorCloseBtn");
+const syllableLineList = document.getElementById("syllableLineList");
+const syllableTimeline = document.getElementById("syllableTimeline");
+const syllableCanvas = document.getElementById("syllableCanvas");
+const syllableTapOverlay = document.getElementById("syllableTapOverlay");
+const syllableTapCount = document.getElementById("syllableTapCount");
+const syllableTapHint = document.getElementById("syllableTapHint");
+const syllableLoading = document.getElementById("syllableLoading");
+const syllablePlayBtn = document.getElementById("syllablePlayBtn");
+const syllablePlayLineBtn = document.getElementById("syllablePlayLineBtn");
+const syllableLoopBtn = document.getElementById("syllableLoopBtn");
+const syllableTapBtn = document.getElementById("syllableTapBtn");
+const syllableTrackToggle = document.getElementById("syllableTrackToggle");
+const syllableZoomInBtn = document.getElementById("syllableZoomInBtn");
+const syllableZoomOutBtn = document.getElementById("syllableZoomOutBtn");
+const syllableUndoBtn = document.getElementById("syllableUndoBtn");
+const syllableRedoBtn = document.getElementById("syllableRedoBtn");
+const syllableStatus = document.getElementById("syllableStatus");
+const syllableCancelBtn = document.getElementById("syllableCancelBtn");
+const syllableSaveBtn = document.getElementById("syllableSaveBtn");
+const syllablePlayer = document.getElementById("syllablePlayer");
 const modeCoverBtn = document.getElementById("modeCover");
 const modeGridBtn = document.getElementById("modeGrid");
 const syncStatusBtn = document.getElementById("syncStatusBtn");
@@ -2759,6 +2783,7 @@ function showAlignBadges() {
 
 function updatePrimaryAction() {
   updatePasteLyricsButton();
+  updateSyllableEditorButton();
   updateExportVideoButton();
   updateAlbumBackdropControls();
   const item = selectedBrowseItem();
@@ -4892,6 +4917,1175 @@ function updatePasteLyricsButton() {
   if (stagePasteLyricsBtn) {
     stagePasteLyricsBtn.hidden = !missingOnStage;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Syllable timing editor
+ * ------------------------------------------------------------------------ */
+
+const SYLLABLE_MIN_DURATION = 0.05;
+const SYLLABLE_NUDGE_FINE = 0.01;
+const SYLLABLE_NUDGE_COARSE = 0.05;
+const SYLLABLE_PEAKS_PER_SECOND = 400;
+const SYLLABLE_EDGE_GRAB_PX = 6;
+const SYLLABLE_MIN_SPAN = 0.6;
+const SYLLABLE_MAX_SPAN = 90;
+const SYLLABLE_UNDO_LIMIT = 80;
+const SYLLABLE_RULER_H = 18;
+const SYLLABLE_STRIP_H = 20;
+const SYLLABLE_TAP_LEAD = 2;
+const SYLLABLE_JOINED_EPSILON = 0.005;
+
+let syllableTrackId = "";
+let syllableLines = [];
+let syllableFlat = [];
+let syllableBaselineJson = [];
+let syllableUndoStack = [];
+let syllableRedoStack = [];
+let syllableLineIndex = 0;
+let syllableSelected = -1;
+let syllableViewStart = 0;
+let syllableViewSpan = 6;
+let syllableSongDuration = 0;
+let syllablePeaks = null;
+const syllablePeakCache = new Map();
+let syllableAudioMode = "vocals";
+let syllableLoopEnabled = true;
+let syllableLoopRange = null;
+let syllableDrag = null;
+let syllableTap = null;
+let syllableFrame = 0;
+let syllableSaving = false;
+let syllableLoadToken = 0;
+let syllableAudioCtx = null;
+let syllableResizeObserver = null;
+let syllableCanvasSize = { w: 0, h: 0 };
+
+function isSyllableEditorOpen() {
+  return Boolean(
+    syllableEditorModal &&
+      !syllableEditorModal.classList.contains("hidden") &&
+      !syllableEditorModal.hidden
+  );
+}
+
+function setSyllableStatus(text, tone = "") {
+  if (!syllableStatus) return;
+  syllableStatus.textContent = text || "";
+  syllableStatus.classList.toggle("is-running", tone === "running");
+  syllableStatus.classList.toggle("is-ok", tone === "ok");
+  syllableStatus.classList.toggle("is-error", tone === "error");
+}
+
+function syllableFormatTime(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const rest = total - minutes * 60;
+  return `${minutes}:${rest.toFixed(2).padStart(5, "0")}`;
+}
+
+function syllableTrack() {
+  if (!syllableTrackId) return null;
+  return (
+    tracks.find((item) => item.id === syllableTrackId) ||
+    playableTracks.find((item) => item.id === syllableTrackId) ||
+    null
+  );
+}
+
+function updateSyllableEditorButton() {
+  if (!syllableEditorBtn) return;
+  const track = isAlbumListView() ? null : selectedTrack();
+  const ready = Boolean(track && track.whisper_aligned);
+  syllableEditorBtn.hidden = !ready;
+  syllableEditorBtn.disabled = !ready;
+}
+
+/* --- working copy, undo, dirty state --- */
+
+function syllableReindex() {
+  syllableFlat = [];
+  syllableLines.forEach((line, lineIndex) => {
+    (line.words || []).forEach((word, wordIndex) => {
+      syllableFlat.push({ lineIndex, wordIndex, word });
+    });
+  });
+}
+
+function syllableSnapshot() {
+  return JSON.stringify(syllableLines);
+}
+
+function syllablePushUndo() {
+  syllableUndoStack.push(syllableSnapshot());
+  if (syllableUndoStack.length > SYLLABLE_UNDO_LIMIT) syllableUndoStack.shift();
+  syllableRedoStack = [];
+}
+
+function syllableRestore(snapshot) {
+  syllableLines = JSON.parse(snapshot);
+  syllableReindex();
+  if (syllableLineIndex >= syllableLines.length) syllableLineIndex = 0;
+  if (syllableSelected >= syllableFlat.length) syllableSelected = -1;
+}
+
+function syllableUndo() {
+  if (!syllableUndoStack.length) return;
+  syllableRedoStack.push(syllableSnapshot());
+  syllableRestore(syllableUndoStack.pop());
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableRedo() {
+  if (!syllableRedoStack.length) return;
+  syllableUndoStack.push(syllableSnapshot());
+  syllableRestore(syllableRedoStack.pop());
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableLineEdited(index) {
+  const baseline = syllableBaselineJson[index];
+  if (baseline === undefined) return true;
+  return JSON.stringify(syllableLines[index]) !== baseline;
+}
+
+function syllableIsDirty() {
+  if (syllableLines.length !== syllableBaselineJson.length) return true;
+  return syllableLines.some((_line, index) => syllableLineEdited(index));
+}
+
+/** Refresh every control that depends on the edited times. */
+function syllableCommit() {
+  const dirty = syllableIsDirty();
+  if (syllableSaveBtn) syllableSaveBtn.disabled = !dirty || syllableSaving;
+  if (syllableUndoBtn) syllableUndoBtn.disabled = !syllableUndoStack.length;
+  if (syllableRedoBtn) syllableRedoBtn.disabled = !syllableRedoStack.length;
+  if (syllableLineList) {
+    Array.from(syllableLineList.children).forEach((node, index) => {
+      node.classList.toggle("is-edited", syllableLineEdited(index));
+      node.classList.toggle("is-active", index === syllableLineIndex);
+      const time = node.querySelector(".syllable-line-time");
+      const line = syllableLines[index];
+      if (time && line) time.textContent = syllableFormatTime(line.words?.[0]?.time ?? line.time);
+    });
+  }
+}
+
+/* --- geometry --- */
+
+function syllableLayout() {
+  const h = syllableCanvasSize.h;
+  const stripY = Math.max(SYLLABLE_RULER_H + 20, h - SYLLABLE_STRIP_H);
+  return {
+    rulerH: SYLLABLE_RULER_H,
+    mainY: SYLLABLE_RULER_H,
+    mainH: stripY - SYLLABLE_RULER_H,
+    stripY,
+    stripH: h - stripY,
+  };
+}
+
+function syllableXForTime(time) {
+  const w = syllableCanvasSize.w || 1;
+  return ((time - syllableViewStart) / syllableViewSpan) * w;
+}
+
+function syllableTimeForX(x) {
+  const w = syllableCanvasSize.w || 1;
+  return syllableViewStart + (x / w) * syllableViewSpan;
+}
+
+function syllableClampView() {
+  const limit = Math.max(syllableSongDuration, syllableViewSpan);
+  syllableViewSpan = Math.min(SYLLABLE_MAX_SPAN, Math.max(SYLLABLE_MIN_SPAN, syllableViewSpan));
+  syllableViewStart = Math.min(
+    Math.max(0, limit - syllableViewSpan),
+    Math.max(0, syllableViewStart)
+  );
+}
+
+function syllableZoom(factor, anchorTime) {
+  const anchor = Number.isFinite(anchorTime)
+    ? anchorTime
+    : syllableViewStart + syllableViewSpan / 2;
+  const ratio = (anchor - syllableViewStart) / syllableViewSpan;
+  syllableViewSpan = Math.min(
+    SYLLABLE_MAX_SPAN,
+    Math.max(SYLLABLE_MIN_SPAN, syllableViewSpan * factor)
+  );
+  syllableViewStart = anchor - ratio * syllableViewSpan;
+  syllableClampView();
+  syllableRequestDraw();
+}
+
+function syllableFocusLine(index) {
+  const line = syllableLines[index];
+  if (!line || !line.words?.length) return;
+  const start = line.words[0].time;
+  const end = line.words[line.words.length - 1].end;
+  const span = Math.max(end - start, 0.5);
+  if (span + 1 > syllableViewSpan) {
+    syllableViewSpan = Math.min(SYLLABLE_MAX_SPAN, span + 1);
+  }
+  syllableViewStart = start - (syllableViewSpan - span) / 2;
+  syllableClampView();
+}
+
+/* --- drawing --- */
+
+function syllableResizeCanvas() {
+  if (!syllableCanvas || !syllableTimeline) return;
+  const rect = syllableTimeline.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  syllableCanvasSize = { w: Math.max(1, rect.width), h: Math.max(1, rect.height) };
+  syllableCanvas.width = Math.round(syllableCanvasSize.w * dpr);
+  syllableCanvas.height = Math.round(syllableCanvasSize.h * dpr);
+  syllableRequestDraw();
+}
+
+function syllableRulerStep() {
+  const candidates = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
+  const target = syllableViewSpan / 8;
+  return candidates.find((value) => value >= target) || 60;
+}
+
+function syllableDrawRuler(ctx, w, layout) {
+  const step = syllableRulerStep();
+  const first = Math.ceil(syllableViewStart / step) * step;
+  ctx.font = "500 10px Outfit, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "left";
+  for (let t = first; t < syllableViewStart + syllableViewSpan; t += step) {
+    const x = syllableXForTime(t);
+    ctx.strokeStyle = "rgba(255, 246, 234, 0.12)";
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, layout.mainY);
+    ctx.lineTo(x + 0.5, layout.stripY);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(183, 169, 196, 0.75)";
+    ctx.fillText(syllableFormatTime(t), x + 3, 3);
+  }
+  ctx.strokeStyle = "rgba(255, 246, 234, 0.14)";
+  ctx.beginPath();
+  ctx.moveTo(0, layout.mainY + 0.5);
+  ctx.lineTo(w, layout.mainY + 0.5);
+  ctx.stroke();
+}
+
+function syllableDrawWaveform(ctx, w, layout) {
+  if (!syllablePeaks) return;
+  const mid = layout.mainY + layout.mainH / 2;
+  const scale = (layout.mainH / 2) * 0.92;
+  ctx.fillStyle = "rgba(61, 231, 255, 0.45)";
+  for (let px = 0; px < w; px += 1) {
+    const t0 = syllableTimeForX(px);
+    const t1 = syllableTimeForX(px + 1);
+    let i0 = Math.floor(t0 * syllablePeaks.rate);
+    let i1 = Math.ceil(t1 * syllablePeaks.rate);
+    if (i1 <= i0) i1 = i0 + 1;
+    i0 = Math.max(0, i0);
+    i1 = Math.min(syllablePeaks.min.length, i1);
+    if (i0 >= i1) continue;
+    let lo = 0;
+    let hi = 0;
+    for (let i = i0; i < i1; i += 1) {
+      if (syllablePeaks.min[i] < lo) lo = syllablePeaks.min[i];
+      if (syllablePeaks.max[i] > hi) hi = syllablePeaks.max[i];
+    }
+    const top = mid - hi * scale;
+    const height = Math.max(1, (hi - lo) * scale);
+    ctx.fillRect(px, top, 1, height);
+  }
+}
+
+function syllableDrawLabel(ctx, text, x0, x1, y) {
+  const width = x1 - x0;
+  if (width < 14 || !text) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0 + 2, y - 12, width - 4, 16);
+  ctx.clip();
+  ctx.fillStyle = "rgba(255, 246, 234, 0.95)";
+  ctx.font = "600 12px Outfit, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(text, (x0 + x1) / 2, y);
+  ctx.restore();
+}
+
+function syllableEachVisibleWord(w, callback) {
+  syllableFlat.forEach((entry, index) => {
+    const x0 = syllableXForTime(entry.word.time);
+    const x1 = syllableXForTime(entry.word.end);
+    if (x1 < -40 || x0 > w + 40) return;
+    callback(entry, index, x0, x1);
+  });
+}
+
+function syllableDrawBlockFills(ctx, w, layout) {
+  const top = layout.mainY + 4;
+  const bottom = layout.stripY - 4;
+  syllableEachVisibleWord(w, (entry, index, x0, x1) => {
+    if (entry.lineIndex !== syllableLineIndex) {
+      ctx.fillStyle = "rgba(183, 169, 196, 0.28)";
+      ctx.fillRect(x0, layout.stripY + 3, Math.max(1, x1 - x0 - 1), layout.stripH - 6);
+      return;
+    }
+    ctx.fillStyle =
+      index === syllableSelected ? "rgba(255, 225, 74, 0.2)" : "rgba(255, 45, 106, 0.16)";
+    ctx.fillRect(x0, top, Math.max(1, x1 - x0), bottom - top);
+  });
+}
+
+function syllableDrawBlockEdges(ctx, w, layout) {
+  const top = layout.mainY + 4;
+  const bottom = layout.stripY - 4;
+  syllableEachVisibleWord(w, (entry, index, x0, x1) => {
+    if (entry.lineIndex !== syllableLineIndex) return;
+    const selected = index === syllableSelected;
+    const accent = selected ? "rgba(255, 225, 74, 0.95)" : "rgba(255, 45, 106, 0.9)";
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x0 + 1, top);
+    ctx.lineTo(x0 + 1, bottom);
+    ctx.stroke();
+    // A glued right edge is the inside of a word, not a word boundary.
+    ctx.lineWidth = entry.word.glue ? 1 : 2;
+    ctx.strokeStyle = entry.word.glue ? "rgba(255, 246, 234, 0.4)" : accent;
+    ctx.beginPath();
+    ctx.moveTo(x1 - 1, top);
+    ctx.lineTo(x1 - 1, bottom);
+    ctx.stroke();
+    syllableDrawLabel(ctx, entry.word.text, x0, x1, bottom - 6);
+  });
+}
+
+function syllableDrawPlayhead(ctx, layout) {
+  const x = syllableXForTime(syllablePlayer?.currentTime || 0);
+  if (x < 0 || x > syllableCanvasSize.w) return;
+  ctx.strokeStyle = "rgba(255, 225, 74, 0.95)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, layout.mainY);
+  ctx.lineTo(x, syllableCanvasSize.h);
+  ctx.stroke();
+}
+
+function syllableDraw() {
+  if (!syllableCanvas || !isSyllableEditorOpen()) return;
+  const ctx = syllableCanvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const { w, h } = syllableCanvasSize;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const layout = syllableLayout();
+  syllableDrawRuler(ctx, w, layout);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.fillRect(0, layout.stripY, w, layout.stripH);
+  // Blocks sit under the waveform so syllable edges can be lined up with onsets.
+  syllableDrawBlockFills(ctx, w, layout);
+  syllableDrawWaveform(ctx, w, layout);
+  syllableDrawBlockEdges(ctx, w, layout);
+  syllableDrawPlayhead(ctx, layout);
+}
+
+function syllableRequestDraw() {
+  if (syllableFrame) return;
+  syllableFrame = requestAnimationFrame(syllableTick);
+}
+
+function syllableTick() {
+  syllableFrame = 0;
+  if (!isSyllableEditorOpen()) return;
+  syllableFollowPlayback();
+  syllableDraw();
+  if (syllablePlayer && !syllablePlayer.paused) {
+    syllableFrame = requestAnimationFrame(syllableTick);
+  }
+}
+
+function syllableFollowPlayback() {
+  if (!syllablePlayer || syllablePlayer.paused) return;
+  const now = syllablePlayer.currentTime;
+  if (syllableLoopRange && syllableLoopEnabled && now >= syllableLoopRange.end) {
+    syllablePlayer.currentTime = syllableLoopRange.start;
+    return;
+  }
+  const margin = syllableViewSpan * 0.15;
+  if (now < syllableViewStart + margin || now > syllableViewStart + syllableViewSpan - margin) {
+    syllableViewStart = now - syllableViewSpan / 2;
+    syllableClampView();
+  }
+}
+
+/* --- selection --- */
+
+function syllableFlatIndexFor(lineIndex, wordIndex) {
+  return syllableFlat.findIndex(
+    (entry) => entry.lineIndex === lineIndex && entry.wordIndex === wordIndex
+  );
+}
+
+function syllableSelect(flatIndex, { focus = false } = {}) {
+  syllableSelected = flatIndex;
+  const entry = syllableFlat[flatIndex];
+  if (entry && entry.lineIndex !== syllableLineIndex) {
+    syllableLineIndex = entry.lineIndex;
+    syllableScrollLineIntoView();
+  }
+  if (focus && entry) {
+    const word = entry.word;
+    if (word.time < syllableViewStart || word.end > syllableViewStart + syllableViewSpan) {
+      syllableViewStart = word.time - syllableViewSpan / 2;
+      syllableClampView();
+    }
+  }
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableSetLine(index, { seek = false } = {}) {
+  if (index < 0 || index >= syllableLines.length) return;
+  syllableLineIndex = index;
+  syllableFocusLine(index);
+  const first = syllableFlatIndexFor(index, 0);
+  syllableSelected = first;
+  syllableUpdateLoopRange();
+  if (seek && syllablePlayer) {
+    const line = syllableLines[index];
+    syllablePlayer.currentTime = Math.max(0, (line.words?.[0]?.time ?? line.time) - 0.4);
+  }
+  syllableScrollLineIntoView();
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableScrollLineIntoView() {
+  const node = syllableLineList?.children?.[syllableLineIndex];
+  node?.scrollIntoView({ block: "nearest" });
+}
+
+function syllableUpdateLoopRange() {
+  const line = syllableLines[syllableLineIndex];
+  if (!line || !line.words?.length) {
+    syllableLoopRange = null;
+    return;
+  }
+  syllableLoopRange = {
+    start: Math.max(0, line.words[0].time - 0.5),
+    end: line.words[line.words.length - 1].end + 0.6,
+  };
+}
+
+/* --- editing --- */
+
+function syllableUpperBound() {
+  return syllableSongDuration > 0 ? syllableSongDuration : Number.POSITIVE_INFINITY;
+}
+
+function syllableMoveWord(flatIndex, newStart) {
+  const entry = syllableFlat[flatIndex];
+  if (!entry) return;
+  const word = entry.word;
+  const prev = syllableFlat[flatIndex - 1]?.word;
+  const next = syllableFlat[flatIndex + 1]?.word;
+  const duration = word.end - word.time;
+  const min = prev ? prev.end : 0;
+  const max = (next ? next.time : syllableUpperBound()) - duration;
+  const start = Math.min(Math.max(newStart, min), Math.max(min, max));
+  word.time = start;
+  word.end = start + duration;
+}
+
+function syllableResizeStart(flatIndex, newStart) {
+  const entry = syllableFlat[flatIndex];
+  if (!entry) return;
+  const word = entry.word;
+  const prev = syllableFlat[flatIndex - 1]?.word;
+  const joined = prev && Math.abs(prev.end - word.time) < SYLLABLE_JOINED_EPSILON;
+  const floor = prev ? (joined ? prev.time + SYLLABLE_MIN_DURATION : prev.end) : 0;
+  const start = Math.min(Math.max(newStart, floor), word.end - SYLLABLE_MIN_DURATION);
+  word.time = start;
+  if (joined) prev.end = start;
+}
+
+function syllableResizeEnd(flatIndex, newEnd) {
+  const entry = syllableFlat[flatIndex];
+  if (!entry) return;
+  const word = entry.word;
+  const next = syllableFlat[flatIndex + 1]?.word;
+  const joined = next && Math.abs(next.time - word.end) < SYLLABLE_JOINED_EPSILON;
+  const ceiling = next
+    ? joined
+      ? next.end - SYLLABLE_MIN_DURATION
+      : next.time
+    : syllableUpperBound();
+  const end = Math.max(Math.min(newEnd, ceiling), word.time + SYLLABLE_MIN_DURATION);
+  word.end = end;
+  if (joined) next.time = end;
+}
+
+/** Everything from `flatIndex` to the end of the line (or song) moves together. */
+function syllableRippleTargets(flatIndex, scope) {
+  const entry = syllableFlat[flatIndex];
+  if (!entry) return [];
+  return syllableFlat
+    .slice(flatIndex)
+    .filter((item) => scope === "song" || item.lineIndex === entry.lineIndex);
+}
+
+function syllableShiftBy(targets, delta, origins) {
+  targets.forEach((item, index) => {
+    const origin = origins[index];
+    item.word.time = origin.time + delta;
+    item.word.end = origin.end + delta;
+  });
+}
+
+function syllableClampDelta(targets, origins, delta) {
+  const first = syllableFlat.indexOf(targets[0]);
+  const prev = syllableFlat[first - 1]?.word;
+  const floor = prev ? prev.end : 0;
+  const after = syllableFlat[first + targets.length]?.word;
+  const ceiling = after ? after.time : syllableUpperBound();
+  const minDelta = floor - origins[0].time;
+  const lastEnd = origins[origins.length - 1].end;
+  const maxDelta = ceiling - lastEnd;
+  return Math.min(Math.max(delta, minDelta), Math.max(minDelta, maxDelta));
+}
+
+function syllableNudge(seconds) {
+  if (syllableSelected < 0) return;
+  const entry = syllableFlat[syllableSelected];
+  if (!entry) return;
+  syllablePushUndo();
+  syllableMoveWord(syllableSelected, entry.word.time + seconds);
+  syllableUpdateLoopRange();
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+/* --- pointer interaction --- */
+
+function syllableHitTest(x, y) {
+  const layout = syllableLayout();
+  if (y >= layout.stripY) {
+    const index = syllableFlat.findIndex((entry) => {
+      const x0 = syllableXForTime(entry.word.time);
+      const x1 = syllableXForTime(entry.word.end);
+      return x >= x0 && x <= x1;
+    });
+    return index >= 0 ? { index, edge: null, strip: true } : null;
+  }
+  if (y < layout.mainY) return null;
+  for (let i = 0; i < syllableFlat.length; i += 1) {
+    const entry = syllableFlat[i];
+    if (entry.lineIndex !== syllableLineIndex) continue;
+    const x0 = syllableXForTime(entry.word.time);
+    const x1 = syllableXForTime(entry.word.end);
+    if (x < x0 - SYLLABLE_EDGE_GRAB_PX || x > x1 + SYLLABLE_EDGE_GRAB_PX) continue;
+    if (Math.abs(x - x0) <= SYLLABLE_EDGE_GRAB_PX) return { index: i, edge: "start" };
+    if (Math.abs(x - x1) <= SYLLABLE_EDGE_GRAB_PX) return { index: i, edge: "end" };
+    if (x >= x0 && x <= x1) return { index: i, edge: null };
+  }
+  return null;
+}
+
+function onSyllablePointerDown(event) {
+  if (!isSyllableEditorOpen() || syllableTap) return;
+  const rect = syllableCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const time = syllableTimeForX(x);
+  const hit = syllableHitTest(x, y);
+  try {
+    syllableCanvas.setPointerCapture(event.pointerId);
+  } catch {
+    /* pointer is gone already */
+  }
+  if (!hit) {
+    syllableDrag = { mode: "seek" };
+    if (syllablePlayer) syllablePlayer.currentTime = Math.max(0, time);
+    syllableRequestDraw();
+    return;
+  }
+  if (hit.strip || syllableFlat[hit.index].lineIndex !== syllableLineIndex) {
+    const entry = syllableFlat[hit.index];
+    syllableSetLine(entry.lineIndex);
+    syllableSelect(hit.index);
+    syllableDrag = { mode: "seek" };
+    return;
+  }
+  syllableSelect(hit.index);
+  const before = syllableSnapshot();
+  syllablePushUndo();
+  const scope = event.shiftKey ? (event.ctrlKey || event.metaKey ? "song" : "line") : null;
+  if (!hit.edge && scope) {
+    const targets = syllableRippleTargets(hit.index, scope);
+    syllableDrag = {
+      mode: "ripple",
+      index: hit.index,
+      grabTime: time,
+      before,
+      targets,
+      origins: targets.map((item) => ({ time: item.word.time, end: item.word.end })),
+    };
+    return;
+  }
+  const word = syllableFlat[hit.index].word;
+  syllableDrag = {
+    mode: hit.edge ? `resize-${hit.edge}` : "move",
+    index: hit.index,
+    grabTime: time,
+    before,
+    origin: { time: word.time, end: word.end },
+  };
+}
+
+function onSyllablePointerMove(event) {
+  if (!syllableDrag) {
+    if (!isSyllableEditorOpen() || !syllableCanvas) return;
+    const rect = syllableCanvas.getBoundingClientRect();
+    const hit = syllableHitTest(event.clientX - rect.left, event.clientY - rect.top);
+    syllableCanvas.style.cursor = hit
+      ? hit.edge
+        ? "ew-resize"
+        : "grab"
+      : "crosshair";
+    return;
+  }
+  const rect = syllableCanvas.getBoundingClientRect();
+  const time = syllableTimeForX(event.clientX - rect.left);
+  if (syllableDrag.mode === "seek") {
+    if (syllablePlayer) syllablePlayer.currentTime = Math.max(0, time);
+  } else if (syllableDrag.mode === "move") {
+    const delta = time - syllableDrag.grabTime;
+    syllableMoveWord(syllableDrag.index, syllableDrag.origin.time + delta);
+  } else if (syllableDrag.mode === "resize-start") {
+    syllableResizeStart(syllableDrag.index, time);
+  } else if (syllableDrag.mode === "resize-end") {
+    syllableResizeEnd(syllableDrag.index, time);
+  } else if (syllableDrag.mode === "ripple") {
+    const raw = time - syllableDrag.grabTime;
+    const delta = syllableClampDelta(syllableDrag.targets, syllableDrag.origins, raw);
+    syllableShiftBy(syllableDrag.targets, delta, syllableDrag.origins);
+  }
+  syllableRequestDraw();
+}
+
+function onSyllablePointerUp(event) {
+  if (!syllableDrag) return;
+  const drag = syllableDrag;
+  syllableDrag = null;
+  try {
+    syllableCanvas.releasePointerCapture(event.pointerId);
+  } catch {
+    /* pointer already released */
+  }
+  if (drag.mode === "seek") {
+    syllableRequestDraw();
+    return;
+  }
+  // A click that did not actually move anything must not cost an undo step.
+  if (drag.before === syllableSnapshot()) syllableUndoStack.pop();
+  syllableUpdateLoopRange();
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function onSyllableWheel(event) {
+  if (!isSyllableEditorOpen()) return;
+  event.preventDefault();
+  const rect = syllableCanvas.getBoundingClientRect();
+  if (event.ctrlKey || event.metaKey) {
+    syllableZoom(event.deltaY > 0 ? 1.25 : 0.8, syllableTimeForX(event.clientX - rect.left));
+    return;
+  }
+  const amount = (event.deltaX || event.deltaY) / 400;
+  syllableViewStart += amount * syllableViewSpan;
+  syllableClampView();
+  syllableRequestDraw();
+}
+
+/* --- playback --- */
+
+function syllableAudioUrl(mode) {
+  return `/api/audio/${encodeURIComponent(syllableTrackId)}?mode=${mode}`;
+}
+
+function syllableSetAudioMode(mode) {
+  if (!syllablePlayer || mode === syllableAudioMode) return;
+  const at = syllablePlayer.currentTime;
+  const playing = !syllablePlayer.paused;
+  syllableAudioMode = mode;
+  syllableApplyTrackToggle();
+  syllablePlayer.src = syllableAudioUrl(mode);
+  syllablePlayer.addEventListener(
+    "loadedmetadata",
+    () => {
+      syllablePlayer.currentTime = at;
+      if (playing) syllablePlayer.play().catch(() => {});
+    },
+    { once: true }
+  );
+  syllableLoadWaveform();
+}
+
+function syllableApplyTrackToggle() {
+  if (!syllableTrackToggle) return;
+  Array.from(syllableTrackToggle.querySelectorAll("[data-syllable-track]")).forEach((btn) => {
+    const active = btn.dataset.syllableTrack === syllableAudioMode;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function syllableTogglePlay() {
+  if (!syllablePlayer) return;
+  if (syllablePlayer.paused) {
+    syllablePlayer.play().catch(() => {});
+  } else {
+    syllablePlayer.pause();
+  }
+  syllableUpdatePlayButton();
+}
+
+function syllableUpdatePlayButton() {
+  if (!syllablePlayBtn || !syllablePlayer) return;
+  syllablePlayBtn.textContent = syllablePlayer.paused ? "Reproduir" : "Pausar";
+}
+
+function syllablePlayLine() {
+  if (!syllablePlayer) return;
+  syllableUpdateLoopRange();
+  if (!syllableLoopRange) return;
+  syllablePlayer.currentTime = syllableLoopRange.start;
+  syllablePlayer.play().catch(() => {});
+  syllableUpdatePlayButton();
+}
+
+/* --- waveform --- */
+
+function syllableAudioContext() {
+  if (!syllableAudioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    syllableAudioCtx = new Ctx();
+  }
+  return syllableAudioCtx;
+}
+
+function syllableComputePeaks(buffer) {
+  const channels = buffer.numberOfChannels;
+  const total = Math.max(1, Math.round(buffer.duration * SYLLABLE_PEAKS_PER_SECOND));
+  const min = new Float32Array(total);
+  const max = new Float32Array(total);
+  const step = buffer.length / total;
+  const data = [];
+  for (let c = 0; c < channels; c += 1) data.push(buffer.getChannelData(c));
+  for (let i = 0; i < total; i += 1) {
+    const from = Math.floor(i * step);
+    const to = Math.min(buffer.length, Math.floor((i + 1) * step));
+    let lo = 0;
+    let hi = 0;
+    for (let s = from; s < to; s += 1) {
+      for (let c = 0; c < channels; c += 1) {
+        const value = data[c][s];
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+    }
+    min[i] = lo;
+    max[i] = hi;
+  }
+  return { min, max, rate: total / buffer.duration, duration: buffer.duration };
+}
+
+async function syllableLoadWaveform() {
+  if (!syllableTrackId) return;
+  const mode = syllableAudioMode;
+  const cacheKey = `${syllableTrackId}::${mode}`;
+  const token = ++syllableLoadToken;
+  if (syllablePeakCache.has(cacheKey)) {
+    syllablePeaks = syllablePeakCache.get(cacheKey);
+    syllableRequestDraw();
+    return;
+  }
+  syllablePeaks = null;
+  if (syllableLoading) syllableLoading.hidden = false;
+  syllableRequestDraw();
+  try {
+    const res = await fetch(syllableAudioUrl(mode));
+    if (!res.ok) throw new Error("no audio");
+    const raw = await res.arrayBuffer();
+    const buffer = await syllableAudioContext().decodeAudioData(raw);
+    if (token !== syllableLoadToken || !isSyllableEditorOpen()) return;
+    const peaks = syllableComputePeaks(buffer);
+    syllablePeakCache.set(cacheKey, peaks);
+    syllablePeaks = peaks;
+    if (!syllableSongDuration) syllableSongDuration = peaks.duration;
+  } catch {
+    if (token !== syllableLoadToken) return;
+    if (mode === "vocals") {
+      // Stems were cleared: fall back to the mixed track so the editor still works.
+      syllableAudioMode = "original";
+      syllableApplyTrackToggle();
+      if (syllablePlayer) syllablePlayer.src = syllableAudioUrl("original");
+      syllableLoadWaveform();
+      return;
+    }
+    setSyllableStatus("No s’ha pogut dibuixar l’ona", "error");
+  } finally {
+    if (token === syllableLoadToken && syllableLoading) syllableLoading.hidden = true;
+    syllableRequestDraw();
+  }
+}
+
+/* --- tap-along --- */
+
+function syllableTapTargetWords() {
+  return syllableLines[syllableLineIndex]?.words || [];
+}
+
+function syllableStartTap() {
+  if (!syllablePlayer || syllableTap) return;
+  const words = syllableTapTargetWords();
+  if (!words.length) return;
+  const line = syllableLines[syllableLineIndex];
+  syllableTap = { lineIndex: syllableLineIndex, taps: [], total: words.length };
+  syllablePlayer.currentTime = Math.max(0, (line.words[0].time || 0) - SYLLABLE_TAP_LEAD);
+  syllablePlayer.play().catch(() => {});
+  if (syllableTapOverlay) syllableTapOverlay.hidden = false;
+  syllableTapBtn?.classList.add("is-active");
+  syllableRenderTap();
+  syllableUpdatePlayButton();
+  syllableRequestDraw();
+}
+
+function syllableRenderTap() {
+  if (!syllableTap) return;
+  const words = syllableTapTargetWords();
+  const done = syllableTap.taps.length;
+  if (syllableTapCount) {
+    syllableTapCount.textContent = done >= words.length ? "Final" : words[done]?.text || "";
+  }
+  if (syllableTapHint) {
+    syllableTapHint.textContent =
+      done >= words.length
+        ? "Prem espai un últim cop per marcar el final · Escapada per descartar"
+        : `Prem espai a cada síl·laba · ${done}/${words.length} · Escapada per descartar`;
+  }
+}
+
+function syllableRecordTap() {
+  if (!syllableTap || !syllablePlayer) return;
+  const now = syllablePlayer.currentTime;
+  const last = syllableTap.taps[syllableTap.taps.length - 1];
+  const value = last === undefined ? now : Math.max(now, last + SYLLABLE_MIN_DURATION);
+  syllableTap.taps.push(value);
+  syllableRenderTap();
+  if (syllableTap.taps.length > syllableTap.total) syllableApplyTap();
+}
+
+function syllableApplyTap() {
+  if (!syllableTap) return;
+  const { lineIndex, taps } = syllableTap;
+  const words = syllableLines[lineIndex]?.words || [];
+  syllableCancelTap({ silent: true });
+  if (taps.length < 2 || !words.length) {
+    setSyllableStatus("Falten pulsacions per refer la línia", "error");
+    return;
+  }
+  const firstFlat = syllableFlatIndexFor(lineIndex, 0);
+  const prev = syllableFlat[firstFlat - 1]?.word;
+  const after = syllableFlat[firstFlat + words.length]?.word;
+  const lower = prev ? prev.end : 0;
+  const upper = after ? after.time : syllableUpperBound();
+  syllablePushUndo();
+  let cursor = lower;
+  words.forEach((word, index) => {
+    const start = Math.max(taps[index] ?? cursor, cursor);
+    const rawEnd = taps[index + 1] ?? taps[taps.length - 1];
+    const end = Math.max(rawEnd, start + SYLLABLE_MIN_DURATION);
+    word.time = start;
+    word.end = end;
+    cursor = end;
+  });
+  if (cursor > upper) {
+    const overflow = cursor - upper;
+    words.forEach((word) => {
+      word.time = Math.max(lower, word.time - overflow);
+      word.end = Math.max(word.time + SYLLABLE_MIN_DURATION, word.end - overflow);
+    });
+    setSyllableStatus("Línia ajustada per no trepitjar la següent", "");
+  } else {
+    setSyllableStatus("Línia refeta amb el ritme picat", "ok");
+  }
+  syllableLines[lineIndex].time = words[0].time;
+  syllableUpdateLoopRange();
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableCancelTap({ silent = false } = {}) {
+  if (!syllableTap) return;
+  syllableTap = null;
+  if (syllableTapOverlay) syllableTapOverlay.hidden = true;
+  syllableTapBtn?.classList.remove("is-active");
+  syllablePlayer?.pause();
+  syllableUpdatePlayButton();
+  if (!silent) setSyllableStatus("S’ha descartat el ritme picat", "");
+  syllableRequestDraw();
+}
+
+/* --- line list --- */
+
+function syllableRenderLineList() {
+  if (!syllableLineList) return;
+  syllableLineList.innerHTML = "";
+  syllableLines.forEach((line, index) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "syllable-line-item";
+    const time = document.createElement("span");
+    time.className = "syllable-line-time";
+    time.textContent = syllableFormatTime(line.words?.[0]?.time ?? line.time);
+    const text = document.createElement("span");
+    text.className = "syllable-line-text";
+    text.textContent = line.text || "…";
+    btn.append(time, text);
+    btn.addEventListener("click", () => syllableSetLine(index, { seek: true }));
+    syllableLineList.appendChild(btn);
+  });
+}
+
+/* --- open / close / save --- */
+
+async function openSyllableEditor(trackId) {
+  const track =
+    tracks.find((item) => item.id === trackId) ||
+    playableTracks.find((item) => item.id === trackId);
+  if (!track || !syllableEditorModal) return;
+  stopPreview();
+  syllableTrackId = track.id;
+  syllableSongDuration = Number(track.duration) || 0;
+  syllableLines = [];
+  syllableFlat = [];
+  syllableBaselineJson = [];
+  syllableUndoStack = [];
+  syllableRedoStack = [];
+  syllableLineIndex = 0;
+  syllableSelected = -1;
+  syllableViewStart = 0;
+  syllableViewSpan = 6;
+  syllablePeaks = null;
+  syllableAudioMode = "vocals";
+  syllableLoopEnabled = true;
+  syllableLoopRange = null;
+  syllableDrag = null;
+  syllableTap = null;
+  syllableSaving = false;
+  if (syllableEditorMeta) {
+    syllableEditorMeta.textContent = `${track.artist || ""} · ${track.title || track.relpath}`;
+  }
+  if (syllableLineList) syllableLineList.innerHTML = "";
+  syllableApplyTrackToggle();
+  syllableLoopBtn?.classList.add("is-active");
+  syllableLoopBtn?.setAttribute("aria-pressed", "true");
+  syllableEditorModal.hidden = false;
+  syllableEditorModal.classList.remove("hidden");
+  setSyllableStatus("Carregant els temps…", "running");
+  if (!syllableResizeObserver && window.ResizeObserver && syllableTimeline) {
+    syllableResizeObserver = new ResizeObserver(() => syllableResizeCanvas());
+    syllableResizeObserver.observe(syllableTimeline);
+  }
+  syllableResizeCanvas();
+  if (syllablePlayer) {
+    syllablePlayer.src = syllableAudioUrl(syllableAudioMode);
+    syllablePlayer.currentTime = 0;
+  }
+  syllableUpdatePlayButton();
+  try {
+    const payload = await api(`/api/lyrics?track_id=${encodeURIComponent(track.id)}`);
+    if (syllableTrackId !== track.id || !isSyllableEditorOpen()) return;
+    syllableLines = (payload.lines || [])
+      .filter((line) => (line.words || []).length)
+      .map((line) => ({
+        time: Number(line.time) || 0,
+        text: String(line.text || ""),
+        words: line.words.map((word) => ({
+          time: Number(word.time) || 0,
+          end: Number(word.end) || 0,
+          text: String(word.text || ""),
+          glue: Boolean(word.glue),
+        })),
+      }));
+    if (!syllableLines.length) {
+      setSyllableStatus("Aquesta cançó encara no té temps per síl·laba", "error");
+      return;
+    }
+    syllableBaselineJson = syllableLines.map((line) => JSON.stringify(line));
+    syllableReindex();
+    syllableRenderLineList();
+    syllableSetLine(0, { seek: true });
+    setSyllableStatus(payload.manual ? "Temps ajustats a mà" : "Temps de Whisper", "");
+    syllableLoadWaveform();
+  } catch (err) {
+    if (syllableTrackId !== track.id) return;
+    setSyllableStatus(err.message || "No s’han pogut carregar els temps", "error");
+  }
+}
+
+function closeSyllableEditor({ force = false } = {}) {
+  if (!isSyllableEditorOpen()) return;
+  if (!force && syllableIsDirty()) {
+    const ok = window.confirm("Tens canvis sense desar. Vols tancar igualment?");
+    if (!ok) return;
+  }
+  syllableCancelTap({ silent: true });
+  syllablePlayer?.pause();
+  if (syllablePlayer) syllablePlayer.removeAttribute("src");
+  syllablePlayer?.load();
+  if (syllableFrame) cancelAnimationFrame(syllableFrame);
+  syllableFrame = 0;
+  syllableEditorModal.classList.add("hidden");
+  syllableEditorModal.hidden = true;
+  syllableTrackId = "";
+  syllableLines = [];
+  syllableFlat = [];
+  syllableDrag = null;
+}
+
+async function saveSyllableTiming() {
+  if (!syllableTrackId || syllableSaving || !syllableLines.length) return;
+  syllableSaving = true;
+  if (syllableSaveBtn) syllableSaveBtn.disabled = true;
+  setSyllableStatus("Desant els temps…", "running");
+  const body = {
+    track_id: syllableTrackId,
+    lines: syllableLines.map((line) => ({
+      text: line.text,
+      words: line.words.map((word) => ({
+        time: Number(word.time.toFixed(3)),
+        end: Number(word.end.toFixed(3)),
+        text: word.text,
+        glue: Boolean(word.glue),
+      })),
+    })),
+  };
+  const savedId = syllableTrackId;
+  try {
+    const payload = await api("/api/lyrics/timing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    syllableBaselineJson = syllableLines.map((line) => JSON.stringify(line));
+    syllableUndoStack = [];
+    syllableRedoStack = [];
+    setSyllableStatus("Temps desats", "ok");
+    const track = syllableTrack();
+    if (track) {
+      track.whisper_aligned = true;
+      track.manual_sync = true;
+    }
+    if (currentId === savedId) {
+      renderLyrics(payload);
+      lyricsStatus.textContent = `Mode karaoke · ${payload.source}`;
+    }
+  } catch (err) {
+    setSyllableStatus(err.message || "No s’han pogut desar els temps", "error");
+  } finally {
+    syllableSaving = false;
+    syllableCommit();
+  }
+}
+
+function handleSyllableEditorKey(event) {
+  if (syllableTap) {
+    if (event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      syllableRecordTap();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      syllableCancelTap();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      syllableApplyTap();
+    }
+    return;
+  }
+  const ctrl = event.ctrlKey || event.metaKey;
+  if (ctrl && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) syllableRedo();
+    else syllableUndo();
+    return;
+  }
+  if (ctrl && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    saveSyllableTiming();
+    return;
+  }
+  switch (event.key) {
+    case "Escape":
+      event.preventDefault();
+      closeSyllableEditor();
+      return;
+    case " ":
+    case "Spacebar":
+      event.preventDefault();
+      syllableTogglePlay();
+      return;
+    case "Enter":
+      event.preventDefault();
+      syllablePlayLine();
+      return;
+    case "Tab": {
+      event.preventDefault();
+      const step = event.shiftKey ? -1 : 1;
+      const next = Math.min(
+        Math.max(0, (syllableSelected < 0 ? 0 : syllableSelected) + step),
+        syllableFlat.length - 1
+      );
+      syllableSelect(next, { focus: true });
+      return;
+    }
+    case "ArrowLeft":
+    case "ArrowRight": {
+      event.preventDefault();
+      const amount = event.shiftKey ? SYLLABLE_NUDGE_COARSE : SYLLABLE_NUDGE_FINE;
+      syllableNudge(event.key === "ArrowLeft" ? -amount : amount);
+      return;
+    }
+    case "ArrowUp":
+      event.preventDefault();
+      syllableSetLine(syllableLineIndex - 1, { seek: true });
+      return;
+    case "ArrowDown":
+      event.preventDefault();
+      syllableSetLine(syllableLineIndex + 1, { seek: true });
+      return;
+    default:
+      break;
+  }
+  const key = event.key.toLowerCase();
+  if (key === "l") {
+    event.preventDefault();
+    syllableToggleLoop();
+  } else if (key === "t") {
+    event.preventDefault();
+    syllableStartTap();
+  }
+}
+
+function syllableToggleLoop() {
+  syllableLoopEnabled = !syllableLoopEnabled;
+  syllableLoopBtn?.classList.toggle("is-active", syllableLoopEnabled);
+  syllableLoopBtn?.setAttribute("aria-pressed", syllableLoopEnabled ? "true" : "false");
 }
 
 function applyAlignStatusMode() {
@@ -7340,6 +8534,13 @@ async function savePastedLyrics() {
     lyricsPasteInput?.focus();
     return;
   }
+  if (track.manual_sync) {
+    const ok = window.confirm(
+      "Aquesta cançó té els temps ajustats a mà.\n" +
+        "Canviar la lletra els esborra i cal tornar a passar Whisper. Vols continuar?"
+    );
+    if (!ok) return;
+  }
   if (lyricsPasteSaveBtn) lyricsPasteSaveBtn.disabled = true;
   if (lyricsPasteDeleteBtn) lyricsPasteDeleteBtn.disabled = true;
   setLyricsPasteStatus("Desant la lletra…", "running");
@@ -7860,6 +9061,15 @@ async function runCacheAction(kind) {
     setSettingsStatus(cacheSettingsStatus, "Selecciona almenys una part de la cau", "error");
     return;
   }
+  const dropsAlignment = kind === "resync" || scopes.includes("aligned");
+  const manualTrack = allLibraryTracks().find((item) => item.id === trackId);
+  if (dropsAlignment && manualTrack?.manual_sync) {
+    const ok = window.confirm(
+      `“${manualTrack.title || manualTrack.relpath}” té els temps ajustats a mà.\n` +
+        "Si continues, Whisper els tornarà a calcular i es perdran."
+    );
+    if (!ok) return;
+  }
   if (cacheClearBtn) cacheClearBtn.disabled = true;
   if (cacheResyncBtn) cacheResyncBtn.disabled = true;
   if (cacheExportBtn) cacheExportBtn.disabled = true;
@@ -8126,6 +9336,51 @@ lyricsPasteSaveBtn?.addEventListener("click", () => {
 lyricsPasteDeleteBtn?.addEventListener("click", () => {
   clearPastedLyrics().catch(() => {});
 });
+syllableEditorBtn?.addEventListener("click", () => {
+  const track = selectedTrack();
+  if (track) openSyllableEditor(track.id).catch(() => {});
+});
+syllableEditorModal?.addEventListener("click", (event) => {
+  if (event.target?.hasAttribute?.("data-syllable-close")) closeSyllableEditor();
+});
+syllableEditorCloseBtn?.addEventListener("click", () => closeSyllableEditor());
+syllableCancelBtn?.addEventListener("click", () => closeSyllableEditor());
+syllableSaveBtn?.addEventListener("click", () => {
+  saveSyllableTiming().catch(() => {});
+});
+syllableUndoBtn?.addEventListener("click", () => syllableUndo());
+syllableRedoBtn?.addEventListener("click", () => syllableRedo());
+syllablePlayBtn?.addEventListener("click", () => syllableTogglePlay());
+syllablePlayLineBtn?.addEventListener("click", () => syllablePlayLine());
+syllableLoopBtn?.addEventListener("click", () => syllableToggleLoop());
+syllableTapBtn?.addEventListener("click", () => {
+  if (syllableTap) syllableCancelTap();
+  else syllableStartTap();
+});
+syllableZoomInBtn?.addEventListener("click", () => syllableZoom(0.7));
+syllableZoomOutBtn?.addEventListener("click", () => syllableZoom(1.4));
+syllableTrackToggle?.addEventListener("click", (event) => {
+  const btn = event.target?.closest?.("[data-syllable-track]");
+  if (btn) syllableSetAudioMode(btn.dataset.syllableTrack);
+});
+syllableCanvas?.addEventListener("pointerdown", onSyllablePointerDown);
+syllableCanvas?.addEventListener("pointermove", onSyllablePointerMove);
+syllableCanvas?.addEventListener("pointerup", onSyllablePointerUp);
+syllableCanvas?.addEventListener("pointercancel", onSyllablePointerUp);
+syllableCanvas?.addEventListener("wheel", onSyllableWheel, { passive: false });
+syllablePlayer?.addEventListener("play", () => {
+  syllableUpdatePlayButton();
+  syllableRequestDraw();
+});
+syllablePlayer?.addEventListener("pause", () => {
+  syllableUpdatePlayButton();
+  syllableRequestDraw();
+});
+syllablePlayer?.addEventListener("seeked", () => syllableRequestDraw());
+syllablePlayer?.addEventListener("loadedmetadata", () => {
+  const value = Number(syllablePlayer.duration);
+  if (Number.isFinite(value) && value > 0) syllableSongDuration = value;
+});
 exportVideoBtn?.addEventListener("click", () => {
   exportSelectedKaraokeVideo();
 });
@@ -8202,6 +9457,10 @@ coverTrack.addEventListener(
 window.addEventListener(
   "keydown",
   (event) => {
+    if (isSyllableEditorOpen()) {
+      handleSyllableEditorKey(event);
+      return;
+    }
     if (isExportVideoModalOpen()) {
       if (event.key === "Escape") {
         event.preventDefault();

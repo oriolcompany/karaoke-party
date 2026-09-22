@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import re
 import sys
 import threading
@@ -58,8 +59,10 @@ from .ratings import get_rating, load_ratings, normalize_rating, set_rating
 from .lyrics import (
     PROBE_ERROR_SOURCE,
     PROBE_TIMEOUT,
+    LyricLine,
     LyricsPayload,
     LyricsUnavailable,
+    LyricWord,
     cache_key,
     clear_lyrics_cache,
     clear_lyrics_keys,
@@ -88,6 +91,7 @@ from .stems import (
     model_name,
     separate_track,
     separation_available,
+    vocals_path,
 )
 from .track_cache import CACHE_SCOPES as _CACHE_SCOPES
 from .video import (
@@ -252,6 +256,23 @@ class ClearLyricsBody(BaseModel):
     track_id: str
 
 
+class TimingWordBody(BaseModel):
+    time: float
+    end: float
+    text: str
+    glue: bool = False
+
+
+class TimingLineBody(BaseModel):
+    text: str = ""
+    words: list[TimingWordBody] = []
+
+
+class SaveTimingBody(BaseModel):
+    track_id: str
+    lines: list[TimingLineBody]
+
+
 class RatingBody(BaseModel):
     track_id: str
     rating: int
@@ -405,14 +426,17 @@ def _resolve_track(track_id: str) -> TrackInfo:
     return track
 
 
-def _lines_for_client(lines: list) -> list[dict]:
-    prepared = lines if has_syllable_glue(lines) else expand_syllable_tokens(lines)
+def _lines_for_client(lines: list, *, manual: bool = False) -> list[dict]:
+    if manual or has_syllable_glue(lines):
+        prepared = lines
+    else:
+        prepared = expand_syllable_tokens(lines)
     return [asdict(line) for line in prepared]
 
 
 def _with_audio_syllables(key: str, payload: LyricsPayload) -> LyricsPayload:
     """Upgrade word-level Whisper timings to MMS (or energy) syllable splits."""
-    if has_syllable_glue(payload.lines):
+    if payload.manual or has_syllable_glue(payload.lines):
         return payload
     from .track_cache import vocals_path
 
@@ -442,7 +466,8 @@ def _lyrics_response(track: TrackInfo, track_id: str, payload: LyricsPayload, *,
         "aligned": aligned,
         "source": payload.source,
         "plain": payload.plain,
-        "lines": _lines_for_client(payload.lines),
+        "manual": payload.manual,
+        "lines": _lines_for_client(payload.lines, manual=payload.manual),
     }
 
 
@@ -453,7 +478,8 @@ def _align_done_payload(payload: LyricsPayload) -> dict:
         "synced": True,
         "source": payload.source,
         "plain": payload.plain,
-        "lines": _lines_for_client(payload.lines),
+        "manual": payload.manual,
+        "lines": _lines_for_client(payload.lines, manual=payload.manual),
     }
 
 
@@ -902,7 +928,9 @@ def _library_snapshot() -> dict:
         item = asdict(track)
         key = cache_key(track.artist, track.title, track.duration)
         album_key = album_backdrop_key(track.artist, track.album)
-        item["whisper_aligned"] = load_aligned_cached(aligned_path, key) is not None
+        aligned_payload = load_aligned_cached(aligned_path, key)
+        item["whisper_aligned"] = aligned_payload is not None
+        item["manual_sync"] = bool(aligned_payload and aligned_payload.manual)
         item["has_lyrics"] = True
         item["has_instrumental"] = has_instrumental(stems_path, key)
         item["rating"] = get_rating(key, ratings)
@@ -916,6 +944,7 @@ def _library_snapshot() -> dict:
         key = cache_key(track.artist, track.title, track.duration)
         album_key = album_backdrop_key(track.artist, track.album)
         item["whisper_aligned"] = False
+        item["manual_sync"] = False
         item["has_lyrics"] = False
         item["rating"] = get_rating(key, ratings)
         item["album_key"] = album_key
@@ -928,6 +957,7 @@ def _library_snapshot() -> dict:
         key = cache_key(track.artist, track.title, track.duration)
         album_key = album_backdrop_key(track.artist, track.album)
         item["whisper_aligned"] = False
+        item["manual_sync"] = False
         item["has_lyrics"] = False
         item["lyrics_pending"] = True
         item["rating"] = get_rating(key, ratings)
@@ -1613,6 +1643,12 @@ def audio(track_id: str, mode: str = Query("original")):
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Encara no hi ha pista instrumental")
         return FileResponse(path, filename=path.name, media_type="audio/mpeg")
+    if mode == "vocals":
+        key = cache_key(track.artist, track.title, track.duration)
+        path = vocals_path(stems_cache_dir(), key)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Encara no hi ha pista de veu")
+        return FileResponse(path, filename=path.name, media_type="audio/mpeg")
     path = Path(track.path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Falta el fitxer d’àudio")
@@ -1920,6 +1956,93 @@ def clear_lyrics(body: ClearLyricsBody) -> dict:
         audio_path=track.path,
     )
     return {"track_id": body.track_id, "cleared": True}
+
+
+MIN_SYLLABLE_SECONDS = 0.02
+
+
+def _line_text_from_words(words: list[LyricWord]) -> str:
+    parts: list[str] = []
+    for index, word in enumerate(words):
+        if index and not words[index - 1].glue:
+            parts.append(" ")
+        parts.append(word.text)
+    return "".join(parts).strip()
+
+
+def _lines_from_timing(body: SaveTimingBody, duration: float) -> list[LyricLine]:
+    """Validate hand-edited syllable times and rebuild the lyric lines.
+
+    The stage picks the active line from ``line.time``, so it is always derived
+    from the first syllable instead of trusting whatever the client sent.
+    """
+    limit = duration + 1.0 if duration > 0 else None
+    lines: list[LyricLine] = []
+    previous_start = -1.0
+    for index, row in enumerate(body.lines, start=1):
+        if not row.words:
+            raise HTTPException(status_code=400, detail=f"La línia {index} no té cap síl·laba")
+        words: list[LyricWord] = []
+        for word in row.words:
+            start = float(word.time)
+            end = float(word.end)
+            if not math.isfinite(start) or not math.isfinite(end):
+                raise HTTPException(status_code=400, detail=f"Temps no vàlid a la línia {index}")
+            if start < 0:
+                raise HTTPException(status_code=400, detail=f"Temps negatiu a la línia {index}")
+            if end < start + MIN_SYLLABLE_SECONDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Una síl·laba de la línia {index} acaba abans de començar",
+                )
+            if limit is not None and start > limit:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La línia {index} queda fora de la durada de la cançó",
+                )
+            if start < previous_start:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Les síl·labes de la línia {index} no van en ordre",
+                )
+            previous_start = start
+            words.append(
+                LyricWord(time=start, end=end, text=str(word.text), glue=bool(word.glue))
+            )
+        text = row.text.strip() or _line_text_from_words(words)
+        lines.append(LyricLine(time=words[0].time, text=text, words=words))
+    if not lines:
+        raise HTTPException(status_code=400, detail="No hi ha cap línia per desar")
+    return lines
+
+
+@app.post("/api/lyrics/timing")
+def save_lyrics_timing(body: SaveTimingBody) -> dict:
+    """Persist syllable times hand-tuned in the editor, shielded from re-alignment."""
+    track = _resolve_track(body.track_id)
+    key = cache_key(track.artist, track.title, track.duration)
+    lines = _lines_from_timing(body, track.duration)
+    previous = load_aligned_cached(aligned_cache_dir(), key)
+    payload = LyricsPayload(
+        synced=True,
+        source=(previous.source if previous else "") or "manual-sync",
+        lines=lines,
+        plain="\n".join(line.text for line in lines),
+        manual=True,
+    )
+    try:
+        save_aligned_cached(
+            aligned_cache_dir(),
+            key,
+            payload,
+            artist=track.artist,
+            title=track.title,
+            duration=track.duration,
+            album=track.album,
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="No s’ha pogut desar l’ajust") from exc
+    return _lyrics_response(track, body.track_id, payload, aligned=True)
 
 
 @app.get("/api/youtube")

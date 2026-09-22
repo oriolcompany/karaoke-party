@@ -64,6 +64,8 @@ class LyricsPayload:
     source: str
     lines: list[LyricLine]
     plain: str = ""
+    # Hand-tuned in the syllable editor: never re-estimate or re-align these times.
+    manual: bool = False
 
 
 def _timestamp(minutes: str, seconds: str, frac: str | None) -> float:
@@ -370,7 +372,8 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
         version = int(data.get("align_version") or 1)
     except (TypeError, ValueError):
         version = 1
-    if version < ALIGNED_CACHE_VERSION:
+    manual = bool(data.get("manual_edit"))
+    if version < ALIGNED_CACHE_VERSION and not manual:
         return None
     lines: list[LyricLine] = []
     for row in data.get("lines") or []:
@@ -392,8 +395,9 @@ def load_aligned_cached(cache_dir: Path, key: str) -> LyricsPayload | None:
         LyricsPayload(
             synced=True,
             source=str(data.get("source") or "aligned"),
-            lines=tighten_phrase_onsets(lines),
+            lines=lines if manual else tighten_phrase_onsets(lines),
             plain=str(data.get("plain") or ""),
+            manual=manual,
         )
     )
 
@@ -467,6 +471,7 @@ def save_aligned_cached(
         "plain": payload.plain,
         "lines": [asdict(line) for line in payload.lines],
         "align_version": ALIGNED_CACHE_VERSION,
+        "manual_edit": payload.manual,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
