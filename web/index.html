@@ -882,6 +882,7 @@
               </div>
               <p id="syllableLoading" class="syllable-loading" hidden>Carregant l’ona de la veu…</p>
             </div>
+            <p id="syllablePending" class="syllable-pending" aria-live="polite" hidden></p>
             <p id="syllableHint" class="syllable-hint">
               Arrossega una síl·laba per moure-la i les vores per estirar-la. Fletxes: 10 ms
               (50 ms amb Majúscules). Majúscules mentre arrossegues desplaça la resta de la línia;
@@ -905,6 +906,14 @@
             </button>
             <button id="syllableTapBtn" class="settings-secondary-btn" type="button">
               Picar el ritme
+            </button>
+            <button
+              id="syllableClearBtn"
+              class="settings-secondary-btn syllable-clear-btn"
+              type="button"
+              title="Treure el temps de totes les síl·labes i tornar-les a col·locar"
+            >
+              Esborrar col·locacions
             </button>
           </div>
           <div class="syllable-bar-group">
@@ -1242,6 +1251,6 @@
     </div>
     -->
 
-    <script src="/app.js?v=144"></script>
+    <script src="/app.js?v=145"></script>
   </body>
 </html>

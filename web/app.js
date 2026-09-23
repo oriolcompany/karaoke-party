@@ -98,6 +98,8 @@ const syllablePlayBtn = document.getElementById("syllablePlayBtn");
 const syllablePlayLineBtn = document.getElementById("syllablePlayLineBtn");
 const syllableLoopBtn = document.getElementById("syllableLoopBtn");
 const syllableTapBtn = document.getElementById("syllableTapBtn");
+const syllableClearBtn = document.getElementById("syllableClearBtn");
+const syllablePending = document.getElementById("syllablePending");
 const syllableTrackToggle = document.getElementById("syllableTrackToggle");
 const syllableZoomInBtn = document.getElementById("syllableZoomInBtn");
 const syllableZoomOutBtn = document.getElementById("syllableZoomOutBtn");
@@ -5016,6 +5018,42 @@ function syllableSnapshot() {
   return JSON.stringify(syllableLines);
 }
 
+/** A cleared syllable keeps its text but has no place on the timeline yet. */
+function syllableIsPlaced(word) {
+  return Boolean(word) && typeof word.time === "number" && typeof word.end === "number";
+}
+
+function syllableLinePlaced(line) {
+  return Boolean(line?.words?.length) && line.words.every(syllableIsPlaced);
+}
+
+function syllableLineStart(line) {
+  const first = line?.words?.[0];
+  return syllableIsPlaced(first) ? first.time : null;
+}
+
+function syllablePrevPlaced(flatIndex) {
+  for (let i = flatIndex - 1; i >= 0; i -= 1) {
+    if (syllableIsPlaced(syllableFlat[i].word)) return syllableFlat[i].word;
+  }
+  return null;
+}
+
+function syllableNextPlaced(flatIndex) {
+  for (let i = flatIndex + 1; i < syllableFlat.length; i += 1) {
+    if (syllableIsPlaced(syllableFlat[i].word)) return syllableFlat[i].word;
+  }
+  return null;
+}
+
+function syllableUnplacedLines() {
+  return syllableLines.filter((line) => !syllableLinePlaced(line)).length;
+}
+
+function syllablePendingLabel(pending) {
+  return pending === 1 ? "Falta 1 línia per col·locar" : `Falten ${pending} línies per col·locar`;
+}
+
 function syllablePushUndo() {
   syllableUndoStack.push(syllableSnapshot());
   if (syllableUndoStack.length > SYLLABLE_UNDO_LIMIT) syllableUndoStack.shift();
@@ -5059,16 +5097,32 @@ function syllableIsDirty() {
 /** Refresh every control that depends on the edited times. */
 function syllableCommit() {
   const dirty = syllableIsDirty();
-  if (syllableSaveBtn) syllableSaveBtn.disabled = !dirty || syllableSaving;
+  const pending = syllableUnplacedLines();
+  if (syllableSaveBtn) {
+    syllableSaveBtn.disabled = !dirty || syllableSaving || pending > 0;
+    syllableSaveBtn.title = pending
+      ? "Col·loca totes les síl·labes abans de desar"
+      : "Desar els temps ajustats";
+  }
   if (syllableUndoBtn) syllableUndoBtn.disabled = !syllableUndoStack.length;
   if (syllableRedoBtn) syllableRedoBtn.disabled = !syllableRedoStack.length;
+  if (syllablePending) {
+    syllablePending.hidden = pending === 0;
+    syllablePending.textContent = pending
+      ? `${syllablePendingLabel(pending)}. ` +
+        "Tria la línia, posa el cap de reproducció on comenci i pica el ritme."
+      : "";
+  }
   if (syllableLineList) {
     Array.from(syllableLineList.children).forEach((node, index) => {
+      const line = syllableLines[index];
       node.classList.toggle("is-edited", syllableLineEdited(index));
       node.classList.toggle("is-active", index === syllableLineIndex);
+      node.classList.toggle("is-unplaced", !syllableLinePlaced(line));
       const time = node.querySelector(".syllable-line-time");
-      const line = syllableLines[index];
-      if (time && line) time.textContent = syllableFormatTime(line.words?.[0]?.time ?? line.time);
+      if (!time || !line) return;
+      const start = syllableLineStart(line);
+      time.textContent = start === null ? "—:——" : syllableFormatTime(start);
     });
   }
 }
@@ -5120,9 +5174,18 @@ function syllableZoom(factor, anchorTime) {
   syllableRequestDraw();
 }
 
+function syllableCenterOn(time, ratio = 0.35) {
+  syllableViewStart = time - syllableViewSpan * ratio;
+  syllableClampView();
+}
+
 function syllableFocusLine(index) {
   const line = syllableLines[index];
   if (!line || !line.words?.length) return;
+  if (!syllableLinePlaced(line)) {
+    syllableCenterOn(syllablePlayer?.currentTime || 0);
+    return;
+  }
   const start = line.words[0].time;
   const end = line.words[line.words.length - 1].end;
   const span = Math.max(end - start, 0.5);
@@ -5217,6 +5280,7 @@ function syllableDrawLabel(ctx, text, x0, x1, y) {
 
 function syllableEachVisibleWord(w, callback) {
   syllableFlat.forEach((entry, index) => {
+    if (!syllableIsPlaced(entry.word)) return;
     const x0 = syllableXForTime(entry.word.time);
     const x1 = syllableXForTime(entry.word.end);
     if (x1 < -40 || x0 > w + 40) return;
@@ -5337,11 +5401,10 @@ function syllableSelect(flatIndex, { focus = false } = {}) {
     syllableLineIndex = entry.lineIndex;
     syllableScrollLineIntoView();
   }
-  if (focus && entry) {
+  if (focus && syllableIsPlaced(entry?.word)) {
     const word = entry.word;
     if (word.time < syllableViewStart || word.end > syllableViewStart + syllableViewSpan) {
-      syllableViewStart = word.time - syllableViewSpan / 2;
-      syllableClampView();
+      syllableCenterOn(word.time, 0.5);
     }
   }
   syllableCommit();
@@ -5356,8 +5419,15 @@ function syllableSetLine(index, { seek = false } = {}) {
   syllableSelected = first;
   syllableUpdateLoopRange();
   if (seek && syllablePlayer) {
-    const line = syllableLines[index];
-    syllablePlayer.currentTime = Math.max(0, (line.words?.[0]?.time ?? line.time) - 0.4);
+    const start = syllableLineStart(syllableLines[index]);
+    if (start !== null) {
+      syllablePlayer.currentTime = Math.max(0, start - 0.4);
+    } else {
+      // Nothing to seek to yet: park the playhead where the previous line ended.
+      const prev = syllablePrevPlaced(syllableFlatIndexFor(index, 0));
+      if (prev) syllablePlayer.currentTime = prev.end;
+      syllableCenterOn(syllablePlayer.currentTime);
+    }
   }
   syllableScrollLineIntoView();
   syllableCommit();
@@ -5371,7 +5441,7 @@ function syllableScrollLineIntoView() {
 
 function syllableUpdateLoopRange() {
   const line = syllableLines[syllableLineIndex];
-  if (!line || !line.words?.length) {
+  if (!syllableLinePlaced(line)) {
     syllableLoopRange = null;
     return;
   }
@@ -5389,10 +5459,10 @@ function syllableUpperBound() {
 
 function syllableMoveWord(flatIndex, newStart) {
   const entry = syllableFlat[flatIndex];
-  if (!entry) return;
+  if (!entry || !syllableIsPlaced(entry.word)) return;
   const word = entry.word;
-  const prev = syllableFlat[flatIndex - 1]?.word;
-  const next = syllableFlat[flatIndex + 1]?.word;
+  const prev = syllablePrevPlaced(flatIndex);
+  const next = syllableNextPlaced(flatIndex);
   const duration = word.end - word.time;
   const min = prev ? prev.end : 0;
   const max = (next ? next.time : syllableUpperBound()) - duration;
@@ -5403,9 +5473,9 @@ function syllableMoveWord(flatIndex, newStart) {
 
 function syllableResizeStart(flatIndex, newStart) {
   const entry = syllableFlat[flatIndex];
-  if (!entry) return;
+  if (!entry || !syllableIsPlaced(entry.word)) return;
   const word = entry.word;
-  const prev = syllableFlat[flatIndex - 1]?.word;
+  const prev = syllablePrevPlaced(flatIndex);
   const joined = prev && Math.abs(prev.end - word.time) < SYLLABLE_JOINED_EPSILON;
   const floor = prev ? (joined ? prev.time + SYLLABLE_MIN_DURATION : prev.end) : 0;
   const start = Math.min(Math.max(newStart, floor), word.end - SYLLABLE_MIN_DURATION);
@@ -5415,9 +5485,9 @@ function syllableResizeStart(flatIndex, newStart) {
 
 function syllableResizeEnd(flatIndex, newEnd) {
   const entry = syllableFlat[flatIndex];
-  if (!entry) return;
+  if (!entry || !syllableIsPlaced(entry.word)) return;
   const word = entry.word;
-  const next = syllableFlat[flatIndex + 1]?.word;
+  const next = syllableNextPlaced(flatIndex);
   const joined = next && Math.abs(next.time - word.end) < SYLLABLE_JOINED_EPSILON;
   const ceiling = next
     ? joined
@@ -5435,7 +5505,10 @@ function syllableRippleTargets(flatIndex, scope) {
   if (!entry) return [];
   return syllableFlat
     .slice(flatIndex)
-    .filter((item) => scope === "song" || item.lineIndex === entry.lineIndex);
+    .filter(
+      (item) =>
+        syllableIsPlaced(item.word) && (scope === "song" || item.lineIndex === entry.lineIndex)
+    );
 }
 
 function syllableShiftBy(targets, delta, origins) {
@@ -5447,21 +5520,20 @@ function syllableShiftBy(targets, delta, origins) {
 }
 
 function syllableClampDelta(targets, origins, delta) {
-  const first = syllableFlat.indexOf(targets[0]);
-  const prev = syllableFlat[first - 1]?.word;
+  if (!targets.length) return 0;
+  const prev = syllablePrevPlaced(syllableFlat.indexOf(targets[0]));
+  const after = syllableNextPlaced(syllableFlat.indexOf(targets[targets.length - 1]));
   const floor = prev ? prev.end : 0;
-  const after = syllableFlat[first + targets.length]?.word;
   const ceiling = after ? after.time : syllableUpperBound();
   const minDelta = floor - origins[0].time;
-  const lastEnd = origins[origins.length - 1].end;
-  const maxDelta = ceiling - lastEnd;
+  const maxDelta = ceiling - origins[origins.length - 1].end;
   return Math.min(Math.max(delta, minDelta), Math.max(minDelta, maxDelta));
 }
 
 function syllableNudge(seconds) {
   if (syllableSelected < 0) return;
   const entry = syllableFlat[syllableSelected];
-  if (!entry) return;
+  if (!entry || !syllableIsPlaced(entry.word)) return;
   syllablePushUndo();
   syllableMoveWord(syllableSelected, entry.word.time + seconds);
   syllableUpdateLoopRange();
@@ -5475,6 +5547,7 @@ function syllableHitTest(x, y) {
   const layout = syllableLayout();
   if (y >= layout.stripY) {
     const index = syllableFlat.findIndex((entry) => {
+      if (!syllableIsPlaced(entry.word)) return false;
       const x0 = syllableXForTime(entry.word.time);
       const x1 = syllableXForTime(entry.word.end);
       return x >= x0 && x <= x1;
@@ -5484,7 +5557,7 @@ function syllableHitTest(x, y) {
   if (y < layout.mainY) return null;
   for (let i = 0; i < syllableFlat.length; i += 1) {
     const entry = syllableFlat[i];
-    if (entry.lineIndex !== syllableLineIndex) continue;
+    if (entry.lineIndex !== syllableLineIndex || !syllableIsPlaced(entry.word)) continue;
     const x0 = syllableXForTime(entry.word.time);
     const x1 = syllableXForTime(entry.word.end);
     if (x < x0 - SYLLABLE_EDGE_GRAB_PX || x > x1 + SYLLABLE_EDGE_GRAB_PX) continue;
@@ -5754,9 +5827,12 @@ function syllableStartTap() {
   if (!syllablePlayer || syllableTap) return;
   const words = syllableTapTargetWords();
   if (!words.length) return;
-  const line = syllableLines[syllableLineIndex];
+  const start = syllableLineStart(syllableLines[syllableLineIndex]);
   syllableTap = { lineIndex: syllableLineIndex, taps: [], total: words.length };
-  syllablePlayer.currentTime = Math.max(0, (line.words[0].time || 0) - SYLLABLE_TAP_LEAD);
+  // An unplaced line has no start to rewind to, so tap from wherever the user parked the playhead.
+  if (start !== null) {
+    syllablePlayer.currentTime = Math.max(0, start - SYLLABLE_TAP_LEAD);
+  }
   syllablePlayer.play().catch(() => {});
   if (syllableTapOverlay) syllableTapOverlay.hidden = false;
   syllableTapBtn?.classList.add("is-active");
@@ -5800,8 +5876,8 @@ function syllableApplyTap() {
     return;
   }
   const firstFlat = syllableFlatIndexFor(lineIndex, 0);
-  const prev = syllableFlat[firstFlat - 1]?.word;
-  const after = syllableFlat[firstFlat + words.length]?.word;
+  const prev = syllablePrevPlaced(firstFlat);
+  const after = syllableNextPlaced(firstFlat + words.length - 1);
   const lower = prev ? prev.end : 0;
   const upper = after ? after.time : syllableUpperBound();
   syllablePushUndo();
@@ -5830,6 +5906,40 @@ function syllableApplyTap() {
   syllableRequestDraw();
 }
 
+/** Strip every timing but keep the lyrics, so the whole song can be tapped again. */
+function syllableClearPlacements() {
+  if (!syllableLines.length) return;
+  if (syllableUnplacedLines() === syllableLines.length) {
+    setSyllableStatus("Ja no hi ha cap síl·laba col·locada", "");
+    return;
+  }
+  const ok = window.confirm(
+    "Vols esborrar la col·locació de totes les síl·labes d’aquesta cançó?\n" +
+      "La lletra es manté i les hauràs de tornar a col·locar picant el ritme.\n" +
+      "Encara no es desa res: ho pots desfer amb Ctrl+Z o tancant sense desar."
+  );
+  if (!ok) return;
+  syllableCancelTap({ silent: true });
+  syllablePushUndo();
+  syllableLines.forEach((line) => {
+    line.time = null;
+    line.words.forEach((word) => {
+      word.time = null;
+      word.end = null;
+    });
+  });
+  syllableSelected = -1;
+  syllableLoopRange = null;
+  syllablePlayer?.pause();
+  if (syllablePlayer) syllablePlayer.currentTime = 0;
+  syllableViewStart = 0;
+  syllableClampView();
+  syllableUpdatePlayButton();
+  setSyllableStatus("Col·locacions esborrades", "");
+  syllableCommit();
+  syllableRequestDraw();
+}
+
 function syllableCancelTap({ silent = false } = {}) {
   if (!syllableTap) return;
   syllableTap = null;
@@ -5852,7 +5962,8 @@ function syllableRenderLineList() {
     btn.className = "syllable-line-item";
     const time = document.createElement("span");
     time.className = "syllable-line-time";
-    time.textContent = syllableFormatTime(line.words?.[0]?.time ?? line.time);
+    const start = syllableLineStart(line);
+    time.textContent = start === null ? "—:——" : syllableFormatTime(start);
     const text = document.createElement("span");
     text.className = "syllable-line-text";
     text.textContent = line.text || "…";
@@ -5892,6 +6003,10 @@ async function openSyllableEditor(trackId) {
     syllableEditorMeta.textContent = `${track.artist || ""} · ${track.title || track.relpath}`;
   }
   if (syllableLineList) syllableLineList.innerHTML = "";
+  if (syllablePending) {
+    syllablePending.hidden = true;
+    syllablePending.textContent = "";
+  }
   syllableApplyTrackToggle();
   syllableLoopBtn?.classList.add("is-active");
   syllableLoopBtn?.setAttribute("aria-pressed", "true");
@@ -5961,6 +6076,11 @@ function closeSyllableEditor({ force = false } = {}) {
 
 async function saveSyllableTiming() {
   if (!syllableTrackId || syllableSaving || !syllableLines.length) return;
+  const pending = syllableUnplacedLines();
+  if (pending) {
+    setSyllableStatus(syllablePendingLabel(pending), "error");
+    return;
+  }
   syllableSaving = true;
   if (syllableSaveBtn) syllableSaveBtn.disabled = true;
   setSyllableStatus("Desant els temps…", "running");
@@ -9357,6 +9477,7 @@ syllableTapBtn?.addEventListener("click", () => {
   if (syllableTap) syllableCancelTap();
   else syllableStartTap();
 });
+syllableClearBtn?.addEventListener("click", () => syllableClearPlacements());
 syllableZoomInBtn?.addEventListener("click", () => syllableZoom(0.7));
 syllableZoomOutBtn?.addEventListener("click", () => syllableZoom(1.4));
 syllableTrackToggle?.addEventListener("click", (event) => {

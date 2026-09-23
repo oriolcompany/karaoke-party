@@ -3500,6 +3500,15 @@ body.is-exporting-video .fx {
   color: var(--gold);
 }
 
+.syllable-line-item.is-unplaced .syllable-line-time {
+  color: rgba(255, 225, 74, 0.85);
+  opacity: 1;
+}
+
+.syllable-line-item.is-unplaced .syllable-line-text {
+  opacity: 0.55;
+}
+
 .syllable-line-time {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
@@ -3576,6 +3585,26 @@ body.is-exporting-video .fx {
   font-size: 0.82rem;
   line-height: 1.4;
   color: var(--muted);
+}
+
+.syllable-pending {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(255, 225, 74, 0.45);
+  border-radius: 10px;
+  background: rgba(255, 225, 74, 0.08);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--gold);
+}
+
+.syllable-pending[hidden] {
+  display: none;
+}
+
+.syllable-clear-btn {
+  border-color: rgba(255, 45, 106, 0.55);
+  color: rgba(255, 178, 200, 0.95);
 }
 
 .syllable-editor-bar {
