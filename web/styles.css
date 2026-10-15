@@ -3460,6 +3460,65 @@ body.is-exporting-video .fx {
   color: var(--muted);
 }
 
+.syllable-lines-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.syllable-lines-tools .settings-secondary-btn {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.syllable-lines-tools .settings-secondary-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.syllable-line-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.syllable-line-form[hidden] {
+  display: none;
+}
+
+.syllable-line-form label {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.syllable-line-form textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 4.2rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+}
+
+.syllable-line-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.syllable-line-form-actions button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.78rem;
+}
+
 .syllable-line-list {
   flex: 1;
   min-height: 0;
@@ -3635,6 +3694,12 @@ body.is-exporting-video .fx {
 .syllable-editor-bar .settings-secondary-btn.is-active {
   background: linear-gradient(135deg, var(--hot), #ff6a3d);
   color: #1a0610;
+}
+
+.syllable-editor-bar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
 }
 
 .syllable-editor-bar .settings-status {

@@ -88,6 +88,14 @@ const syllableEditorModal = document.getElementById("syllableEditorModal");
 const syllableEditorMeta = document.getElementById("syllableEditorMeta");
 const syllableEditorCloseBtn = document.getElementById("syllableEditorCloseBtn");
 const syllableLineList = document.getElementById("syllableLineList");
+const syllableEditLineBtn = document.getElementById("syllableEditLineBtn");
+const syllableInsertLineBtn = document.getElementById("syllableInsertLineBtn");
+const syllableLineForm = document.getElementById("syllableLineForm");
+const syllableLineFormLabel = document.getElementById("syllableLineFormLabel");
+const syllableLineInput = document.getElementById("syllableLineInput");
+const syllableLineApplyBtn = document.getElementById("syllableLineApplyBtn");
+const syllableLineInsertBeforeBtn = document.getElementById("syllableLineInsertBeforeBtn");
+const syllableLineFormCancel = document.getElementById("syllableLineFormCancel");
 const syllableTimeline = document.getElementById("syllableTimeline");
 const syllableCanvas = document.getElementById("syllableCanvas");
 const syllableTapOverlay = document.getElementById("syllableTapOverlay");
@@ -99,6 +107,7 @@ const syllablePlayLineBtn = document.getElementById("syllablePlayLineBtn");
 const syllableLoopBtn = document.getElementById("syllableLoopBtn");
 const syllableTapBtn = document.getElementById("syllableTapBtn");
 const syllableClearBtn = document.getElementById("syllableClearBtn");
+const syllableResyncBtn = document.getElementById("syllableResyncBtn");
 const syllablePending = document.getElementById("syllablePending");
 const syllableTrackToggle = document.getElementById("syllableTrackToggle");
 const syllableZoomInBtn = document.getElementById("syllableZoomInBtn");
@@ -4958,6 +4967,10 @@ let syllableDrag = null;
 let syllableTap = null;
 let syllableFrame = 0;
 let syllableSaving = false;
+let syllableResyncing = false;
+let syllableResyncTrackId = "";
+let syllableResyncToken = 0;
+let syllableOpenToken = 0;
 let syllableLoadToken = 0;
 let syllableAudioCtx = null;
 let syllableResizeObserver = null;
@@ -5104,8 +5117,35 @@ function syllableCommit() {
       ? "Col·loca totes les síl·labes abans de desar"
       : "Desar els temps ajustats";
   }
-  if (syllableUndoBtn) syllableUndoBtn.disabled = !syllableUndoStack.length;
-  if (syllableRedoBtn) syllableRedoBtn.disabled = !syllableRedoStack.length;
+  if (syllableUndoBtn) syllableUndoBtn.disabled = !syllableUndoStack.length || syllableResyncing;
+  if (syllableRedoBtn) syllableRedoBtn.disabled = !syllableRedoStack.length || syllableResyncing;
+  if (syllableSaveBtn && syllableResyncing) syllableSaveBtn.disabled = true;
+  if (syllableTapBtn) syllableTapBtn.disabled = syllableResyncing;
+  const lineToolsLocked = syllableResyncing || !syllableLines.length;
+  if (syllableEditLineBtn) syllableEditLineBtn.disabled = lineToolsLocked;
+  if (syllableInsertLineBtn) syllableInsertLineBtn.disabled = lineToolsLocked;
+  if (syllableClearBtn) {
+    const canClear = !syllableResyncing && syllableLinePlaced(syllableLines[syllableLineIndex]);
+    syllableClearBtn.disabled = !canClear;
+    syllableClearBtn.title = canClear
+      ? "Treure el temps només de la línia seleccionada"
+      : "La línia seleccionada no té temps per esborrar";
+  }
+  if (syllableResyncBtn) {
+    const canResync = syllableCanResyncFromHere();
+    syllableResyncBtn.disabled = !canResync;
+    if (syllableResyncing) {
+      syllableResyncBtn.title = "S’està resincronitzant la resta de la cançó…";
+    } else if (canResync) {
+      syllableResyncBtn.title =
+        "Tornar a alinear automàticament les línies següents i conservar aquesta";
+    } else if (!syllableLines.length || syllableLineIndex >= syllableLines.length - 1) {
+      syllableResyncBtn.title = "No hi ha més línies després d’aquesta";
+    } else {
+      syllableResyncBtn.title =
+        "Col·loca aquesta línia i les anteriors abans de resincronitzar";
+    }
+  }
   if (syllablePending) {
     syllablePending.hidden = pending === 0;
     syllablePending.textContent = pending
@@ -5569,7 +5609,7 @@ function syllableHitTest(x, y) {
 }
 
 function onSyllablePointerDown(event) {
-  if (!isSyllableEditorOpen() || syllableTap) return;
+  if (!isSyllableEditorOpen() || syllableTap || syllableResyncing) return;
   const rect = syllableCanvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
@@ -5824,7 +5864,7 @@ function syllableTapTargetWords() {
 }
 
 function syllableStartTap() {
-  if (!syllablePlayer || syllableTap) return;
+  if (!syllablePlayer || syllableTap || syllableResyncing) return;
   const words = syllableTapTargetWords();
   if (!words.length) return;
   const start = syllableLineStart(syllableLines[syllableLineIndex]);
@@ -5906,38 +5946,189 @@ function syllableApplyTap() {
   syllableRequestDraw();
 }
 
-/** Strip every timing but keep the lyrics, so the whole song can be tapped again. */
-function syllableClearPlacements() {
-  if (!syllableLines.length) return;
-  if (syllableUnplacedLines() === syllableLines.length) {
-    setSyllableStatus("Ja no hi ha cap síl·laba col·locada", "");
+function syllableCanResyncFromHere() {
+  if (syllableResyncing || syllableLineIndex < 0 || syllableLineIndex >= syllableLines.length - 1) {
+    return false;
+  }
+  for (let index = 0; index <= syllableLineIndex; index += 1) {
+    if (!syllableLinePlaced(syllableLines[index])) return false;
+  }
+  return true;
+}
+
+/** Drop timings for the selected line only. The lyric text stays so it can be tapped again. */
+function syllableClearSelectedLine() {
+  if (syllableResyncing) return;
+  const line = syllableLines[syllableLineIndex];
+  if (!line || !syllableLinePlaced(line)) {
+    setSyllableStatus("Aquesta línia ja no té temps", "");
     return;
   }
+  syllableCancelTap({ silent: true });
+  syllablePushUndo();
+  line.time = null;
+  line.words.forEach((word) => {
+    word.time = null;
+    word.end = null;
+  });
+  syllableUpdateLoopRange();
+  setSyllableStatus("S’ha esborrat el temps d’aquesta línia", "");
+  syllableCommit();
+  syllableRequestDraw();
+}
+
+function syllableLinesFromPayload(lines) {
+  return (lines || [])
+    .filter((line) => (line.words || []).length)
+    .map((line) => ({
+      time: Number(line.time) || 0,
+      text: String(line.text || ""),
+      words: line.words.map((word) => ({
+        time: Number(word.time) || 0,
+        end: Number(word.end) || 0,
+        text: String(word.text || ""),
+        glue: Boolean(word.glue),
+      })),
+    }));
+}
+
+function syllableResyncPhaseLabel(job) {
+  if (job.status === "queued" || job.phase === "queued") return "Resincronització a la cua…";
+  if (job.phase === "model") return "Carregant el model Whisper…";
+  if (job.phase === "stems") {
+    const pct =
+      typeof job.progress === "number" && job.progress > 0
+        ? ` ${Math.round(job.progress * 100)}%`
+        : "";
+    return `Preparant la veu…${pct}`;
+  }
+  if (typeof job.progress === "number" && job.progress > 0) {
+    return `Alineant les frases següents… ${Math.round(job.progress * 100)}%`;
+  }
+  return "Alineant les frases següents…";
+}
+
+function syllableApplyResync(job) {
+  const next = syllableLinesFromPayload(job.lines);
+  if (!next.length) {
+    setSyllableStatus("La resincronització no ha tornat cap temps", "error");
+    return;
+  }
+  syllableOpenToken += 1;
+  syllableLoadToken += 1;
+  syllablePushUndo();
+  const keepLine = syllableLineIndex;
+  syllableLines = next;
+  syllableReindex();
+  syllableBaselineJson = syllableLines.map((line) => JSON.stringify(line));
+  syllableRenderLineList();
+  syllableSetLine(Math.min(keepLine, syllableLines.length - 1), { seek: true });
+  const track = syllableTrack();
+  if (track) {
+    track.whisper_aligned = true;
+    track.manual_sync = true;
+  }
+  if (currentId && currentId === (job.track_id || syllableTrackId)) {
+    renderLyrics(job);
+    lyricsStatus.textContent = `Mode karaoke · ${job.source || "whisper-align"}`;
+  }
+  setSyllableStatus("Línies següents resincronitzades", "ok");
+}
+
+async function syllableWaitResync(jobId, token, trackId) {
+  const started = Date.now();
+  const maxMs = 30 * 60 * 1000;
+  for (;;) {
+    if (token !== syllableResyncToken) return;
+    if (Date.now() - started > maxMs) {
+      throw new Error("La resincronització ha trigat massa");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (token !== syllableResyncToken) return;
+    const job = await api(`/api/align/${encodeURIComponent(jobId)}`);
+    const editorOpen = isSyllableEditorOpen() && syllableTrackId === trackId;
+    if (editorOpen) setSyllableStatus(syllableResyncPhaseLabel(job), "running");
+    if (job.status === "done" && job.lines) {
+      if (editorOpen) syllableApplyResync(job);
+      else if (currentId === trackId) applyAlignedLyrics(job);
+      const track =
+        tracks.find((item) => item.id === trackId) ||
+        playableTracks.find((item) => item.id === trackId);
+      if (track) {
+        track.whisper_aligned = true;
+        track.manual_sync = true;
+      }
+      return;
+    }
+    if (job.status === "error") {
+      throw new Error(job.error || "No s’ha pogut resincronitzar");
+    }
+  }
+}
+
+async function syllableResyncFromHere() {
+  if (!syllableCanResyncFromHere()) return;
   const ok = window.confirm(
-    "Vols esborrar la col·locació de totes les síl·labes d’aquesta cançó?\n" +
-      "La lletra es manté i les hauràs de tornar a col·locar picant el ritme.\n" +
-      "Encara no es desa res: ho pots desfer amb Ctrl+Z o tancant sense desar."
+    "Es tornarà a alinear automàticament la lletra a partir de la frase següent.\n" +
+      "Aquesta frase i les anteriors es conserven, també si encara no les has desat.\n" +
+      "El resultat es desa tot sol. Pot trigar una estona."
   );
   if (!ok) return;
   syllableCancelTap({ silent: true });
-  syllablePushUndo();
-  syllableLines.forEach((line) => {
-    line.time = null;
-    line.words.forEach((word) => {
-      word.time = null;
-      word.end = null;
-    });
-  });
-  syllableSelected = -1;
-  syllableLoopRange = null;
   syllablePlayer?.pause();
-  if (syllablePlayer) syllablePlayer.currentTime = 0;
-  syllableViewStart = 0;
-  syllableClampView();
   syllableUpdatePlayButton();
-  setSyllableStatus("Col·locacions esborrades", "");
+  const token = ++syllableResyncToken;
+  const trackId = syllableTrackId;
+  const fromLine = syllableLineIndex;
+  syllableResyncing = true;
+  syllableResyncTrackId = trackId;
   syllableCommit();
-  syllableRequestDraw();
+  setSyllableStatus("Preparant la resincronització…", "running");
+  const body = {
+    track_id: trackId,
+    language: "ca",
+    from_line: fromLine,
+    lines: syllableLines.map((line) => ({
+      text: line.text,
+      words: line.words.map((word) => ({
+        time: syllableIsPlaced(word) ? Number(word.time.toFixed(3)) : null,
+        end: syllableIsPlaced(word) ? Number(word.end.toFixed(3)) : null,
+        text: word.text,
+        glue: Boolean(word.glue),
+      })),
+    })),
+  };
+  try {
+    const job = await api("/api/align/from", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (token !== syllableResyncToken) return;
+    if (job.status === "unavailable" || (job.status === "error" && !job.job_id)) {
+      throw new Error(job.error || "Resincronització no disponible");
+    }
+    if (job.status === "done" && job.lines) {
+      if (isSyllableEditorOpen() && syllableTrackId === trackId) syllableApplyResync(job);
+      return;
+    }
+    if ((job.status === "running" || job.status === "queued") && job.job_id) {
+      await syllableWaitResync(job.job_id, token, trackId);
+      return;
+    }
+    throw new Error(job.error || "La resincronització no s’ha iniciat");
+  } catch (err) {
+    if (token !== syllableResyncToken) return;
+    if (isSyllableEditorOpen() && syllableTrackId === trackId) {
+      setSyllableStatus(err.message || "No s’ha pogut resincronitzar", "error");
+    }
+  } finally {
+    if (token === syllableResyncToken) {
+      syllableResyncing = false;
+      syllableResyncTrackId = "";
+      if (isSyllableEditorOpen() && syllableTrackId === trackId) syllableCommit();
+    }
+  }
 }
 
 function syllableCancelTap({ silent = false } = {}) {
@@ -5949,6 +6140,149 @@ function syllableCancelTap({ silent = false } = {}) {
   syllableUpdatePlayButton();
   if (!silent) setSyllableStatus("S’ha descartat el ritme picat", "");
   syllableRequestDraw();
+}
+
+/* --- line text edit / insert --- */
+
+function syllableCloseLineForm() {
+  if (syllableLineForm) syllableLineForm.hidden = true;
+  if (syllableLineInput) syllableLineInput.value = "";
+  syllableLineForm?.removeAttribute("data-mode");
+}
+
+function syllableOpenLineForm(mode) {
+  if (syllableResyncing || !syllableLines.length || !syllableLineForm || !syllableLineInput) return;
+  syllableCancelTap({ silent: true });
+  syllableLineForm.dataset.mode = mode;
+  syllableLineForm.hidden = false;
+  const editing = mode === "edit";
+  if (syllableLineFormLabel) {
+    syllableLineFormLabel.textContent = editing
+      ? "Text de la frase seleccionada. Les síl·labes que no canviïn conserven el temps. Ctrl+Enter aplica."
+      : "Nova frase sense temps, al costat de la seleccionada. Una línia per frase. Ctrl+Enter l’insereix després.";
+  }
+  if (syllableLineApplyBtn) syllableLineApplyBtn.textContent = editing ? "Aplicar" : "Inserir després";
+  if (syllableLineInsertBeforeBtn) syllableLineInsertBeforeBtn.hidden = editing;
+  syllableLineInput.value = editing ? syllableLines[syllableLineIndex]?.text || "" : "";
+  syllableLineInput.focus();
+  syllableLineInput.select();
+}
+
+function syllableWordsFromApi(words) {
+  return (words || []).map((word) => {
+    const start = word.time == null ? null : Number(word.time);
+    const end = word.end == null ? null : Number(word.end);
+    const placed = start != null && end != null && Number.isFinite(start) && Number.isFinite(end);
+    return {
+      time: placed ? start : null,
+      end: placed ? end : null,
+      text: String(word.text || ""),
+      glue: Boolean(word.glue),
+    };
+  });
+}
+
+function syllableNeighborBounds(index) {
+  const previous = syllableLines[index - 1];
+  const following = syllableLines[index + 1];
+  const prevEnd =
+    previous && syllableLinePlaced(previous)
+      ? previous.words[previous.words.length - 1].end
+      : 0;
+  const nextStart =
+    following && syllableLinePlaced(following) ? following.words[0].time : null;
+  return { floor: prevEnd, ceiling: nextStart };
+}
+
+function syllableLineFromApi(row) {
+  const words = syllableWordsFromApi(row.words);
+  const placed = words.length > 0 && words.every(syllableIsPlaced);
+  return {
+    time: placed ? words[0].time : null,
+    text: String(row.text || ""),
+    words,
+  };
+}
+
+async function syllableSubmitLineForm(where) {
+  if (!syllableLineForm || syllableLineForm.hidden || syllableResyncing) return;
+  const mode = syllableLineForm.dataset.mode === "insert" ? "insert" : "edit";
+  const text = syllableLineInput?.value || "";
+  if (!text.trim()) {
+    setSyllableStatus("Escriu el text de la frase", "error");
+    return;
+  }
+  const index = Math.min(syllableLineIndex, syllableLines.length - 1);
+  const bounds = syllableNeighborBounds(mode === "insert" && where === "before" ? index : index + 1);
+  const editBounds = syllableNeighborBounds(index);
+  const line = syllableLines[index];
+  if (syllableLineApplyBtn) syllableLineApplyBtn.disabled = true;
+  if (syllableLineInsertBeforeBtn) syllableLineInsertBeforeBtn.disabled = true;
+  try {
+    const payload = await api("/api/lyrics/retime-line", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        floor: mode === "edit" ? editBounds.floor : bounds.floor,
+        ceiling: mode === "edit" ? editBounds.ceiling : bounds.ceiling,
+        words:
+          mode === "edit"
+            ? (line?.words || []).map((word) => ({
+                time: syllableIsPlaced(word) ? Number(word.time) : null,
+                end: syllableIsPlaced(word) ? Number(word.end) : null,
+                text: word.text,
+                glue: Boolean(word.glue),
+              }))
+            : [],
+      }),
+    });
+    const created = (payload.lines || []).map(syllableLineFromApi).filter((row) => row.words.length);
+    if (!created.length) {
+      setSyllableStatus("No s’ha pogut llegir la frase", "error");
+      return;
+    }
+    syllablePushUndo();
+    if (mode === "edit") {
+      syllableLines.splice(index, 1, created[0], ...created.slice(1));
+      syllableLineIndex = index;
+    } else {
+      const at = where === "before" ? index : index + 1;
+      syllableLines.splice(at, 0, ...created);
+      syllableLineIndex = at;
+    }
+    syllableCloseLineForm();
+    syllableReindex();
+    syllableRenderLineList();
+    syllableSetLine(Math.min(syllableLineIndex, syllableLines.length - 1), { seek: true });
+    const extrasUnplaced =
+      mode === "insert" || created.slice(1).some((row) => !syllableLinePlaced(row));
+    if (mode === "insert") {
+      setSyllableStatus(
+        "Frase nova sense temps. Pica el ritme d’aquesta línia; les altres no s’han mogut.",
+        "ok"
+      );
+    } else if (!syllableLinePlaced(created[0])) {
+      setSyllableStatus("Text actualitzat. Aquesta línia encara no té temps.", "ok");
+    } else if (extrasUnplaced) {
+      setSyllableStatus(
+        "S’ha dividit la frase. El primer tros conserva el temps; les línies noves cal picar-les.",
+        "ok"
+      );
+    } else if (payload.fit === "kept") {
+      setSyllableStatus("Text actualitzat. S’han conservat els temps de la frase.", "ok");
+    } else {
+      setSyllableStatus(
+        "Text actualitzat. Les síl·labes que no han canviat conserven el temps; la resta queda dins la mateixa frase.",
+        "ok"
+      );
+    }
+  } catch (err) {
+    setSyllableStatus(err.message || "No s’ha pogut actualitzar la frase", "error");
+  } finally {
+    if (syllableLineApplyBtn) syllableLineApplyBtn.disabled = false;
+    if (syllableLineInsertBeforeBtn) syllableLineInsertBeforeBtn.disabled = false;
+  }
 }
 
 /* --- line list --- */
@@ -5969,6 +6303,10 @@ function syllableRenderLineList() {
     text.textContent = line.text || "…";
     btn.append(time, text);
     btn.addEventListener("click", () => syllableSetLine(index, { seek: true }));
+    btn.addEventListener("dblclick", () => {
+      syllableSetLine(index, { seek: false });
+      syllableOpenLineForm("edit");
+    });
     syllableLineList.appendChild(btn);
   });
 }
@@ -5980,6 +6318,7 @@ async function openSyllableEditor(trackId) {
     tracks.find((item) => item.id === trackId) ||
     playableTracks.find((item) => item.id === trackId);
   if (!track || !syllableEditorModal) return;
+  const openToken = ++syllableOpenToken;
   stopPreview();
   syllableTrackId = track.id;
   syllableSongDuration = Number(track.duration) || 0;
@@ -5999,6 +6338,7 @@ async function openSyllableEditor(trackId) {
   syllableDrag = null;
   syllableTap = null;
   syllableSaving = false;
+  syllableResyncing = syllableResyncTrackId === track.id;
   if (syllableEditorMeta) {
     syllableEditorMeta.textContent = `${track.artist || ""} · ${track.title || track.relpath}`;
   }
@@ -6010,6 +6350,7 @@ async function openSyllableEditor(trackId) {
   syllableApplyTrackToggle();
   syllableLoopBtn?.classList.add("is-active");
   syllableLoopBtn?.setAttribute("aria-pressed", "true");
+  syllableCloseLineForm();
   syllableEditorModal.hidden = false;
   syllableEditorModal.classList.remove("hidden");
   setSyllableStatus("Carregant els temps…", "running");
@@ -6025,19 +6366,10 @@ async function openSyllableEditor(trackId) {
   syllableUpdatePlayButton();
   try {
     const payload = await api(`/api/lyrics?track_id=${encodeURIComponent(track.id)}`);
-    if (syllableTrackId !== track.id || !isSyllableEditorOpen()) return;
-    syllableLines = (payload.lines || [])
-      .filter((line) => (line.words || []).length)
-      .map((line) => ({
-        time: Number(line.time) || 0,
-        text: String(line.text || ""),
-        words: line.words.map((word) => ({
-          time: Number(word.time) || 0,
-          end: Number(word.end) || 0,
-          text: String(word.text || ""),
-          glue: Boolean(word.glue),
-        })),
-      }));
+    if (openToken !== syllableOpenToken || syllableTrackId !== track.id || !isSyllableEditorOpen()) {
+      return;
+    }
+    syllableLines = syllableLinesFromPayload(payload.lines);
     if (!syllableLines.length) {
       setSyllableStatus("Aquesta cançó encara no té temps per síl·laba", "error");
       return;
@@ -6046,7 +6378,11 @@ async function openSyllableEditor(trackId) {
     syllableReindex();
     syllableRenderLineList();
     syllableSetLine(0, { seek: true });
-    setSyllableStatus(payload.manual ? "Temps ajustats a mà" : "Temps de Whisper", "");
+    if (syllableResyncTrackId === track.id) {
+      setSyllableStatus("Resincronitzant les línies següents…", "running");
+    } else {
+      setSyllableStatus(payload.manual ? "Temps ajustats a mà" : "Temps de Whisper", "");
+    }
     syllableLoadWaveform();
   } catch (err) {
     if (syllableTrackId !== track.id) return;
@@ -6060,6 +6396,7 @@ function closeSyllableEditor({ force = false } = {}) {
     const ok = window.confirm("Tens canvis sense desar. Vols tancar igualment?");
     if (!ok) return;
   }
+  syllableCloseLineForm();
   syllableCancelTap({ silent: true });
   syllablePlayer?.pause();
   if (syllablePlayer) syllablePlayer.removeAttribute("src");
@@ -6075,7 +6412,7 @@ function closeSyllableEditor({ force = false } = {}) {
 }
 
 async function saveSyllableTiming() {
-  if (!syllableTrackId || syllableSaving || !syllableLines.length) return;
+  if (!syllableTrackId || syllableSaving || syllableResyncing || !syllableLines.length) return;
   const pending = syllableUnplacedLines();
   if (pending) {
     setSyllableStatus(syllablePendingLabel(pending), "error");
@@ -6125,6 +6462,26 @@ async function saveSyllableTiming() {
 }
 
 function handleSyllableEditorKey(event) {
+  if (event.target?.closest?.("#syllableLineForm")) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      syllableCloseLineForm();
+    } else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      syllableSubmitLineForm("after").catch(() => {});
+    }
+    return;
+  }
+  if (syllableResyncing) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSyllableEditor();
+    } else if (event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      syllableTogglePlay();
+    }
+    return;
+  }
   if (syllableTap) {
     if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
@@ -9477,7 +9834,21 @@ syllableTapBtn?.addEventListener("click", () => {
   if (syllableTap) syllableCancelTap();
   else syllableStartTap();
 });
-syllableClearBtn?.addEventListener("click", () => syllableClearPlacements());
+syllableEditLineBtn?.addEventListener("click", () => syllableOpenLineForm("edit"));
+syllableInsertLineBtn?.addEventListener("click", () => syllableOpenLineForm("insert"));
+syllableLineForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const mode = syllableLineForm.dataset.mode === "insert" ? "after" : "after";
+  syllableSubmitLineForm(mode).catch(() => {});
+});
+syllableLineInsertBeforeBtn?.addEventListener("click", () => {
+  syllableSubmitLineForm("before").catch(() => {});
+});
+syllableLineFormCancel?.addEventListener("click", () => syllableCloseLineForm());
+syllableClearBtn?.addEventListener("click", () => syllableClearSelectedLine());
+syllableResyncBtn?.addEventListener("click", () => {
+  syllableResyncFromHere().catch(() => {});
+});
 syllableZoomInBtn?.addEventListener("click", () => syllableZoom(0.7));
 syllableZoomOutBtn?.addEventListener("click", () => syllableZoom(1.4));
 syllableTrackToggle?.addEventListener("click", (event) => {

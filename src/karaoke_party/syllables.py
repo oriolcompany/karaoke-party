@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from .lyrics import LyricLine, LyricWord
@@ -187,6 +188,163 @@ def _syllabify_core(core: str) -> list[str]:
         rest[-1] = rest[-1] + mark + right
         return rest
     return _syllabify_letters(core)
+
+
+_RETIME_MIN = 0.05
+
+
+def _syllable_key(text: str) -> str:
+    """Compare syllables ignoring case, accents and punctuation."""
+    folded = unicodedata.normalize("NFD", text.lower())
+    return "".join(
+        char
+        for char in folded
+        if unicodedata.category(char) != "Mn" and char.isalnum()
+    )
+
+
+def syllabify_line(text: str) -> list[LyricWord]:
+    """Split one lyric phrase into syllables. Times are unset (negative)."""
+    raw = " ".join((text or "").replace("\r\n", "\n").replace("\r", "\n").split())
+    if not raw:
+        return []
+    words: list[LyricWord] = []
+    for token in raw.split(" "):
+        parts = syllabify_token(token) or [token]
+        last = len(parts) - 1
+        for index, part in enumerate(parts):
+            words.append(LyricWord(time=-1.0, end=-1.0, text=part, glue=index < last))
+    return words
+
+
+def _spread_span(start: float, end: float, count: int) -> list[tuple[float, float]]:
+    if count <= 0:
+        return []
+    span = max(_RETIME_MIN * count, end - start)
+    step = span / count
+    return [(start + index * step, start + (index + 1) * step) for index in range(count)]
+
+
+def _fill_unassigned(
+    spans: list[tuple[float, float] | None],
+    *,
+    floor: float | None,
+    ceiling: float | None,
+) -> None:
+    """Place syllables that the text diff inserted, borrowing only inside this line."""
+    count = len(spans)
+    index = 0
+    while index < count:
+        if spans[index] is not None:
+            index += 1
+            continue
+        run = index
+        while run < count and spans[run] is None:
+            run += 1
+        left = spans[index - 1][1] if index else floor
+        right = spans[run][0] if run < count else ceiling
+        need = _RETIME_MIN * (run - index)
+        if left is None:
+            left = (right - need) if right is not None else 0.0
+        if right is None:
+            right = left + need
+        if right - left < need and index:
+            prev_start, prev_end = spans[index - 1]
+            spare = max(0.0, (prev_end - prev_start) - _RETIME_MIN)
+            take = min(spare, need - (right - left))
+            prev_end -= take
+            spans[index - 1] = (prev_start, prev_end)
+            left = prev_end
+        if right - left < need and run < count:
+            next_start, next_end = spans[run]
+            spare = max(0.0, (next_end - next_start) - _RETIME_MIN)
+            take = min(spare, need - (right - left))
+            next_start += take
+            spans[run] = (next_start, next_end)
+            right = next_start
+        if right < left + need:
+            right = left + need
+        spans[index:run] = _spread_span(left, right, run - index)
+        index = run
+
+
+def _clamp_spans(
+    spans: list[tuple[float, float]],
+    *,
+    floor: float | None,
+    ceiling: float | None,
+) -> list[tuple[float, float]]:
+    """Keep the phrase ordered and inside the gap left by the neighbouring lines."""
+    fixed: list[tuple[float, float]] = []
+    cursor = floor if floor is not None else 0.0
+    for start, end in spans:
+        start = max(start, cursor)
+        end = max(end, start + _RETIME_MIN)
+        if ceiling is not None and end > ceiling and ceiling - cursor >= _RETIME_MIN:
+            end = ceiling
+            start = min(start, max(cursor, end - _RETIME_MIN))
+        if end < start + _RETIME_MIN:
+            end = start + _RETIME_MIN
+        fixed.append((start, end))
+        cursor = end
+    return fixed
+
+
+def retime_line_text(
+    text: str,
+    old_words: list[LyricWord],
+    *,
+    floor: float | None = None,
+    ceiling: float | None = None,
+) -> tuple[list[LyricWord], str]:
+    """Rebuild one phrase's syllables without touching any other phrase.
+
+    Syllables whose text still matches keep their times. A changed or inserted
+    stretch is fitted inside the span it replaces, borrowing room only from
+    syllables of this same phrase. A phrase that had no times stays unplaced.
+    Returns ``(words, fit)`` where fit is ``kept``, ``refit`` or ``unplaced``.
+    """
+    fresh = syllabify_line(text)
+    if not fresh:
+        raise ValueError("empty line")
+    placed = [word for word in old_words if word.time >= 0 and word.end >= word.time + _RETIME_MIN / 2]
+    if len(placed) != len(old_words) or not placed:
+        return fresh, "unplaced"
+
+    spans: list[tuple[float, float] | None] = [None] * len(fresh)
+    fit = "kept"
+    matcher = SequenceMatcher(
+        a=[_syllable_key(word.text) for word in old_words],
+        b=[_syllable_key(word.text) for word in fresh],
+        autojunk=False,
+    )
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(j2 - j1):
+                old = old_words[i1 + offset]
+                spans[j1 + offset] = (float(old.time), float(old.end))
+        elif tag == "replace" and j2 > j1:
+            fit = "refit"
+            spans[j1:j2] = _spread_span(old_words[i1].time, old_words[i2 - 1].end, j2 - j1)
+        elif tag == "insert":
+            fit = "refit"
+        elif tag == "delete":
+            fit = "refit"
+
+    if all(span is None for span in spans):
+        spans = _spread_span(old_words[0].time, old_words[-1].end, len(fresh))
+        fit = "refit"
+    elif any(span is None for span in spans):
+        _fill_unassigned(spans, floor=floor, ceiling=ceiling)
+        fit = "refit"
+
+    assert all(span is not None for span in spans)
+    clamped = _clamp_spans(spans, floor=floor, ceiling=ceiling)  # type: ignore[arg-type]
+    words = [
+        LyricWord(time=start, end=end, text=fresh[index].text, glue=fresh[index].glue)
+        for index, (start, end) in enumerate(clamped)
+    ]
+    return words, fit
 
 
 def syllabify_token(text: str) -> list[str]:

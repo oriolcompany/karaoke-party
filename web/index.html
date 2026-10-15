@@ -871,6 +871,32 @@
         <div class="syllable-editor-body">
           <aside class="syllable-lines">
             <p class="syllable-lines-head">Línies</p>
+            <div class="syllable-lines-tools">
+              <button id="syllableEditLineBtn" class="settings-secondary-btn" type="button">
+                Editar frase
+              </button>
+              <button id="syllableInsertLineBtn" class="settings-secondary-btn" type="button">
+                Inserir frase
+              </button>
+            </div>
+            <form id="syllableLineForm" class="syllable-line-form" hidden>
+              <label id="syllableLineFormLabel" for="syllableLineInput"></label>
+              <textarea id="syllableLineInput" rows="3" spellcheck="false"></textarea>
+              <div class="syllable-line-form-actions">
+                <button id="syllableLineApplyBtn" type="submit">Aplicar</button>
+                <button
+                  id="syllableLineInsertBeforeBtn"
+                  class="settings-secondary-btn"
+                  type="button"
+                  hidden
+                >
+                  Inserir abans
+                </button>
+                <button id="syllableLineFormCancel" class="settings-secondary-btn" type="button">
+                  Cancel·lar
+                </button>
+              </div>
+            </form>
             <div id="syllableLineList" class="syllable-line-list" aria-label="Línies de la lletra"></div>
           </aside>
           <div class="syllable-stage">
@@ -886,7 +912,10 @@
             <p id="syllableHint" class="syllable-hint">
               Arrossega una síl·laba per moure-la i les vores per estirar-la. Fletxes: 10 ms
               (50 ms amb Majúscules). Majúscules mentre arrossegues desplaça la resta de la línia;
-              Ctrl+Majúscules, la resta de la cançó.
+              Ctrl+Majúscules, la resta de la cançó.               Esborrar línia treu només la frase seleccionada.
+              Resincronitzar des d’aquí torna a alinear automàticament les frases següents.
+              Editar frase conserva els temps de les síl·labes que no canvien.
+              Inserir frase afegeix text sense temps entre dues línies.
             </p>
           </div>
         </div>
@@ -911,9 +940,17 @@
               id="syllableClearBtn"
               class="settings-secondary-btn syllable-clear-btn"
               type="button"
-              title="Treure el temps de totes les síl·labes i tornar-les a col·locar"
+              title="Treure el temps només de la línia seleccionada"
             >
-              Esborrar col·locacions
+              Esborrar línia
+            </button>
+            <button
+              id="syllableResyncBtn"
+              class="settings-secondary-btn"
+              type="button"
+              title="Tornar a alinear automàticament les línies següents i conservar aquesta"
+            >
+              Resincronitzar des d’aquí
             </button>
           </div>
           <div class="syllable-bar-group">

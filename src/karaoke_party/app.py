@@ -11,7 +11,7 @@ import time
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import uvicorn
@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from . import __version__
 from .align import (
+    align_from_anchor,
     align_lyrics,
     alignment_available,
     preload_whisper_model,
@@ -77,10 +78,17 @@ from .lyrics import (
     save_manual_lyrics,
     sanitize_all_library_lyrics,
     maybe_embed_lyrics,
+    payload_from_text,
     payload_to_text,
     read_local_lyrics,
+    write_local_lyrics,
 )
-from .syllables import expand_syllable_tokens, has_syllable_glue, refine_syllable_timings
+from .syllables import (
+    expand_syllable_tokens,
+    has_syllable_glue,
+    refine_syllable_timings,
+    retime_line_text,
+)
 from .stems import (
     SeparationError,
     clear_work_dir,
@@ -134,9 +142,20 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="Karaoke Party", lifespan=_lifespan)
 _music_root: Path | None = default_music_root()
 _tracks: dict[str, TrackInfo] = {}
+
+
+@dataclass
+class _AlignTask:
+    job_id: str
+    track: TrackInfo
+    language: str
+    from_line: int | None = None
+    lines: list[LyricLine] | None = None
+
+
 _align_jobs: dict[str, dict] = {}
 _align_lock = threading.Lock()
-_align_queue: list[tuple[str, TrackInfo, str]] = []
+_align_queue: list[_AlignTask] = []
 _align_worker_started = False
 _align_wake = threading.Event()
 _probe_lock = threading.Lock()
@@ -224,6 +243,36 @@ class BrowseFolderBody(BaseModel):
 class AlignBody(BaseModel):
     track_id: str
     language: str = "ca"
+
+
+class ResyncWordBody(BaseModel):
+    time: float | None = None
+    end: float | None = None
+    text: str = ""
+    glue: bool = False
+
+
+class ResyncLineBody(BaseModel):
+    text: str = ""
+    words: list[ResyncWordBody] = []
+
+
+class RetimeLineBody(BaseModel):
+    """Rebuild one phrase after a text edit, keeping times that still match."""
+
+    text: str
+    words: list[ResyncWordBody] = []
+    floor: float | None = None
+    ceiling: float | None = None
+
+
+class ResyncFromBody(BaseModel):
+    """Re-align every line after ``from_line``, keeping that line and the ones before it."""
+
+    track_id: str
+    language: str = "ca"
+    from_line: int
+    lines: list[ResyncLineBody]
 
 
 class VideoBody(BaseModel):
@@ -490,7 +539,13 @@ def _set_align_job(job_id: str, **fields) -> None:
         _align_jobs[job_id] = current
 
 
-def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
+def _run_align_job(task: _AlignTask) -> None:
+    if task.lines is not None and task.from_line is not None:
+        _run_resume_align_job(task)
+        return
+    job_id = task.job_id
+    track = task.track
+    language = task.language
     key = cache_key(track.artist, track.title, track.duration)
     try:
         _set_align_job(job_id, status="running", progress=0.0, phase="lyrics")
@@ -565,6 +620,72 @@ def _run_align_job(job_id: str, track: TrackInfo, language: str) -> None:
         _set_align_job(job_id, status="error", error=str(exc), progress=0.0)
 
 
+def _run_resume_align_job(task: _AlignTask) -> None:
+    """Re-align only the lines after a hand-corrected phrase and keep that phrase."""
+    job_id = task.job_id
+    track = task.track
+    key = cache_key(track.artist, track.title, track.duration)
+    lines = task.lines or []
+    from_line = task.from_line if task.from_line is not None else 0
+    try:
+        def on_whisper_progress(ratio: float) -> None:
+            _set_align_job(job_id, status="running", progress=round(float(ratio), 3), phase="whisper")
+
+        def on_stem_progress(ratio: float, phase: str) -> None:
+            _set_align_job(
+                job_id,
+                status="running",
+                progress=round(float(ratio), 3),
+                phase="stems",
+                stem_phase=phase,
+            )
+
+        _set_align_job(job_id, status="running", progress=0.0, phase="stems")
+        try:
+            source_audio = ensure_vocals(
+                Path(track.path),
+                key,
+                stems_cache_dir(),
+                on_progress=on_stem_progress,
+            )
+        except SeparationError as exc:
+            _set_align_job(job_id, status="error", error=str(exc), progress=0.0, phase="stems")
+            return
+
+        whisper = whisper_model_status()
+        if whisper.get("loading") or not whisper.get("ready"):
+            _set_align_job(job_id, status="running", progress=0.0, phase="model")
+        else:
+            _set_align_job(job_id, status="running", progress=0.0, phase="whisper")
+        aligned_lines = align_from_anchor(
+            source_audio,
+            lines,
+            from_line=from_line,
+            language=task.language,
+            on_progress=on_whisper_progress,
+        )
+        previous = load_aligned_cached(aligned_cache_dir(), key)
+        aligned_payload = LyricsPayload(
+            synced=True,
+            source=(previous.source if previous and previous.source else "") or "whisper-align",
+            lines=aligned_lines,
+            plain="\n".join(line.text for line in aligned_lines),
+            manual=True,
+        )
+        save_aligned_cached(
+            aligned_cache_dir(),
+            key,
+            aligned_payload,
+            artist=track.artist,
+            title=track.title,
+            duration=track.duration,
+            album=track.album,
+        )
+        _set_align_job(job_id, **_align_done_payload(aligned_payload), progress=1.0, phase="done")
+    except Exception as exc:  # noqa: BLE001 — surface to client poll
+        _set_align_job(job_id, status="error", error=str(exc), progress=0.0)
+
+
 def _align_worker_loop() -> None:
     while True:
         _align_wake.wait(timeout=1.0)
@@ -573,8 +694,8 @@ def _align_worker_loop() -> None:
                 if not _align_queue:
                     _align_wake.clear()
                     break
-                job_id, track, language = _align_queue.pop(0)
-            _run_align_job(job_id, track, language)
+                task = _align_queue.pop(0)
+            _run_align_job(task)
 
 
 def _ensure_align_worker() -> None:
@@ -587,7 +708,14 @@ def _ensure_align_worker() -> None:
     thread.start()
 
 
-def _enqueue_align_job(job_id: str, track: TrackInfo, language: str) -> None:
+def _enqueue_align_job(
+    job_id: str,
+    track: TrackInfo,
+    language: str,
+    *,
+    from_line: int | None = None,
+    lines: list[LyricLine] | None = None,
+) -> None:
     _ensure_align_worker()
     with _align_lock:
         _align_jobs[job_id] = {
@@ -595,8 +723,17 @@ def _enqueue_align_job(job_id: str, track: TrackInfo, language: str) -> None:
             "progress": 0.0,
             "phase": "queued",
             "track_id": track.id,
+            "from_line": from_line,
         }
-        _align_queue.append((job_id, track, language))
+        _align_queue.append(
+            _AlignTask(
+                job_id=job_id,
+                track=track,
+                language=language,
+                from_line=from_line,
+                lines=lines,
+            )
+        )
     _align_wake.set()
 
 
@@ -2016,6 +2153,56 @@ def _lines_from_timing(body: SaveTimingBody, duration: float) -> list[LyricLine]
     return lines
 
 
+def _lyrics_for_resync(body: ResyncFromBody, duration: float) -> list[LyricLine]:
+    """Lock the corrected phrase and keep only the text of every line after it."""
+    if not body.lines:
+        raise HTTPException(status_code=400, detail="No hi ha cap línia")
+    if body.from_line < 0 or body.from_line >= len(body.lines) - 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Tria una frase que tingui més lletra al darrere",
+        )
+    prefix_rows: list[TimingLineBody] = []
+    for row in body.lines[: body.from_line + 1]:
+        if not row.words or any(word.time is None or word.end is None for word in row.words):
+            raise HTTPException(
+                status_code=400,
+                detail="Col·loca la frase seleccionada i les anteriors abans de resincronitzar",
+            )
+        prefix_rows.append(
+            TimingLineBody(
+                text=row.text,
+                words=[
+                    TimingWordBody(
+                        time=float(word.time),
+                        end=float(word.end),
+                        text=word.text,
+                        glue=word.glue,
+                    )
+                    for word in row.words
+                ],
+            )
+        )
+    prefix = _lines_from_timing(
+        SaveTimingBody(track_id=body.track_id, lines=prefix_rows),
+        duration,
+    )
+    tail: list[LyricLine] = []
+    for index, row in enumerate(body.lines[body.from_line + 1 :], start=body.from_line + 2):
+        text = row.text.strip()
+        if not text and row.words:
+            text = _line_text_from_words(
+                [
+                    LyricWord(time=0.0, end=0.0, text=word.text, glue=word.glue)
+                    for word in row.words
+                ]
+            )
+        if not text:
+            raise HTTPException(status_code=400, detail=f"La línia {index} no té text")
+        tail.append(LyricLine(time=0.0, text=text, words=[]))
+    return prefix + tail
+
+
 @app.post("/api/lyrics/timing")
 def save_lyrics_timing(body: SaveTimingBody) -> dict:
     """Persist syllable times hand-tuned in the editor, shielded from re-alignment."""
@@ -2042,7 +2229,87 @@ def save_lyrics_timing(body: SaveTimingBody) -> dict:
         )
     except OSError as exc:
         raise HTTPException(status_code=500, detail="No s’ha pogut desar l’ajust") from exc
+    _remember_lyric_text(track, lines, previous)
     return _lyrics_response(track, body.track_id, payload, aligned=True)
+
+
+def _plain_lyric_text(lines: list[LyricLine]) -> str:
+    return "\n".join(line.text.strip() for line in lines if line.text.strip())
+
+
+def _remember_lyric_text(track: TrackInfo, lines: list[LyricLine], previous: LyricsPayload | None) -> None:
+    """Keep the lyric file in step when a phrase was edited, without dropping alignment."""
+    plain = _plain_lyric_text(lines)
+    previous_plain = _plain_lyric_text(previous.lines) if previous is not None else ""
+    if not plain or plain == previous_plain:
+        return
+    payload = payload_from_text(plain, "manual")
+    if payload is None:
+        return
+    key = cache_key(track.artist, track.title, track.duration)
+    try:
+        save_cached(
+            cache_dir(),
+            key,
+            payload,
+            artist=track.artist,
+            title=track.title,
+            duration=track.duration,
+            album=track.album,
+        )
+        write_local_lyrics(track.path, payload)
+    except OSError:
+        return
+
+
+def _retime_word_payload(word: LyricWord) -> dict:
+    placed = word.time >= 0 and word.end >= word.time
+    return {
+        "text": word.text,
+        "glue": bool(word.glue),
+        "time": round(float(word.time), 3) if placed else None,
+        "end": round(float(word.end), 3) if placed else None,
+    }
+
+
+@app.post("/api/lyrics/retime-line")
+def retime_lyric_line(body: RetimeLineBody) -> dict:
+    """Syllabify an edited or inserted phrase without realigning the rest of the song."""
+    pieces = [piece.strip() for piece in body.text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    pieces = [piece for piece in pieces if piece]
+    if not pieces:
+        raise HTTPException(status_code=400, detail="Escriu el text de la frase")
+    old: list[LyricWord] = []
+    for word in body.words:
+        if word.time is None or word.end is None:
+            old.append(LyricWord(time=-1.0, end=-1.0, text=word.text, glue=word.glue))
+        else:
+            old.append(
+                LyricWord(time=float(word.time), end=float(word.end), text=word.text, glue=word.glue)
+            )
+    lines: list[dict] = []
+    fit = "unplaced"
+    for index, piece in enumerate(pieces):
+        try:
+            words, piece_fit = retime_line_text(
+                piece,
+                old if index == 0 else [],
+                floor=body.floor,
+                ceiling=body.ceiling,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Escriu el text de la frase") from exc
+        if index == 0:
+            fit = piece_fit
+        elif fit == "kept":
+            fit = "refit"
+        lines.append(
+            {
+                "text": piece,
+                "words": [_retime_word_payload(word) for word in words],
+            }
+        )
+    return {"fit": fit, "lines": lines}
 
 
 @app.get("/api/youtube")
@@ -2255,6 +2522,63 @@ def start_align(body: AlignBody) -> dict:
 
     job_id = uuid.uuid4().hex
     _enqueue_align_job(job_id, track, body.language or "ca")
+    return {"job_id": job_id, "status": "queued", "progress": 0.0, "phase": "queued"}
+
+
+@app.post("/api/align/from")
+def start_align_from(body: ResyncFromBody) -> dict:
+    """Re-run Whisper from the end of a corrected phrase, keeping that phrase."""
+    track = _resolve_track(body.track_id)
+    lines = _lyrics_for_resync(body, track.duration)
+
+    if not alignment_available():
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": 'Instal·la l’alineació amb: pip install -e ".[align]"',
+        }
+
+    if not separation_available():
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": 'Whisper necessita la separació de pistes · pip install -e ".[stems]"',
+        }
+
+    whisper = whisper_model_status()
+    if whisper.get("error") and not whisper.get("ready") and not whisper.get("loading"):
+        return {
+            "job_id": None,
+            "status": "unavailable",
+            "error": whisper.get("error") or "El model Whisper no s’ha pogut carregar",
+        }
+
+    with _align_lock:
+        for existing_id, job in _align_jobs.items():
+            if job.get("track_id") != track.id:
+                continue
+            if job.get("status") in {"queued", "running"}:
+                if job.get("from_line") != body.from_line:
+                    return {
+                        "job_id": None,
+                        "status": "error",
+                        "error": "Aquesta cançó ja s’està alineant",
+                    }
+                return {
+                    "job_id": existing_id,
+                    "status": job.get("status") or "running",
+                    "progress": job.get("progress", 0.0),
+                    "phase": job.get("phase"),
+                }
+
+    job_id = uuid.uuid4().hex
+    _enqueue_align_job(
+        job_id,
+        track,
+        body.language or "ca",
+        from_line=body.from_line,
+        lines=lines,
+    )
     return {"job_id": job_id, "status": "queued", "progress": 0.0, "phase": "queued"}
 
 

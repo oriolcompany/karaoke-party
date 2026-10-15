@@ -1,8 +1,15 @@
+import pytest
+
 from karaoke_party.align import (
+    AlignmentError,
     AsrWord,
+    RESUME_CLIP_PAD,
     _has_sync_anchors,
     _interpolate_missing,
     _normalize,
+    _offset_if_clip_relative,
+    _shift_lines_to_floor,
+    align_from_anchor,
     align_line_words,
     align_tokens_by_phrases,
     align_tokens_globally,
@@ -260,3 +267,224 @@ def test_unmatched_pickup_is_packed_against_first_match():
     assert words[0].end <= words[1].time + 0.02
     assert words[1].time - words[0].time <= 0.35
     assert words[0].time >= 19.9
+
+
+def test_shift_lines_to_floor_keeps_shape() -> None:
+    lines = [
+        LyricLine(
+            time=1.0,
+            text="no em fareu",
+            words=[LyricWord(1.0, 1.3, "no"), LyricWord(1.3, 1.8, "em")],
+        )
+    ]
+    shifted = _shift_lines_to_floor(lines, 5.0)
+    assert shifted[0].words[0].time == pytest.approx(5.0)
+    assert shifted[0].words[1].time - shifted[0].words[0].time == pytest.approx(0.3)
+    assert _shift_lines_to_floor(lines, 0.5) is lines
+
+
+def test_align_from_anchor_keeps_prefix_and_places_tail_after_it(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"not-a-real-wav")
+    prefix = LyricLine(
+        time=1.0,
+        text="Avui cantem",
+        words=[LyricWord(1.0, 1.4, "Avui"), LyricWord(1.4, 2.0, "cantem")],
+    )
+    tail = LyricLine(
+        time=9.0,
+        text="No em fareu",
+        words=[LyricWord(9.0, 9.3, "No"), LyricWord(9.3, 9.6, "em"), LyricWord(9.6, 10.0, "fareu")],
+    )
+    anchor = 2.0
+
+    def fake_extract(path, start):
+        assert path == audio
+        assert start == pytest.approx(anchor - RESUME_CLIP_PAD)
+        return path
+
+    def fake_transcribe(path, **_kwargs):
+        # Just inside the locked phrase, then the real continuation.
+        return [
+            AsrWord("cantem", 0.05, 0.20),
+            AsrWord("No", 0.31, 0.60),
+            AsrWord("em", 0.60, 0.90),
+            AsrWord("fareu", 0.90, 1.40),
+        ]
+
+    def fake_refine(path, lines):
+        assert path == audio
+        return lines
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", fake_extract)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", fake_refine)
+
+    result = align_from_anchor(audio, [prefix, tail], from_line=0, language="ca")
+
+    assert result[0].words[0].time == pytest.approx(1.0)
+    assert result[0].words[1].end == pytest.approx(2.0)
+    assert result[1].text == "No em fareu"
+    assert result[1].words[0].time >= anchor - 0.02
+    assert [word.text for word in result[1].words] == ["No", "em", "fareu"]
+    assert result[1].words[0].time == pytest.approx(anchor)
+
+
+def test_align_from_anchor_rejects_a_missing_tail(tmp_path) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    only = LyricLine(time=1.0, text="Avui", words=[LyricWord(1.0, 1.4, "Avui")])
+    with pytest.raises(AlignmentError):
+        align_from_anchor(audio, [only], from_line=0)
+
+
+def test_align_from_anchor_errors_when_the_tail_is_silent(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    lines = [
+        LyricLine(time=1.0, text="Avui", words=[LyricWord(1.0, 2.0, "Avui")]),
+        LyricLine(time=0.0, text="Després", words=[]),
+    ]
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", lambda *_args, **_kwargs: [])
+    with pytest.raises(AlignmentError):
+        align_from_anchor(audio, lines, from_line=0)
+
+
+def test_clip_offset_is_applied_only_when_times_fit_the_trimmed_file() -> None:
+    relative = [AsrWord("no", 1.0, 1.4)]
+    shifted = _offset_if_clip_relative(relative, clip_start=50.0, clip_duration=10.0)
+    assert shifted[0].start == pytest.approx(51.0)
+
+    already_absolute = [AsrWord("no", 60.0, 61.0)]
+    kept = _offset_if_clip_relative(already_absolute, clip_start=50.0, clip_duration=10.0)
+    assert kept[0].start == pytest.approx(60.0)
+
+
+def test_align_from_anchor_does_not_slide_a_matched_line_when_the_opener_is_missing(
+    tmp_path, monkeypatch
+) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    prefix = LyricLine(time=8.0, text="Avui", words=[LyricWord(8.0, 10.0, "Avui")])
+    tail = [
+        LyricLine(time=0.0, text="qqqq qqqq", words=[]),
+        LyricLine(time=0.0, text="casa meva", words=[]),
+    ]
+
+    def fake_transcribe(_path, **_kwargs):
+        # Relative to the clip, just after the anchor. "qqqq" is not in the audio.
+        return [
+            AsrWord("casa", RESUME_CLIP_PAD + 0.4, RESUME_CLIP_PAD + 0.8),
+            AsrWord("meva", RESUME_CLIP_PAD + 0.8, RESUME_CLIP_PAD + 1.3),
+        ]
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", lambda _path, lines: lines)
+
+    result = align_from_anchor(audio, [prefix, *tail], from_line=0, language="ca")
+    casa = result[2]
+    assert casa.text == "casa meva"
+    assert casa.words[0].time == pytest.approx(10.4, abs=0.15)
+    assert casa.words[0].time < 12.0
+    assert result[1].words[0].time >= 10.0 - 0.05
+    assert result[1].words[-1].end <= casa.words[0].time + 0.05
+
+
+def test_align_from_anchor_rejects_a_match_a_minute_after_the_anchor(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    prefix = LyricLine(time=10.0, text="Avui", words=[LyricWord(10.0, 14.0, "Avui")])
+    tail = LyricLine(time=0.0, text="Plantem les tovalloles", words=[])
+
+    def fake_transcribe(_path, **_kwargs):
+        # The only copy is a later chorus, about a minute after the anchor.
+        return [
+            AsrWord("Plantem", RESUME_CLIP_PAD + 60.0, RESUME_CLIP_PAD + 60.6),
+            AsrWord("les", RESUME_CLIP_PAD + 60.6, RESUME_CLIP_PAD + 60.9),
+            AsrWord("tovalloles", RESUME_CLIP_PAD + 60.9, RESUME_CLIP_PAD + 61.6),
+        ]
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", lambda _path, lines: lines)
+
+    with pytest.raises(AlignmentError):
+        align_from_anchor(audio, [prefix, tail], from_line=0, language="ca")
+
+
+def test_align_from_anchor_follows_a_long_line_across_a_break(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    prefix = LyricLine(time=10.0, text="Avui", words=[LyricWord(10.0, 14.0, "Avui")])
+    tail = LyricLine(time=0.0, text="Aixi doncs si un dia vens i passes", words=[])
+    spoken = ["Aixi", "doncs", "si", "un", "dia", "vens", "i", "passes"]
+
+    def fake_transcribe(_path, **_kwargs):
+        # Forty seconds after the anchor: an instrumental, then the real line.
+        start = RESUME_CLIP_PAD + 40.0
+        words = []
+        for index, text in enumerate(spoken):
+            words.append(AsrWord(text, start + index * 0.4, start + index * 0.4 + 0.35))
+        return words
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", lambda _path, lines: lines)
+
+    result = align_from_anchor(audio, [prefix, tail], from_line=0, language="ca")
+    # clip_start + relative = (14 - pad) + (pad + 40) = 54
+    assert result[1].words[0].time == pytest.approx(54.0, abs=0.2)
+    assert result[1].words[0].time > 14.0 + 18.0
+
+
+def test_align_from_anchor_rejects_a_short_line_a_long_way_after_the_anchor(
+    tmp_path, monkeypatch
+) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    prefix = LyricLine(time=10.0, text="Avui", words=[LyricWord(10.0, 14.0, "Avui")])
+    tail = LyricLine(time=0.0, text="Al mar", words=[])
+
+    def fake_transcribe(_path, **_kwargs):
+        return [
+            AsrWord("Al", RESUME_CLIP_PAD + 40.0, RESUME_CLIP_PAD + 40.3),
+            AsrWord("mar", RESUME_CLIP_PAD + 40.3, RESUME_CLIP_PAD + 40.8),
+        ]
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", lambda _path, lines: lines)
+
+    with pytest.raises(AlignmentError):
+        align_from_anchor(audio, [prefix, tail], from_line=0, language="ca")
+
+
+def test_align_from_anchor_does_not_invent_a_long_unmatched_ending(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "vocals.wav"
+    audio.write_bytes(b"x")
+    prefix = LyricLine(time=8.0, text="Avui", words=[LyricWord(8.0, 10.0, "Avui")])
+    tail = [
+        LyricLine(time=0.0, text="casa meva", words=[]),
+        LyricLine(time=0.0, text="bona nit", words=[]),
+        LyricLine(time=0.0, text="hola amic", words=[]),
+        LyricLine(time=0.0, text="qqqq qqqq", words=[]),
+        LyricLine(time=0.0, text="zzzz zzzz", words=[]),
+        LyricLine(time=0.0, text="wwww wwww", words=[]),
+    ]
+
+    def fake_transcribe(_path, **_kwargs):
+        start = RESUME_CLIP_PAD + 0.4
+        spoken = ["casa", "meva", "bona", "nit", "hola", "amic"]
+        return [
+            AsrWord(text, start + index * 0.4, start + index * 0.4 + 0.35)
+            for index, text in enumerate(spoken)
+        ]
+
+    monkeypatch.setattr("karaoke_party.align._extract_audio_from", lambda _path, _start: audio)
+    monkeypatch.setattr("karaoke_party.align.transcribe_words", fake_transcribe)
+    monkeypatch.setattr("karaoke_party.align.refine_syllable_timings", lambda _path, lines: lines)
+
+    with pytest.raises(AlignmentError):
+        align_from_anchor(audio, [prefix, *tail], from_line=0, language="ca")

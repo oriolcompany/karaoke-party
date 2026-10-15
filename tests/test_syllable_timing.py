@@ -9,7 +9,15 @@ import pytest
 from fastapi import HTTPException
 
 from karaoke_party import app as party_app
-from karaoke_party.app import SaveTimingBody, TimingLineBody, TimingWordBody
+from karaoke_party.app import (
+    ResyncFromBody,
+    ResyncLineBody,
+    ResyncWordBody,
+    RetimeLineBody,
+    SaveTimingBody,
+    TimingLineBody,
+    TimingWordBody,
+)
 from karaoke_party.library import TrackInfo
 from karaoke_party.lyrics import (
     ALIGNED_CACHE_VERSION,
@@ -18,6 +26,7 @@ from karaoke_party.lyrics import (
     LyricWord,
     cache_key,
     load_aligned_cached,
+    load_cached,
     save_aligned_cached,
 )
 from karaoke_party.track_cache import aligned_path
@@ -199,3 +208,133 @@ def test_whisper_payload_without_glue_is_still_split_for_the_client() -> None:
     served = party_app._lines_for_client(lines)
 
     assert len(served[0]["words"]) > 1
+
+
+def _resync_body(from_line: int, lines: list[ResyncLineBody]) -> ResyncFromBody:
+    return ResyncFromBody(track_id=TRACK.id, from_line=from_line, lines=lines)
+
+
+def test_resync_requires_a_following_line(aligned_root: Path) -> None:
+    body = _resync_body(
+        0,
+        [ResyncLineBody(text="Només", words=[ResyncWordBody(time=1.0, end=1.4, text="Només")])],
+    )
+    with pytest.raises(HTTPException) as exc:
+        party_app.start_align_from(body)
+    assert exc.value.status_code == 400
+
+
+def test_resync_requires_the_anchor_to_be_placed(aligned_root: Path) -> None:
+    body = _resync_body(
+        0,
+        [
+            ResyncLineBody(text="Avui", words=[ResyncWordBody(text="Avui")]),
+            ResyncLineBody(text="Després", words=[ResyncWordBody(text="Després")]),
+        ],
+    )
+    with pytest.raises(HTTPException) as exc:
+        party_app.start_align_from(body)
+    assert exc.value.status_code == 400
+
+
+def test_resync_enqueues_from_the_corrected_line(aligned_root: Path, monkeypatch) -> None:
+    party_app._align_jobs.clear()
+    monkeypatch.setattr(party_app, "alignment_available", lambda: True)
+    monkeypatch.setattr(party_app, "separation_available", lambda: True)
+    monkeypatch.setattr(party_app, "whisper_model_status", lambda: {"ready": True, "error": ""})
+    captured: dict = {}
+
+    def fake_enqueue(job_id, track, language, *, from_line=None, lines=None):
+        captured["job_id"] = job_id
+        captured["language"] = language
+        captured["from_line"] = from_line
+        captured["lines"] = lines
+
+    monkeypatch.setattr(party_app, "_enqueue_align_job", fake_enqueue)
+    body = _resync_body(
+        0,
+        [
+            ResyncLineBody(
+                text="Avui",
+                words=[
+                    ResyncWordBody(time=1.0, end=1.4, text="A", glue=True),
+                    ResyncWordBody(time=1.4, end=2.0, text="vui"),
+                ],
+            ),
+            ResyncLineBody(text="Després ve la resta", words=[ResyncWordBody(text="Després")]),
+        ],
+    )
+
+    response = party_app.start_align_from(body)
+
+    assert response["status"] == "queued"
+    assert response["job_id"] == captured["job_id"]
+    assert captured["from_line"] == 0
+    assert captured["language"] == "ca"
+    assert captured["lines"][0].words[0].time == pytest.approx(1.0)
+    assert captured["lines"][0].words[0].glue is True
+    assert captured["lines"][1].text == "Després ve la resta"
+    assert captured["lines"][1].words == []
+
+
+def test_retime_endpoint_keeps_unchanged_syllables() -> None:
+    body = RetimeLineBody(
+        text="casa,",
+        floor=0.0,
+        ceiling=4.0,
+        words=[
+            ResyncWordBody(time=1.0, end=1.4, text="ca", glue=True),
+            ResyncWordBody(time=1.4, end=1.8, text="sa"),
+        ],
+    )
+    payload = party_app.retime_lyric_line(body)
+    assert payload["fit"] == "kept"
+    assert payload["lines"][0]["words"][0]["time"] == pytest.approx(1.0)
+    assert payload["lines"][0]["words"][1]["text"] == "sa,"
+
+
+def test_retime_endpoint_inserts_unplaced_phrases() -> None:
+    body = RetimeLineBody(text="una frase nova\ni una altra")
+    payload = party_app.retime_lyric_line(body)
+    assert payload["fit"] == "unplaced"
+    assert len(payload["lines"]) == 2
+    assert all(word["time"] is None for line in payload["lines"] for word in line["words"])
+
+
+def test_retime_endpoint_rejects_blank_text() -> None:
+    with pytest.raises(HTTPException) as exc:
+        party_app.retime_lyric_line(RetimeLineBody(text="  \n"))
+    assert exc.value.status_code == 400
+
+
+def test_saving_edited_text_updates_lyrics_without_dropping_alignment(aligned_root: Path) -> None:
+    party_app.save_lyrics_timing(
+        _body(
+            [
+                TimingLineBody(
+                    text="Brindar",
+                    words=[_word(4.2, 4.5, "brin", glue=True), _word(4.5, 5.0, "dar")],
+                )
+            ]
+        )
+    )
+    party_app.save_lyrics_timing(
+        _body(
+            [
+                TimingLineBody(
+                    text="Brindar fort",
+                    words=[
+                        _word(4.2, 4.5, "brin", glue=True),
+                        _word(4.5, 5.0, "dar"),
+                        _word(5.0, 5.4, "fort"),
+                    ],
+                )
+            ]
+        )
+    )
+    aligned = load_aligned_cached(aligned_root, TRACK_KEY)
+    assert aligned is not None
+    assert aligned.lines[0].text == "Brindar fort"
+    cached = load_cached(party_app.cache_dir(), TRACK_KEY)
+    assert cached is not None
+    assert "Brindar fort" in cached.plain

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import unicodedata
 from collections.abc import Callable
@@ -185,6 +187,26 @@ _PTR_MERGE_ASR = 4  # one lyric token spans two ASR words ("l'amor" vs "l'" "amo
 _PTR_MERGE_LYRIC = 5  # two lyric tokens share one ASR word ("que et" vs "quet")
 
 _NEG = float("-inf")
+
+
+class AlignmentError(RuntimeError):
+    """The lyric tail could not be aligned from the requested anchor."""
+
+
+# How far before a corrected phrase we re-open the audio, so the next onset
+# is not clipped if the anchor end sits slightly early.
+RESUME_CLIP_PAD = 0.35
+# A short resumed line has to start near the phrase before it. Farther than
+# this, a repeated chorus can steal the line.
+RESUME_MAX_GAP = 18.0
+# A long, distinctive line may cross a longer break (an instrumental between
+# choruses). Still bounded, so a copy a minute later is not the next line.
+RESUME_FAR_GAP = 50.0
+RESUME_FAR_MIN_CHARS = 16
+RESUME_FAR_MIN_SCORE = 0.72
+# Unmatched lines after the last real hit used to be packed into a few seconds
+# and saved. More misses than this abort the resume instead of inventing them.
+RESUME_MAX_TRAILING_MISS = 2
 
 
 @dataclass
@@ -534,6 +556,8 @@ def _locate_phrase(
     j_min: int,
     j_max: int,
     expected_time: float | None,
+    *,
+    min_score: float | None = None,
 ) -> tuple[int, int] | None:
     """Best ASR span [from, to) for a lyric line, or None if nothing is close enough.
 
@@ -547,6 +571,8 @@ def _locate_phrase(
     min_len = max(1, n_tokens - 2)
     max_len = n_tokens + 3
     threshold = _phrase_threshold(lyric_concat)
+    if min_score is not None:
+        threshold = max(threshold, min_score)
     scored: list[tuple[float, float, int, int]] = []
     best_raw = 0.0
 
@@ -882,6 +908,375 @@ def _enforce_monotonic(lines: list[LyricLine]) -> list[LyricLine]:
     return lines
 
 
+def _line_end(line: LyricLine) -> float:
+    if line.words:
+        return max(float(word.end) for word in line.words)
+    return float(line.time)
+
+
+def _extract_audio_from(audio_path: Path, start: float) -> Path:
+    """Write a temporary WAV that begins at ``start`` seconds of ``audio_path``."""
+    handle = tempfile.NamedTemporaryFile(suffix=".wav", prefix="karaoke-align-", delete=False)
+    handle.close()
+    target = Path(handle.name)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(audio_path),
+        "-ss",
+        f"{max(0.0, start):.3f}",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0 or not target.is_file() or target.stat().st_size <= 0:
+        target.unlink(missing_ok=True)
+        detail = (result.stderr or "").strip()[:300] or "no s’ha pogut retallar l’àudio"
+        raise AlignmentError(detail)
+    return target
+
+
+def _wav_duration_seconds(path: Path) -> float | None:
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            if rate <= 0:
+                return None
+            return handle.getnframes() / float(rate)
+    except (wave.Error, EOFError, OSError):
+        return None
+
+
+def _offset_if_clip_relative(
+    words: list[AsrWord],
+    *,
+    clip_start: float,
+    clip_duration: float | None,
+) -> list[AsrWord]:
+    """Add the clip origin when Whisper timed the trimmed file from zero.
+
+    Times that already run past the trimmed file are absolute. Adding the
+    origin again would slide the whole tail by about the anchor.
+    """
+    if clip_start <= 0.05 or not words:
+        return words
+    if clip_duration is not None and max(word.end for word in words) > clip_duration + 1.0:
+        return words
+    return [
+        AsrWord(text=word.text, start=word.start + clip_start, end=word.end + clip_start)
+        for word in words
+    ]
+
+
+def _shift_lines_to_floor(lines: list[LyricLine], floor: float) -> list[LyricLine]:
+    """Move a block forward so it starts at ``floor`` without changing its shape."""
+    if not lines:
+        return lines
+    first = lines[0].words[0].time if lines[0].words else lines[0].time
+    if first >= floor - 0.02:
+        return lines
+    delta = floor - first
+    shifted: list[LyricLine] = []
+    for line in lines:
+        words = [
+            LyricWord(
+                time=word.time + delta,
+                end=word.end + delta,
+                text=word.text,
+                glue=word.glue,
+            )
+            for word in line.words
+        ]
+        shifted.append(
+            LyricLine(
+                time=words[0].time if words else line.time + delta,
+                text=line.text,
+                words=words,
+            )
+        )
+    return shifted
+
+
+def _asr_until(asr_words: list[AsrWord], j_min: int, t1: float) -> int:
+    j_max = j_min
+    for index in range(j_min, len(asr_words)):
+        if asr_words[index].start > t1:
+            break
+        j_max = index + 1
+    return j_max
+
+
+def _resume_line_span(
+    concat: str,
+    n_tokens: int,
+    asr_words: list[AsrWord],
+    asr_norms: list[str],
+    asr_starts: list[float],
+    last_j: int,
+    cursor: float,
+) -> tuple[int, int] | None:
+    """ASR span for one resumed line.
+
+    Short lines only match in the next few seconds, so a later copy of the
+    same chorus cannot take them. A long line may also match across a break
+    when that later span is clearly the same phrase.
+    """
+    j_near = _asr_until(asr_words, last_j, cursor + RESUME_MAX_GAP)
+    if j_near > last_j:
+        located = _locate_phrase(
+            concat, n_tokens, asr_norms, asr_starts, last_j, j_near, cursor
+        )
+        if located is not None and asr_words[located[0]].start <= cursor + RESUME_MAX_GAP:
+            return located
+    if len(concat) < RESUME_FAR_MIN_CHARS:
+        return None
+    j_far = _asr_until(asr_words, last_j, cursor + RESUME_FAR_GAP)
+    if j_far <= last_j:
+        return None
+    located = _locate_phrase(
+        concat,
+        n_tokens,
+        asr_norms,
+        asr_starts,
+        last_j,
+        j_far,
+        cursor,
+        min_score=RESUME_FAR_MIN_SCORE,
+    )
+    if located is None or asr_words[located[0]].start > cursor + RESUME_FAR_GAP:
+        return None
+    return located
+
+
+def _trailing_unmatched(per_line: list[list[LyricWord]]) -> int:
+    count = 0
+    for row in reversed(per_line):
+        if any(word.time >= 0 for word in row):
+            break
+        count += 1
+    return count
+
+
+def align_tokens_after_anchor(
+    lines: list[LyricLine],
+    asr_words: list[AsrWord],
+    *,
+    floor: float,
+) -> list[list[LyricWord]]:
+    """Match each following line from the phrase before it.
+
+    Short lines stay in the next few seconds so a repeated chorus cannot steal
+    them. A long line may cross a break. Lines still unmatched at the end are
+    not given invented times.
+    """
+    line_tokens = [_split_tokens(line.text) for line in lines]
+    result = [_empty_words(tokens) for tokens in line_tokens]
+    if not asr_words:
+        return result
+    asr_norms = [_normalize(word.text) for word in asr_words]
+    asr_starts = [word.start for word in asr_words]
+    last_j = 0
+    while last_j < len(asr_words) and asr_words[last_j].end < floor - 0.05:
+        last_j += 1
+    cursor = floor
+    for index, tokens in enumerate(line_tokens):
+        if not tokens:
+            continue
+        concat = "".join(_normalize(token) for token in tokens)
+        located = _resume_line_span(
+            concat,
+            len(tokens),
+            asr_words,
+            asr_norms,
+            asr_starts,
+            last_j,
+            cursor,
+        )
+        if located is None:
+            continue
+        start, end = located
+        result[index] = _align_tokens_to_asr(tokens, asr_words[start:end])
+        last_j = max(last_j, end)
+        cursor = max(cursor, asr_words[end - 1].end)
+    return result
+
+
+def _next_matched_time(per_line: list[list[LyricWord]], index: int) -> float | None:
+    for row in per_line[index + 1 :]:
+        known = [word.time for word in row if word.time >= 0]
+        if known:
+            return known[0]
+    return None
+
+
+def _assemble_tail_lines(
+    lines: list[LyricLine],
+    per_line: list[list[LyricWord]],
+    *,
+    floor: float,
+) -> list[LyricLine]:
+    """Build tail lines from matches. Unmatched text stays between its neighbours.
+
+    The tail is fed in with ``time == 0``. Estimating a miss from that zero
+    used to sit on the intro, and the old floor-shift then dragged the lines
+    that Whisper had already placed.
+    """
+    assembled: list[LyricLine] = []
+    for index, line in enumerate(lines):
+        words = per_line[index]
+        known = [word for word in words if word.time >= 0]
+        next_time = _next_matched_time(per_line, index)
+        if known:
+            line_start = known[0].time
+            line_end = known[-1].end + 0.35
+            if next_time is not None and len(known) < max(1, len(words) // 3):
+                line_end = max(next_time, line_end)
+            words = _interpolate_missing(words, line_start, line_end)
+            line_time = words[0].time if words else line_start
+        else:
+            prev_end = assembled[-1].words[-1].end if assembled and assembled[-1].words else floor
+            tokens = _split_tokens(line.text)
+            if next_time is not None and next_time > prev_end + 0.12:
+                span_end = next_time
+            else:
+                span_end = prev_end + max(1.6, 0.45 * max(1, len(tokens)))
+            words = estimate_words(prev_end, span_end, line.text)
+            line_time = words[0].time if words else prev_end
+        assembled.append(LyricLine(time=line_time, text=line.text, words=words))
+    return _enforce_monotonic(assembled)
+
+
+def _clamp_tail_to_anchor(lines: list[LyricLine], floor: float) -> list[LyricLine]:
+    """Nudge a tail that barely overlaps the anchor, without sliding a placed line."""
+    if not lines:
+        return lines
+    first = lines[0].words[0].time if lines[0].words else lines[0].time
+    if first >= floor - 0.02:
+        return lines
+    later = [
+        word.time
+        for line in lines
+        for word in line.words
+        if word.time >= floor - 0.02
+    ]
+    if floor - first <= 1.0 and (not later or min(later) - first <= 1.0):
+        return _shift_lines_to_floor(lines, floor)
+    snapped: list[LyricLine] = []
+    for line in lines:
+        words: list[LyricWord] = []
+        for word in line.words:
+            start = word.time
+            end = word.end
+            if start < floor:
+                width = max(0.05, min(0.35, end - start))
+                start = floor
+                end = start + width
+            words.append(
+                LyricWord(
+                    time=start,
+                    end=max(end, start + 0.05),
+                    text=word.text,
+                    glue=word.glue,
+                )
+            )
+        snapped.append(
+            LyricLine(
+                time=words[0].time if words else max(line.time, floor),
+                text=line.text,
+                words=words,
+            )
+        )
+    return _enforce_monotonic(snapped)
+
+
+def align_from_anchor(
+    audio_path: Path,
+    lines: list[LyricLine],
+    *,
+    from_line: int,
+    language: str = "ca",
+    model_size: str | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> list[LyricLine]:
+    """Keep ``lines[:from_line + 1]`` and align every later line from that phrase.
+
+    The anchor is the end of the corrected line. Whisper only hears the audio
+    from just before that point, and each following line may only land in the
+    next few seconds, so a later chorus cannot drag the rest of the song.
+    """
+    if from_line < 0 or from_line >= len(lines) - 1:
+        raise AlignmentError("No hi ha frases després d’aquest punt")
+    prefix = list(lines[: from_line + 1])
+    anchor = _line_end(prefix[-1])
+    if anchor <= 0:
+        raise AlignmentError("La frase de referència no té temps")
+    tail_lines = [
+        LyricLine(time=0.0, text=line.text, words=[])
+        for line in lines[from_line + 1 :]
+        if line.text.strip()
+    ]
+    if not tail_lines:
+        raise AlignmentError("No hi ha lletra després d’aquest punt")
+
+    clip_start = max(0.0, anchor - RESUME_CLIP_PAD)
+    prompt = " ".join(line.text for line in tail_lines).strip()[:240]
+    clip_file: Path | None = None
+    transcribe_path = audio_path
+    try:
+        if clip_start > 0.05:
+            clip_file = _extract_audio_from(audio_path, clip_start)
+            transcribe_path = clip_file
+        asr_words = transcribe_words(
+            transcribe_path,
+            language=language,
+            model_size=model_size,
+            initial_prompt=(prompt or None),
+            on_progress=on_progress,
+        )
+        asr_words = _offset_if_clip_relative(
+            asr_words,
+            clip_start=clip_start,
+            clip_duration=_wav_duration_seconds(transcribe_path) if clip_file is not None else None,
+        )
+        asr_words = [word for word in asr_words if word.end >= anchor - 0.05]
+    finally:
+        if clip_file is not None and clip_file != audio_path:
+            clip_file.unlink(missing_ok=True)
+    if not asr_words:
+        raise AlignmentError("No s’ha sentit la veu a partir d’aquest punt")
+
+    per_line = align_tokens_after_anchor(tail_lines, asr_words, floor=anchor)
+    matched = sum(1 for row in per_line if any(word.time >= 0 for word in row))
+    if matched == 0 or matched * 2 < len(tail_lines):
+        raise AlignmentError("No s’ha pogut seguir la lletra just després d’aquesta frase")
+    earliest = min(word.time for row in per_line for word in row if word.time >= 0)
+    if earliest > anchor + RESUME_FAR_GAP:
+        raise AlignmentError("No s’ha pogut seguir la lletra just després d’aquesta frase")
+    if _trailing_unmatched(per_line) > RESUME_MAX_TRAILING_MISS:
+        raise AlignmentError("No s’ha pogut seguir la lletra just després d’aquesta frase")
+
+    assembled = tighten_phrase_onsets(_assemble_tail_lines(tail_lines, per_line, floor=anchor))
+    assembled = _clamp_tail_to_anchor(assembled, anchor)
+    return prefix + refine_syllable_timings(audio_path, assembled)
+
+
 def align_lyrics(
     audio_path: Path,
     lines: list[LyricLine],
@@ -889,8 +1284,15 @@ def align_lyrics(
     language: str = "ca",
     model_size: str | None = None,
     on_progress: Callable[[float], None] | None = None,
+    clip_start: float = 0.0,
+    not_before: float | None = None,
 ) -> list[LyricLine]:
-    """Align known lyric lines: Whisper locates phrases, MMS times syllables."""
+    """Align known lyric lines: Whisper locates phrases, MMS times syllables.
+
+    ``clip_start`` transcribes only the audio from that second onward (times
+    are shifted back to the full file). ``not_before`` drops recognitions that
+    still belong to the phrase the caller has already locked.
+    """
     if not lines:
         return []
     if not audio_path.is_file():
@@ -899,14 +1301,37 @@ def align_lyrics(
     # Feed as much of the known lyric text as Whisper accepts — this biases
     # Catalan singing away from Spanish lookalikes.
     prompt = " ".join(line.text for line in lines).strip()
-    asr_words = transcribe_words(
-        audio_path,
-        language=language,
-        model_size=model_size,
-        initial_prompt=(prompt[:900] or None),
-        on_progress=on_progress,
-    )
+    transcribe_path = audio_path
+    clip_file: Path | None = None
+    try:
+        if clip_start > 0.05:
+            clip_file = _extract_audio_from(audio_path, clip_start)
+            transcribe_path = clip_file
+        asr_words = transcribe_words(
+            transcribe_path,
+            language=language,
+            model_size=model_size,
+            initial_prompt=(prompt[:900] or None),
+            on_progress=on_progress,
+        )
+        if clip_start > 0.05:
+            asr_words = [
+                AsrWord(
+                    text=word.text,
+                    start=word.start + clip_start,
+                    end=word.end + clip_start,
+                )
+                for word in asr_words
+            ]
+        if not_before is not None:
+            floor = not_before - 0.05
+            asr_words = [word for word in asr_words if word.start >= floor]
+    finally:
+        if clip_file is not None and clip_file != audio_path:
+            clip_file.unlink(missing_ok=True)
     if not asr_words:
+        if not_before is not None:
+            raise AlignmentError("No s’ha sentit la veu a partir d’aquest punt")
         return [
             LyricLine(
                 time=line.time,

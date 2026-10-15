@@ -1,5 +1,12 @@
+import pytest
+
 from karaoke_party.lyrics import LyricLine, LyricWord
-from karaoke_party.syllables import expand_syllable_tokens, syllabify_token
+from karaoke_party.syllables import (
+    expand_syllable_tokens,
+    retime_line_text,
+    syllabify_line,
+    syllabify_token,
+)
 
 
 def test_syllabify_common_catalan_words() -> None:
@@ -127,3 +134,48 @@ def test_refine_prefers_mms_when_enabled(tmp_path, monkeypatch) -> None:
     refined = refine_syllable_timings(wav, lines)
     assert [token.text for token in refined[0].words] == ["brin", "dar"]
     assert abs(refined[0].words[0].end - 0.41) < 0.001
+
+
+def _placed_from(text: str, start: float, step: float) -> list[LyricWord]:
+    words = syllabify_line(text)
+    cursor = start
+    placed: list[LyricWord] = []
+    for word in words:
+        placed.append(LyricWord(time=cursor, end=cursor + step, text=word.text, glue=word.glue))
+        cursor += step
+    return placed
+
+
+def test_retime_keeps_times_when_only_punctuation_changes() -> None:
+    old = _placed_from("casa", 1.0, 0.4)
+    words, fit = retime_line_text("casa,", old, floor=0.2, ceiling=4.0)
+    assert fit == "kept"
+    assert [word.text for word in words] == ["ca", "sa,"]
+    assert words[0].time == pytest.approx(1.0)
+    assert words[1].end == pytest.approx(1.8)
+
+
+def test_retime_refits_only_the_changed_stretch() -> None:
+    old = _placed_from("casa", 1.0, 0.4)
+    words, fit = retime_line_text("caseta", old, floor=0.2, ceiling=4.0)
+    assert fit == "refit"
+    assert words[0].text == "ca"
+    assert words[0].time == pytest.approx(1.0)
+    assert words[0].end == pytest.approx(1.4)
+    assert words[-1].end <= 4.0
+    assert all(words[index].time >= words[index - 1].time for index in range(1, len(words)))
+
+
+def test_retime_of_an_unplaced_line_stays_unplaced() -> None:
+    words, fit = retime_line_text("casa bona", [])
+    assert fit == "unplaced"
+    assert words
+    assert all(word.time < 0 for word in words)
+
+
+def test_retime_full_replacement_stays_in_the_old_window() -> None:
+    old = _placed_from("hola món", 5.0, 0.5)
+    words, fit = retime_line_text("bona nit", old, floor=4.0, ceiling=9.0)
+    assert fit == "refit"
+    assert words[0].time == pytest.approx(5.0)
+    assert words[-1].end <= old[-1].end + 0.05
