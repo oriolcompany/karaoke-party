@@ -11,6 +11,14 @@ import sys
 _BOOTSTRAP_FLAGS = ("--skip-gpu-setup",)
 
 
+def _bootstrap_packages() -> None:
+    if "--skip-deps" in sys.argv or getattr(sys, "frozen", False):
+        return
+    from karaoke_party.deps import ensure_python_packages
+
+    ensure_python_packages()
+
+
 def _bootstrap_gpu() -> None:
     if "--skip-deps" in sys.argv or "--skip-gpu-setup" in sys.argv:
         return
@@ -35,6 +43,7 @@ def _strip_bootstrap_flags() -> None:
 
 
 if __name__ == "__main__":
+    _bootstrap_packages()
     _bootstrap_gpu()
     _strip_bootstrap_flags()
     from karaoke_party.app import main

@@ -14,7 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=91" />
+    <link rel="stylesheet" href="/styles.css?v=96" />
   </head>
   <body class="mode-title">
     <div class="fx" aria-hidden="true">
@@ -22,6 +22,12 @@
       <div class="fx-glow fx-glow-b"></div>
       <div class="fx-scan"></div>
     </div>
+
+    <nav id="appNav" class="app-nav hidden" aria-label="Seccions">
+      <button type="button" class="app-nav-btn is-active" data-app-section="karaoke">Karaoke</button>
+      <button type="button" class="app-nav-btn" data-app-section="catalog">Catàleg</button>
+      <button type="button" class="app-nav-btn" data-app-section="downloads">Descàrregues</button>
+    </nav>
 
     <!-- Landing d’arrencada -->
     <section id="view-landing" class="view view-landing" aria-labelledby="landingBrand">
@@ -74,6 +80,10 @@
           </button>
           <p id="titleStatus" class="title-status" aria-live="polite"></p>
         </form>
+        <div class="title-side-links">
+          <button id="titleCatalogBtn" class="title-side-btn" type="button">Catàleg de música</button>
+          <button id="titleDownloadBtn" class="title-side-btn" type="button">Descarregar de YouTube</button>
+        </div>
       </div>
     </section>
 
@@ -1288,6 +1298,224 @@
     </div>
     -->
 
-    <script src="/app.js?v=145"></script>
+    <section id="view-catalog" class="view view-studio hidden" aria-labelledby="catalogBrand">
+      <header class="studio-hero">
+        <p class="menu-kicker">Biblioteca</p>
+        <h1 id="catalogBrand" class="menu-brand">Catàleg</h1>
+        <p class="menu-tagline">Etiqueta, renombra i corregeix la carpeta de música.</p>
+      </header>
+
+      <p id="catalogFolder" class="studio-folder"></p>
+
+      <div class="studio-tabs" role="tablist" aria-label="Eines del catàleg">
+        <button type="button" class="studio-tab is-active" data-cat-tab="auto" role="tab">Automàtic</button>
+        <button type="button" class="studio-tab" data-cat-tab="edit" role="tab">Edició manual</button>
+      </div>
+
+      <div id="catalogAuto" class="studio-panel">
+        <div class="studio-checks">
+          <label class="studio-check"><input id="catWrite" type="checkbox" /> Escriure etiquetes</label>
+          <label class="studio-check"><input id="catRename" type="checkbox" /> Renombrar fitxers</label>
+          <label class="studio-check"><input id="catMusicBrainz" type="checkbox" checked /> MusicBrainz</label>
+          <label class="studio-check"><input id="catAcoustid" type="checkbox" /> AcoustID (empremta)</label>
+          <label class="studio-check"><input id="catIncomplete" type="checkbox" /> Només incomplets</label>
+          <label class="studio-check"><input id="catIgnoreTags" type="checkbox" /> Ignorar etiquetes actuals</label>
+        </div>
+        <div class="studio-grid-2">
+          <label class="studio-field">
+            <span>Artista (opcional)</span>
+            <input id="catArtist" type="text" spellcheck="false" />
+          </label>
+          <label class="studio-field">
+            <span>Límit de fitxers (0 = tots)</span>
+            <input id="catLimit" type="number" min="0" step="1" value="0" />
+          </label>
+          <label class="studio-field studio-field-wide">
+            <span>Clau AcoustID</span>
+            <input id="catAcoustidKey" type="password" autocomplete="off" spellcheck="false" placeholder="Es desa en aquest ordinador" />
+          </label>
+        </div>
+        <p id="catFpcalc" class="studio-hint"></p>
+        <div class="studio-actions">
+          <button id="catRunBtn" class="title-start-btn" type="button">Passada de prova</button>
+          <button id="catSaveKeyBtn" class="title-browse-btn" type="button">Desar clau</button>
+        </div>
+        <p id="catRunStatus" class="studio-status" aria-live="polite"></p>
+        <div id="catProgress" class="studio-bar" hidden><div id="catProgressFill"></div></div>
+        <ul id="catResults" class="studio-results"></ul>
+      </div>
+
+      <div id="catalogEdit" class="studio-panel" hidden>
+        <div class="cat-toolbar">
+          <input id="catFilter" class="cat-filter" type="search" placeholder="Filtra títol, artista, àlbum…" />
+          <label class="studio-check"><input id="catOnlyIncomplete" type="checkbox" /> Incompletes</label>
+          <button id="catLoadBtn" class="title-browse-btn" type="button">Actualitzar</button>
+        </div>
+        <div class="cat-tools">
+          <div class="cat-tool">
+            <span>Omplir selecció</span>
+            <select id="catFillField">
+              <option value="artist">Artista</option>
+              <option value="album">Àlbum</option>
+              <option value="albumartist">Artista de l’àlbum</option>
+              <option value="date">Any</option>
+              <option value="title">Títol</option>
+            </select>
+            <input id="catFillValue" type="text" placeholder="Valor" />
+            <button id="catFillBtn" class="title-browse-btn" type="button">Aplicar</button>
+          </div>
+          <div class="cat-tool">
+            <span>Pistes</span>
+            <input id="catNumberStart" class="cat-number" type="number" min="1" step="1" value="1" />
+            <button id="catNumberBtn" class="title-browse-btn" type="button">Numerar</button>
+            <button id="catSelectAllBtn" class="title-browse-btn" type="button">Seleccionar visibles</button>
+          </div>
+        </div>
+        <div class="cat-savebar">
+          <label class="studio-check"><input id="catRenameOnSave" type="checkbox" /> Renombrar des de pista + títol</label>
+          <p id="catEditStatus" class="studio-status" aria-live="polite"></p>
+          <button id="catSaveBtn" class="title-start-btn" type="button">Desar canvis</button>
+        </div>
+        <div class="studio-editor">
+          <div class="studio-editor-main">
+            <div class="studio-table-wrap">
+              <table class="studio-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Pista</th>
+                    <th>Títol</th>
+                    <th>Artista</th>
+                    <th>Àlbum</th>
+                    <th>Any</th>
+                    <th>Fitxer</th>
+                  </tr>
+                </thead>
+                <tbody id="catTable"></tbody>
+              </table>
+            </div>
+            <div class="studio-pager">
+              <button id="catPrevPage" class="title-browse-btn" type="button">Anterior</button>
+              <span id="catPageLabel"></span>
+              <button id="catNextPage" class="title-browse-btn" type="button">Següent</button>
+            </div>
+          </div>
+          <aside class="studio-cover">
+            <img id="catCoverImg" alt="" hidden />
+            <p id="catCoverStatus" class="studio-hint">Selecciona una cançó</p>
+            <button id="catCoverFileBtn" class="title-browse-btn" type="button">Canviar…</button>
+            <input id="catCoverFile" type="file" accept="image/*" hidden />
+            <button id="catCoverSearchBtn" class="title-browse-btn" type="button">D’internet</button>
+            <button id="catCoverRemoveBtn" class="title-browse-btn" type="button">Treure</button>
+            <button id="catCoverApplyBtn" class="title-browse-btn" type="button">Copiar a la selecció</button>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-downloads" class="view view-studio hidden" aria-labelledby="downloadBrand">
+      <header class="studio-hero">
+        <p class="menu-kicker">YouTube</p>
+        <h1 id="downloadBrand" class="menu-brand">Descàrregues</h1>
+        <p class="menu-tagline">Àudio i vídeo al teu ordinador, a punt per al karaoke.</p>
+      </header>
+
+      <form id="dlForm" class="studio-panel" autocomplete="off">
+        <label class="studio-field">
+          <span>URL de YouTube</span>
+          <div class="title-path-row">
+            <input id="dlUrl" type="text" inputmode="url" placeholder="Vídeo o llista de reproducció" spellcheck="false" required />
+            <button id="dlClearBtn" class="title-browse-btn" type="button">Neteja</button>
+          </div>
+        </label>
+        <div class="studio-actions">
+          <input id="dlUrlsFile" type="file" accept=".txt,text/plain" hidden />
+          <button id="dlLoadUrlsBtn" class="title-browse-btn" type="button">Carregar .txt d’URLs</button>
+          <p class="studio-hint">Un enllaç per línia. S’afegeixen a la cua.</p>
+        </div>
+        <div class="studio-choice" role="radiogroup" aria-label="Origen">
+          <span>Origen</span>
+          <label class="studio-chip"><input type="radio" name="dlKind" value="auto" checked /> Auto</label>
+          <label class="studio-chip"><input type="radio" name="dlKind" value="single" /> Vídeo</label>
+          <label class="studio-chip"><input type="radio" name="dlKind" value="playlist" /> Llista</label>
+        </div>
+        <div class="studio-choice" role="radiogroup" aria-label="Format">
+          <span>Format</span>
+          <label class="studio-chip"><input type="radio" name="dlMode" value="audio" checked /> Àudio (MP3)</label>
+          <label class="studio-chip"><input type="radio" name="dlMode" value="video" /> Vídeo (MP4)</label>
+          <label class="studio-field studio-inline-field">
+            <span>Qualitat</span>
+            <select id="dlQuality">
+              <option value="best">Millor</option>
+              <option value="192k">192 kbps</option>
+            </select>
+          </label>
+        </div>
+        <div class="studio-choice" role="radiogroup" aria-label="Destinació">
+          <span>Destinació</span>
+          <label class="studio-chip"><input type="radio" name="dlDest" value="library" checked /> Carpeta de karaoke</label>
+          <label class="studio-chip"><input type="radio" name="dlDest" value="downloads" /> Carpeta de descàrregues</label>
+        </div>
+        <p id="dlDestHint" class="studio-hint"></p>
+        <label class="studio-field">
+          <span>Cookies d’inici de sessió</span>
+          <select id="dlCookies">
+            <option value="none">Cap</option>
+            <option value="file">Fitxer cookies.txt</option>
+            <option value="firefox">Firefox</option>
+            <option value="chrome">Chrome</option>
+            <option value="edge">Edge</option>
+            <option value="brave">Brave</option>
+            <option value="opera">Opera</option>
+          </select>
+        </label>
+        <div class="studio-actions">
+          <input id="dlCookiesFile" type="file" accept=".txt,text/plain" hidden />
+          <button id="dlCookiesUploadBtn" class="title-browse-btn" type="button">Pujar cookies.txt</button>
+          <p id="dlCookiesStatus" class="studio-hint"></p>
+        </div>
+        <button id="dlSubmit" class="title-start-btn" type="submit">Descarrega</button>
+        <div id="dlStatus" class="studio-status-card" hidden>
+          <div class="studio-status-top">
+            <span id="dlStatusLabel">En cua…</span>
+            <span id="dlStatusPct"></span>
+          </div>
+          <div class="studio-bar"><div id="dlBarFill"></div></div>
+          <p id="dlStatusDetail" class="studio-hint"></p>
+        </div>
+        <section id="dlQueuePanel" hidden>
+          <div class="studio-actions">
+            <h2 class="studio-subhead">Cua</h2>
+            <button id="dlClearQueueBtn" class="title-browse-btn" type="button">Buidar la cua</button>
+          </div>
+          <ul id="dlQueue" class="studio-results"></ul>
+        </section>
+      </form>
+
+      <section class="studio-panel">
+        <div class="studio-tabs" role="tablist">
+          <button type="button" class="studio-tab is-active" data-dl-tab="files">Fitxers recents</button>
+          <button type="button" class="studio-tab" data-dl-tab="failed">Errors <span id="dlFailedCount" class="studio-count" hidden>0</span></button>
+        </div>
+        <div id="dlTabFiles">
+          <div class="studio-actions">
+            <button id="dlRefreshBtn" class="title-browse-btn" type="button">Actualitzar</button>
+          </div>
+          <ul id="dlFiles" class="studio-results"></ul>
+          <p id="dlEmptyFiles" class="studio-hint">Encara no hi ha descàrregues.</p>
+        </div>
+        <div id="dlTabFailed" hidden>
+          <div class="studio-actions">
+            <button id="dlRefreshFailedBtn" class="title-browse-btn" type="button">Actualitzar</button>
+            <button id="dlClearFailedBtn" class="title-browse-btn" type="button">Esborrar-ho tot</button>
+          </div>
+          <ul id="dlFailed" class="studio-results"></ul>
+          <p id="dlEmptyFailed" class="studio-hint">No hi ha descàrregues fallides.</p>
+        </div>
+      </section>
+    </section>
+
+    <script src="/app.js?v=147"></script>
+    <script src="/studio.js?v=3"></script>
   </body>
 </html>

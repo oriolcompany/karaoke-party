@@ -14,13 +14,15 @@ KaraokeParty.bat
 
 This will:
 
-1. Create `.venv` if needed
-2. Install required dependencies (base + Whisper + stems) and verify `ffmpeg` is on PATH
-3. If an NVIDIA GPU is present, verify PyTorch CUDA + CUDA 12 libs for Whisper and
+1. Install Python 3.11+ with winget if it is not already installed
+2. Create `.venv` if needed
+3. Install whatever is missing (base + Whisper + stems + AcoustID) and, on Windows,
+   download a portable `ffmpeg` into the app cache if it is not on PATH
+4. If an NVIDIA GPU is present, verify PyTorch CUDA + CUDA 12 libs for Whisper and
    install/repair them automatically when needed
-4. Abort with a clear error if anything required is missing
-5. Start the server at http://127.0.0.1:8765
-6. Open the browser
+5. Abort with a clear error only if an install itself fails
+6. Start the server at http://127.0.0.1:8765
+7. Open the browser
 
 Close the console window to stop the app.
 
@@ -34,8 +36,9 @@ pip install -e ".[align]"
 pip install -e ".[stems]"      # or ".[stems-cpu]" without NVIDIA GPU
 ```
 
-`ffmpeg` must also be on PATH. On start, `karaoke-party` checks base packages, Whisper,
-stems, torchaudio (MMS), and ffmpeg, and exits if any are missing (use `--skip-deps` only for development).
+On start, `karaoke-party` installs any missing base packages, Whisper, stems, torchaudio
+(MMS), and (on Windows) a portable ffmpeg, then exits only if that install fails
+(use `--skip-deps` only for development). A system ffmpeg already on PATH is used as-is.
 With an NVIDIA GPU, `KaraokeParty.bat` (and `python -m karaoke_party`) also runs
 `python -m karaoke_party.gpu_setup`, which installs a CUDA PyTorch wheel matching the
 driver and the CUDA 12 libraries Whisper needs when they are missing.
@@ -64,7 +67,8 @@ This installs [`audio-separator`](https://github.com/nomadkaraoke/python-audio-s
 which wraps the UVR model zoo (Demucs, MDX-Net, RoFormer). Model weights download on
 first use. Generated tracks are cached as MP3 inside each song folder
 (`tracks/<key>/instrumental.mp3` and `vocals.mp3`); the vocal stem is reused to make
-Whisper alignment more accurate. **ffmpeg must be on PATH.**
+Whisper alignment more accurate. ffmpeg comes from PATH, or from the portable copy
+Karaoke Party downloads on Windows when it is missing.
 
 | Variable | Default | Notes |
 | --- | --- | --- |

@@ -2,121 +2,51 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+REM A shortcut created from a hidden PowerShell, or PowerShell -WindowStyle Hidden
+REM sharing this console, can leave the server running with no window to close.
+REM Always continue in a new, visible console.
+if /I not "%~1"=="RUN" (
+  start "Karaoke Party" /D "%~dp0." cmd.exe /d /c "call "%~f0" RUN"
+  exit /b 0
+)
+
 title Karaoke Party
-powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\make_shortcut.ps1" -RepoRoot "%~dp0." -Target "%~f0" >nul 2>&1
+REM Own window, minimized: hiding PowerShell in THIS console would hide Karaoke Party too.
+start "Acces directe Karaoke" /min /D "%~dp0." powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\make_shortcut.ps1" -RepoRoot "%~dp0." -Target "%~f0"
 echo.
 echo  Karaoke Party
 echo  =============
 echo.
 
-where py >nul 2>&1
-if %errorlevel%==0 (
-  set "PYTHON=py -3"
-) else (
-  where python >nul 2>&1
-  if errorlevel 1 (
-    echo [ERROR] Cal Python 3.11 o superior instal·lat i al PATH.
-    echo Descarrega'l des de https://www.python.org/downloads/
-    pause
-    exit /b 1
-  )
-  set "PYTHON=python"
+call :resolve_python
+if errorlevel 1 (
+  pause
+  exit /b 1
 )
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [1/5] Creant entorn virtual...
-  %PYTHON% -m venv .venv
+  echo [1/4] Creant entorn virtual...
+  "%PYTHON_EXE%" -m venv .venv
   if errorlevel 1 (
     echo [ERROR] No s'ha pogut crear el venv.
     pause
     exit /b 1
   )
 ) else (
-  echo [1/5] Entorn virtual OK
+  echo [1/4] Entorn virtual OK
 )
 
-call ".venv\Scripts\activate.bat"
+echo [2/4] Instal·lant el que falti ^(Python, Whisper, stems, ffmpeg, Node.js^)...
+echo       La primera vegada pot trigar una estona.
+set "PYTHONPATH=%~dp0src"
+".venv\Scripts\python.exe" -m karaoke_party.deps
 if errorlevel 1 (
-  echo [ERROR] No s'ha pogut activar el venv.
+  echo [ERROR] No s'han pogut instal·lar les dependències.
   pause
   exit /b 1
 )
 
-echo [2/5] Comprovant dependències Python...
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, mutagen, httpx, multipart, yt_dlp" 1>nul 2>nul
-if errorlevel 1 (
-  echo       Instal·lant paquet base...
-  ".venv\Scripts\python.exe" -m pip install -q --upgrade pip
-  ".venv\Scripts\python.exe" -m pip install -q -e .
-  if errorlevel 1 (
-    echo [ERROR] No s'han pogut instal·lar les dependències basiques.
-    pause
-    exit /b 1
-  )
-) else (
-  echo       Paquet base OK
-)
-
-".venv\Scripts\python.exe" -c "import faster_whisper" 1>nul 2>nul
-if errorlevel 1 (
-  echo       Instal·lant Whisper ^(alineacio^)...
-  ".venv\Scripts\python.exe" -m pip install -q -e ".[align]"
-  if errorlevel 1 (
-    echo [ERROR] No s'ha pogut instal·lar Whisper ^(faster-whisper^).
-    pause
-    exit /b 1
-  )
-) else (
-  echo       Whisper OK
-)
-
-".venv\Scripts\python.exe" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('audio_separator') else 1)" 1>nul 2>nul
-if errorlevel 1 (
-  echo       Instal·lant separacio de pistes ^(stems^)...
-  where nvidia-smi >nul 2>&1
-  if errorlevel 1 (
-    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
-  ) else (
-    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems]"
-    if errorlevel 1 (
-      echo       GPU fallida · provant stems-cpu...
-      ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
-    )
-  )
-  if errorlevel 1 (
-    echo [ERROR] No s'ha pogut instal·lar audio-separator.
-    echo         Prova manualment: pip install -e ".[stems]"  o  ".[stems-cpu]"
-    pause
-    exit /b 1
-  )
-) else (
-  echo       Stems OK
-)
-
-".venv\Scripts\python.exe" -c "import torchaudio" 1>nul 2>nul
-if errorlevel 1 (
-  echo       Instal·lant torchaudio ^(MMS / sil·labes^)...
-  where nvidia-smi >nul 2>&1
-  if errorlevel 1 (
-    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
-  ) else (
-    ".venv\Scripts\python.exe" -m pip install -q -e ".[stems]"
-    if errorlevel 1 (
-      ".venv\Scripts\python.exe" -m pip install -q -e ".[stems-cpu]"
-    )
-  )
-  ".venv\Scripts\python.exe" -c "import torchaudio" 1>nul 2>nul
-  if errorlevel 1 (
-    echo [ERROR] No s'ha pogut instal·lar torchaudio.
-    echo         Prova manualment: pip install -e ".[stems]"
-    pause
-    exit /b 1
-  )
-) else (
-  echo       torchaudio / MMS OK
-)
-
-echo [3/5] Comprovant GPU / CUDA...
+echo [3/4] Comprovant GPU / CUDA...
 where nvidia-smi >nul 2>&1
 if errorlevel 1 (
   echo       Sense GPU NVIDIA · Whisper i stems aniran per CPU
@@ -133,19 +63,7 @@ if errorlevel 1 (
   )
 )
 
-echo [4/5] Comprovant ffmpeg...
-where ffmpeg >nul 2>&1
-if errorlevel 1 (
-  echo [ERROR] Cal ffmpeg al PATH per generar pistes instrumental/veu.
-  echo         Descarrega'l des de https://ffmpeg.org/download.html
-  echo         i reinicia la consola despres d'afegir-lo al PATH.
-  pause
-  exit /b 1
-) else (
-  echo       ffmpeg OK
-)
-
-echo [5/5] Arrencant servidor a http://127.0.0.1:8765
+echo [4/4] Arrencant servidor a http://127.0.0.1:8765
 echo         Tanca aquesta finestra per aturar Karaoke Party.
 echo.
 
@@ -159,3 +77,56 @@ if not "%EXITCODE%"=="0" (
 )
 pause
 exit /b %EXITCODE%
+
+
+:resolve_python
+set "PYTHON_EXE="
+where py >nul 2>&1
+if %errorlevel%==0 (
+  py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+  if not errorlevel 1 (
+    for /f "delims=" %%I in ('py -3 -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%I"
+  )
+)
+if not defined PYTHON_EXE (
+  where python >nul 2>&1
+  if not errorlevel 1 (
+    python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+    if not errorlevel 1 (
+      for /f "delims=" %%I in ('python -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%I"
+    )
+  )
+)
+if not defined PYTHON_EXE call :find_installed_python
+if defined PYTHON_EXE exit /b 0
+
+echo Python 3.11 o superior no esta instal·lat.
+echo Instal·lant Python 3.12...
+where winget >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] No s'ha trobat winget per instal·lar Python.
+  echo         Descarrega'l des de https://www.python.org/downloads/
+  echo         i marca "Add python.exe to PATH".
+  exit /b 1
+)
+winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+call :find_installed_python
+if defined PYTHON_EXE exit /b 0
+echo [ERROR] No s'ha pogut instal·lar Python 3.12.
+echo         Descarrega'l des de https://www.python.org/downloads/
+echo         i marca "Add python.exe to PATH".
+exit /b 1
+
+
+:find_installed_python
+set "PYTHON_EXE="
+for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+  "%%D\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+  if not errorlevel 1 set "PYTHON_EXE=%%D\python.exe"
+)
+if defined PYTHON_EXE exit /b 0
+for /d %%D in ("%ProgramFiles%\Python3*") do (
+  "%%D\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+  if not errorlevel 1 set "PYTHON_EXE=%%D\python.exe"
+)
+exit /b 0

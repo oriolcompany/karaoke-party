@@ -101,6 +101,7 @@ from .stems import (
     separation_available,
     vocals_path,
 )
+from .studio import bind_library, router as studio_router
 from .track_cache import CACHE_SCOPES as _CACHE_SCOPES
 from .video import (
     VideoRenderError,
@@ -2761,6 +2762,12 @@ async def _no_store_for_ui(request, call_next):
     response.headers["Referrer-Policy"] = "origin"
     return response
 
+
+bind_library(
+    root_getter=lambda: _music_root,
+    reload_library=lambda root: _reload_library(root, reset_probe=False),
+)
+app.include_router(studio_router)
 
 if WEB_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

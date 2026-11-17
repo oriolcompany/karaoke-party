@@ -588,8 +588,49 @@ function isLandingVisible() {
   return Boolean(viewLanding && !viewLanding.classList.contains("hidden"));
 }
 
+function syncAppNav(section) {
+  const nav = document.getElementById("appNav");
+  const visible = section === "karaoke" || section === "catalog" || section === "downloads";
+  nav?.classList.toggle("hidden", !visible);
+  document.body.classList.toggle("has-app-nav", visible);
+  document.getElementById("view-catalog")?.classList.toggle("hidden", section !== "catalog");
+  document.getElementById("view-downloads")?.classList.toggle("hidden", section !== "downloads");
+  nav?.querySelectorAll("[data-app-section]").forEach((btn) => {
+    const on = btn.dataset.appSection === section;
+    btn.classList.toggle("is-active", on);
+    if (on) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  });
+}
+
+function showStudio(section) {
+  if (exportClock !== null) return;
+  if (stageCapture && !stageCapture.aborted) {
+    abortStageCapture("S’ha cancel·lat la gravació");
+  }
+  clearStageOutro();
+  viewLanding?.classList.add("hidden");
+  viewTitle?.classList.add("hidden");
+  viewMenu.classList.add("hidden");
+  viewStage.classList.add("hidden");
+  document.body.classList.remove("mode-title");
+  document.body.classList.remove("mode-stage");
+  viewStage.classList.remove("is-live");
+  player.pause();
+  stopPreview();
+  teardownYoutubeBackdrop();
+  stopTicker();
+  stopAlignPoll();
+  currentId = null;
+  updatePlayButton();
+  syncAppNav(section);
+  syncAuraEngine();
+  window.karaokeStudio?.open(section);
+}
+
 function showLanding() {
   clearStageOutro();
+  syncAppNav("");
   viewLanding?.classList.remove("hidden");
   viewTitle?.classList.add("hidden");
   viewMenu.classList.add("hidden");
@@ -609,6 +650,7 @@ function showLanding() {
 
 function showTitleScreen() {
   clearStageOutro();
+  syncAppNav("");
   viewLanding?.classList.add("hidden");
   viewTitle?.classList.remove("hidden");
   viewMenu.classList.add("hidden");
@@ -646,6 +688,7 @@ function showMenu() {
   currentId = null;
   updatePlayButton();
   renderSongs(searchEl.value);
+  syncAppNav("karaoke");
   syncAuraEngine();
 }
 
